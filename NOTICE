@@ -1,0 +1,31 @@
+latent-compass
+Copyright 2026 latent-compass contributors
+
+This product includes software developed by the latent-compass contributors.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full license text.
+
+--------------------------------------------------------------------------
+Third-party runtime dependencies
+--------------------------------------------------------------------------
+
+pydantic (>=2,<3)
+  Copyright (c) 2017 to present Pydantic Services Inc. and individual
+  contributors.
+  Licensed under the MIT License.
+  https://github.com/pydantic/pydantic
+
+pydantic depends on annotated-types (MIT), pydantic-core (MIT),
+typing-extensions (PSF-2.0) and typing-inspection (MIT). All of these are
+permissive licenses compatible with Apache-2.0 redistribution. See
+docs/licenses/dependency-audit.md for the audited license inventory and the
+command used to reproduce it.
+
+--------------------------------------------------------------------------
+Scope of this notice
+--------------------------------------------------------------------------
+
+latent-compass is advisory software. It observes and records. It holds no
+execution, mutation, promotion or final-decision authority over any system it
+observes. See docs/authority-boundary.md.
