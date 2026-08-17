@@ -20,19 +20,17 @@ anything.
 evidence requirements are exposed as read-only mappings, so a consumer cannot
 widen the boundary by assignment.
 
-**Evidence that is independently reproduced.** A positive authorisation beyond
-entry into shadow requires a real pre-registration, the raw measurements and a
-verdict. Their versions and seals are checked, then the measurements are scored
-again and the complete expected verdict must match. Promotion additionally
-requires a durable receipt binding the final holdout spend to those exact
-measurements and that verdict.
+**Provenance that fails closed.** Local versions, seals and rescoring can prove
+consistency, not origin. Until a composition root supplies a verifier backed by
+an external trust root, every evidence-bearing advancement is refused
+unconditionally, independently of the evidence-requirement table and before
+any evidence or holdout ledger is inspected.
 
 Anti-goals
 ----------
 This module is not a policy engine, a scheduler, or a gate. It cannot admit
 anything. Its only positive output is a record stating that some *other* actor
-was entitled to make a move, together with the verified evidence that entitled
-them.
+was entitled to make an ungated move, together with the reproduced inputs.
 """
 
 from __future__ import annotations
@@ -41,10 +39,15 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from latent_compass.canonical import seal
-from latent_compass.contracts import AUTHORITY_CONTRACT_VERSION, Identifier, StrictModel
+from latent_compass.contracts import (
+    AUTHORITY_CONTRACT_VERSION,
+    Identifier,
+    StrictModel,
+    check_contract_version,
+)
 from latent_compass.errors import AuthorityRefusal, ContractViolation
 from latent_compass.protocol import (
     HoldoutLedger,
@@ -137,12 +140,16 @@ class EvidenceRequirement(StrictModel):
     final_holdout_verdict: bool = Field(default=False)
     holdout_consumption_receipt: bool = Field(default=False)
     human_acknowledgement: bool = Field(default=False)
+    trusted_external_attestation: bool = Field(default=False)
 
 
 _EVIDENCE_REQUIREMENTS: Final[dict[LifecycleState, EvidenceRequirement]] = {
     LifecycleState.SHADOW: EvidenceRequirement(protocol=True),
     LifecycleState.OFFLINE_VERIFIED: EvidenceRequirement(
-        protocol=True, measurements=True, verdict=True
+        protocol=True,
+        measurements=True,
+        verdict=True,
+        trusted_external_attestation=True,
     ),
     LifecycleState.CANARY_ELIGIBLE: EvidenceRequirement(
         protocol=True,
@@ -151,6 +158,7 @@ _EVIDENCE_REQUIREMENTS: Final[dict[LifecycleState, EvidenceRequirement]] = {
         final_holdout_verdict=True,
         holdout_consumption_receipt=True,
         human_acknowledgement=True,
+        trusted_external_attestation=True,
     ),
     LifecycleState.PROMOTED: EvidenceRequirement(
         protocol=True,
@@ -159,6 +167,7 @@ _EVIDENCE_REQUIREMENTS: Final[dict[LifecycleState, EvidenceRequirement]] = {
         final_holdout_verdict=True,
         holdout_consumption_receipt=True,
         human_acknowledgement=True,
+        trusted_external_attestation=True,
     ),
 }
 
@@ -195,8 +204,9 @@ THREAT_MODEL: Final[tuple[str, ...]] = (
     "refused by extra-field rejection, not ignored.",
     "A caller asks Latent Compass to authorise a legal move: refused "
     "unconditionally, before any table is read, so widening the grant does not help.",
-    "A caller invents self-consistent metrics and the word CONTINUE: refused, because "
-    "the raw measurements are re-scored and the complete verdict must match.",
+    "A caller invents self-consistent metrics and the word CONTINUE: refused before "
+    "the evidence is inspected, because no trusted external attestation of its origin "
+    "exists.",
     "A caller edits a sealed verdict from KILL to CONTINUE: refused, because the "
     "recomputed seal no longer matches the carried one.",
     "The external judge asks for a promotion: refused, because promotion demands "
@@ -222,13 +232,14 @@ class RefusalReason(StrEnum):
     EVIDENCE_FORGED = "evidence_forged"
     EVIDENCE_MISMATCH = "evidence_mismatch"
     EVIDENCE_REJECTS = "evidence_rejects"
+    UNTRUSTED_EVIDENCE = "untrusted_evidence"
 
 
 class TransitionAuthorization(StrictModel):
     """The record produced when some *other* actor was entitled to move.
 
     This object grants nothing. It states that a move was legal, by whom, and
-    on what **verified** evidence. Applying the move is out of scope.
+    on what reproduced evidence. Applying the move is out of scope.
     """
 
     contract_version: str = Field(default=AUTHORITY_CONTRACT_VERSION)
@@ -242,6 +253,15 @@ class TransitionAuthorization(StrictModel):
     protocol_id: Identifier | None = Field(default=None)
     human_acknowledged: bool = Field(default=False)
     authorization_seal: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _requires_current_authority_contract(self) -> TransitionAuthorization:
+        check_contract_version(
+            self.contract_version,
+            frozenset({AUTHORITY_CONTRACT_VERSION}),
+            "transition authorization",
+        )
+        return self
 
 
 def _refuse(message: str, reason: RefusalReason, **detail: object) -> AuthorityRefusal:
@@ -453,10 +473,10 @@ def authorize_transition(
     transition table and the evidence requirements — none of which can rescue
     the refused actor, because that refusal already happened.
 
-    Evidence is verified, not trusted: contract versions and seals are checked,
-    then ``measurements`` are scored again under ``protocol`` and the complete
-    expected verdict must equal ``verdict``. Final holdout transitions also
-    require the matching durable consumption receipt.
+    Targets that depend on measurement evidence are refused before evidence or
+    holdout-ledger access. Local versions, seals and rescoring could establish
+    consistency but not provenance; a future positive path therefore requires a
+    trusted external attestation verifier fixed by the composition root.
     """
     if actor is Actor.LATENT_COMPASS:
         # Unconditional, table-independent, and first. Nothing below can undo it.
@@ -510,6 +530,23 @@ def authorize_transition(
             from_state=from_state.value,
             to_state=to_state.value,
             allowed=sorted(state.value for state in allowed),
+        )
+
+    # No table controls this refusal. Until a composition root with a real
+    # external trust root exists, every evidence-bearing advancement is
+    # unconditionally closed. In particular, mutating _EVIDENCE_REQUIREMENTS
+    # cannot turn local consistency into provenance.
+    if to_state in (
+        LifecycleState.OFFLINE_VERIFIED,
+        LifecycleState.CANARY_ELIGIBLE,
+        LifecycleState.PROMOTED,
+    ):
+        raise _refuse(
+            "caller-supplied evidence has no trusted external attestation",
+            RefusalReason.UNTRUSTED_EVIDENCE,
+            from_state=from_state.value,
+            to_state=to_state.value,
+            missing="trusted_external_attestation",
         )
 
     requirement = EVIDENCE_REQUIREMENTS.get(to_state, EvidenceRequirement())

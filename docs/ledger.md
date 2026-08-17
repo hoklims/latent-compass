@@ -174,13 +174,23 @@ content.
 
 ## Write confinement
 
-`export --out` resolves canonically and must land strictly inside `--root`. A
-traversal, a sibling directory, an external absolute path and a symlinked escape
-are all refused, and an existing file is never silently overwritten. Emitting to
-stdout writes nothing. Files that are written are written atomically —
-temporary file in the target's own directory, flushed and `fsync`ed, then
-published through an atomic no-overwrite hard link. A destination created after
-path validation is preserved rather than replaced.
+`export --out` is planned lexically and must land strictly inside `--root`. The
+writer opens only the local volume root on Windows, or `/` on POSIX, then
+traverses or creates every root and target component relative to held directory
+handles without following symlinks or reparse points. Windows UNC/device paths,
+ADS, trailing dots/spaces, control characters and reserved DOS names are
+refused. An existing file is never silently overwritten and stdout writes
+nothing.
+
+Publication uses a flushed temporary file and an exclusive hard link in the
+already opened target directory. On Windows the temporary handle starts with
+`FILE_DELETE_ON_CLOSE`, so collision and cleanup failures cannot retain its
+payload; closing the handle removes only the temporary link after successful
+publication. POSIX flushes the file and parent directory around `linkat` and
+unlink. POSIX directory descriptors denote objects rather than immutable path
+names: if another actor renames an opened ancestor, publication remains attached
+to that held object and the returned lexical path can be stale. It never follows
+the replacement path or symlink.
 
 ## Typed failure
 

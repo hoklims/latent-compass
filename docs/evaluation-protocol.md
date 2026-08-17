@@ -8,7 +8,13 @@ before any result exists, and then sealed.
 **This module does not train, optimise, tune or compare models, and makes no
 claim about intelligence.** It scores measurements handed to it, against
 thresholds fixed before those measurements existed. The protocol exists so that
-a future claim could be falsified. It has not been run against a real corpus.
+a future claim could be falsified.
+
+Since HOK-188 it is fed by something: `docs/benchmark-protocol.md` describes an
+offline benchmark that produces real `MeasurementSet` documents from four
+pre-registered baselines and hands them here to be scored. That benchmark has
+been run only against the small synthetic corpus committed to this repository,
+so nothing it produces is evidence about a real corpus.
 
 ## What a pre-registration must fix
 
@@ -163,7 +169,7 @@ uv run latent-compass authority transition \
     --actor human_operator --protocol protocol.json \
     --measurements holdout.json --verdict ./run/verdict.json \
     --holdout-ledger ./run/holdout-usage.json --human-ack
-# -> raw measurements are re-scored and the matching usage receipt is required
+# -> refused as untrusted_evidence: rescoring proves consistency, not origin
 ```
 
 `--root` is required whenever the command writes. Both `--holdout-ledger` and
@@ -176,11 +182,17 @@ absolute path is refused, and a refused command writes nothing.
   pre-registered values, not measured optima.
 - Median-over-seeds is deterministic and robust, but has not been compared
   against alternatives on real data.
-- Corpus seals are supplied by the operator. This package does not compute them
-  and cannot verify that a declared seal corresponds to the corpus actually
-  used. Split disjointness is *declared*, not *verified* — nothing here reads
-  the corpora. Binding measurements to a corpus seal makes a *mismatch*
-  detectable; it does not make a *lie* detectable.
+- Corpus seals are supplied by the operator. **This module** does not compute
+  them and cannot verify that a declared seal corresponds to the corpus actually
+  used. Split disjointness is *declared* here, not verified — nothing in this
+  module reads the corpora. Binding measurements to a corpus seal makes a
+  *mismatch* detectable; it does not make a *lie* detectable.
+
+  The HOK-188 benchmark closes this gap **for a benchmark corpus only**: it
+  computes each split's seal from the cases on disk, refuses a shared `case_id`
+  or `episode_id` between two splits, and refuses to run against a corpus whose
+  recomputed seal has moved. That does nothing for a seal an operator types into
+  a protocol file by hand, which remains exactly as unverified as before.
 - The holdout guard is a local file. An operator who deletes or edits it can
   spend the corpus again. That is outside the threat model: this guards against
   a mistake and against a second run, not against the operator. Detecting it

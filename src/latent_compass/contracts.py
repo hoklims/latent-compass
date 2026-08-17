@@ -31,12 +31,16 @@ from latent_compass.errors import ContractViolation, UnsupportedContractVersion
 
 __all__ = [
     "AUTHORITY_CONTRACT_VERSION",
+    "BENCHMARK_CONTRACT_VERSION",
     "EPISODE_CONTRACT_VERSION",
+    "JUDGEABLE_PROJECTION_CONTRACT_VERSION",
     "LEDGER_FORMAT_VERSION",
     "PROTOCOL_CONTRACT_VERSION",
     "STRICT_CONFIG",
     "SUPPORTED_AUTHORITY_VERSIONS",
+    "SUPPORTED_BENCHMARK_VERSIONS",
     "SUPPORTED_EPISODE_VERSIONS",
+    "SUPPORTED_JUDGEABLE_PROJECTION_VERSIONS",
     "SUPPORTED_LEDGER_FORMATS",
     "SUPPORTED_PROTOCOL_VERSIONS",
     "FiniteFloat",
@@ -53,14 +57,23 @@ __all__ = [
 ]
 
 EPISODE_CONTRACT_VERSION: Final = "1.0.0"
+JUDGEABLE_PROJECTION_CONTRACT_VERSION: Final = "1.0.0"
 PROTOCOL_CONTRACT_VERSION: Final = "1.0.0"
-AUTHORITY_CONTRACT_VERSION: Final = "1.0.0"
+AUTHORITY_CONTRACT_VERSION: Final = "2.0.0"
 LEDGER_FORMAT_VERSION: Final = "1.0.0"
 
+#: The HOK-188 offline benchmark contracts — corpus, spec and report. Versioned
+#: on its own axis: the benchmark is a *consumer* of the HOK-181 protocol
+#: contract, so it must be able to move without dragging the pre-registration
+#: contract with it, and vice versa.
+BENCHMARK_CONTRACT_VERSION: Final = "1.0.0"
+
 SUPPORTED_EPISODE_VERSIONS: Final = frozenset({EPISODE_CONTRACT_VERSION})
+SUPPORTED_JUDGEABLE_PROJECTION_VERSIONS: Final = frozenset({JUDGEABLE_PROJECTION_CONTRACT_VERSION})
 SUPPORTED_PROTOCOL_VERSIONS: Final = frozenset({PROTOCOL_CONTRACT_VERSION})
-SUPPORTED_AUTHORITY_VERSIONS: Final = frozenset({AUTHORITY_CONTRACT_VERSION})
+SUPPORTED_AUTHORITY_VERSIONS: Final = frozenset({"1.0.0", AUTHORITY_CONTRACT_VERSION})
 SUPPORTED_LEDGER_FORMATS: Final = frozenset({LEDGER_FORMAT_VERSION})
+SUPPORTED_BENCHMARK_VERSIONS: Final = frozenset({BENCHMARK_CONTRACT_VERSION})
 
 #: Shared configuration for every contract model.
 #:

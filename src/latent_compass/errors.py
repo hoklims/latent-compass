@@ -12,6 +12,8 @@ from __future__ import annotations
 
 __all__ = [
     "AuthorityRefusal",
+    "BenchmarkViolation",
+    "BudgetExceeded",
     "ContractViolation",
     "DuplicateEpisode",
     "EpisodeValidationError",
@@ -19,6 +21,7 @@ __all__ = [
     "IntegrityError",
     "LatentCompassError",
     "LedgerError",
+    "PairwiseCaptureViolation",
     "ProtocolViolation",
     "ProvenanceMismatch",
     "StoreAlreadyExists",
@@ -76,6 +79,34 @@ class ProtocolViolation(ContractViolation):
     """A pre-registered evaluation protocol rule was broken."""
 
     code = "protocol_violation"
+
+
+class BenchmarkViolation(ContractViolation):
+    """An offline benchmark rule was broken.
+
+    Distinct from :class:`ProtocolViolation` so a caller can tell "the
+    pre-registration was violated" from "the benchmark harness was violated".
+    The benchmark consumes a pre-registration; it is not one.
+    """
+
+    code = "benchmark_violation"
+
+
+class PairwiseCaptureViolation(ContractViolation):
+    """A pre-action judgeable projection is incomplete or contaminated."""
+
+    code = "pairwise_capture_violation"
+
+
+class BudgetExceeded(BenchmarkViolation):
+    """A baseline asked for more work than the common grant allows.
+
+    Raised on the *first* operation past the cap, not counted up and reported
+    afterwards: a baseline that has already inspected a forbidden candidate has
+    already had the unfair look, whatever the harness does with the tally next.
+    """
+
+    code = "budget_exceeded"
 
 
 class AuthorityRefusal(LatentCompassError):

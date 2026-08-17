@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import os
+import shutil
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -16,10 +19,14 @@ from conftest import (
     STORE_ID,
     episode_payload,
     measurement_payload,
+    pairwise_projection_payload,
     protocol_payload,
     write_json,
 )
 from latent_compass.cli import EXIT_INTEGRITY, EXIT_OK, EXIT_REFUSED, EXIT_STORE, main
+from latent_compass.confined_io import write_new_file
+from latent_compass.errors import ContractViolation
+from latent_compass.pairwise_capture import load_judgeable_projection
 from latent_compass.protocol import Verdict
 
 
@@ -123,6 +130,337 @@ def test_the_full_shadow_flow_succeeds(initialised: Path, tmp_path: Path) -> Non
     document = json.loads(out_file.read_text(encoding="utf-8"))
     assert document["export_seal"] == exported["export_seal"]
     assert document["records"][0]["episode_id"] == "ep-00000001"
+
+
+def test_pairwise_capture_publishes_one_canonical_pre_action_sidecar(tmp_path: Path) -> None:
+    root = tmp_path / "capture-root"
+    root.mkdir()
+    source = write_json(tmp_path / "projection.json", pairwise_projection_payload())
+    destination = root / "captures" / "decision-0001.json"
+
+    code, out, err = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(root),
+        "--out",
+        str(destination),
+    )
+
+    assert code == EXIT_OK
+    assert err is None
+    assert out["captured_to"] == str(destination.resolve())
+    assert out["decision_point_id"] == "decision-0001"
+    assert out["candidate_count"] == 2
+    document = json.loads(destination.read_text(encoding="utf-8"))
+    assert document == load_judgeable_projection(pairwise_projection_payload()).canonical_payload()
+    assert out["projection_seal"].startswith("sha256:")
+    assert destination.read_bytes().endswith(b"\n")
+
+    second_root = tmp_path / "second-capture-root"
+    second_root.mkdir()
+    second_destination = second_root / "same-decision.json"
+    second = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(second_root),
+        "--out",
+        str(second_destination),
+    )
+    assert second[0] == EXIT_OK
+    assert second[1]["projection_seal"] == out["projection_seal"]
+    assert second_destination.read_bytes() == destination.read_bytes()
+
+
+def test_pairwise_capture_refuses_contamination_without_writing(tmp_path: Path) -> None:
+    root = tmp_path / "capture-root"
+    root.mkdir()
+    payload = pairwise_projection_payload()
+    payload["selected_direction_id"] = "direction-alpha"
+    source = write_json(tmp_path / "contaminated.json", payload)
+    destination = root / "captures" / "decision-0001.json"
+
+    code, _, err = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(root),
+        "--out",
+        str(destination),
+    )
+
+    assert code == EXIT_REFUSED
+    assert err["error"] == "pairwise_capture_violation"
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+def test_pairwise_capture_refuses_overwrite_and_escape(tmp_path: Path) -> None:
+    root = tmp_path / "capture-root"
+    root.mkdir()
+    source = write_json(tmp_path / "projection.json", pairwise_projection_payload())
+    destination = root / "decision-0001.json"
+    destination.write_text("sentinel", encoding="utf-8")
+
+    overwrite = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(root),
+        "--out",
+        str(destination),
+    )
+    assert overwrite[0] == EXIT_REFUSED
+    assert "refusing to overwrite" in overwrite[2]["message"]
+    assert destination.read_text(encoding="utf-8") == "sentinel"
+
+    outside = tmp_path / "outside.json"
+    escape = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(root),
+        "--out",
+        str(outside),
+    )
+    assert escape[0] == EXIT_REFUSED
+    assert not outside.exists()
+
+
+def test_pairwise_capture_refuses_parent_symlink_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.cli as cli
+
+    root = tmp_path / "capture-root"
+    parent = root / "captures"
+    parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = write_json(tmp_path / "projection.json", pairwise_projection_payload())
+    destination = parent / "decision-0001.json"
+    original_read_json = cli._read_json  # noqa: SLF001
+
+    def swap_parent_before_read(path: Path) -> object:
+        shutil.rmtree(parent)
+        parent.symlink_to(outside, target_is_directory=True)
+        return original_read_json(path)
+
+    monkeypatch.setattr(cli, "_read_json", swap_parent_before_read)
+    code, _, err = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(root),
+        "--out",
+        str(destination),
+    )
+
+    assert code == EXIT_REFUSED
+    assert err["error"] == "contract_violation"
+    assert not (outside / destination.name).exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows parent handles pin namespace entries")
+def test_confined_writer_blocks_parent_swap_while_handle_is_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    parent = root / "nested"
+    parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original = confined_io._open_or_create_directory_windows  # noqa: SLF001
+    swap_was_blocked = False
+
+    def open_then_try_swap(parent_handle: int, name: str, path: Path, *, what: str) -> int:
+        nonlocal swap_was_blocked
+        handle = original(parent_handle, name, path, what=what)
+        try:
+            path.rename(outside / "stolen")
+        except OSError:
+            swap_was_blocked = True
+        return handle
+
+    monkeypatch.setattr(confined_io, "_open_or_create_directory_windows", open_then_try_swap)
+    destination = parent / "result.json"
+    write_new_file(root, destination, b'{"ok":true}\n', what="test destination")
+
+    assert swap_was_blocked
+    assert destination.read_bytes() == b'{"ok":true}\n'
+    assert not (outside / "stolen" / destination.name).exists()
+
+
+def test_confined_writer_refuses_root_ancestor_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    authority_parent = tmp_path / "authority"
+    root = authority_parent / "root"
+    root.mkdir(parents=True)
+    moved_authority = tmp_path / "moved-authority"
+    outside = tmp_path / "outside"
+    (outside / "root").mkdir(parents=True)
+    destination = root / "result.json"
+    backend_name = "_write_windows" if os.name == "nt" else "_write_posix"
+    original_backend = getattr(confined_io, backend_name)
+
+    def swap_ancestor_before_open(
+        backend_root: Path, relative: Path, data: bytes, *, what: str
+    ) -> None:
+        authority_parent.rename(moved_authority)
+        authority_parent.symlink_to(outside, target_is_directory=True)
+        original_backend(backend_root, relative, data, what=what)
+
+    monkeypatch.setattr(confined_io, backend_name, swap_ancestor_before_open)
+    with pytest.raises(ContractViolation):
+        write_new_file(root, destination, b"must stay confined", what="test destination")
+
+    assert not (outside / "root" / destination.name).exists()
+
+
+def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    destination = root / "result.json"
+    try:
+        destination.symlink_to(tmp_path / "missing.json")
+    except OSError as exc:
+        pytest.skip(f"symbolic links unavailable: {exc}")
+
+    with pytest.raises(ContractViolation, match="refusing to overwrite"):
+        write_new_file(root, destination, b"attacker controlled", what="test destination")
+    assert not (tmp_path / "missing.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path grammar")
+@pytest.mark.parametrize(
+    ("component", "reason"),
+    [
+        ("CON", "reserved_dos_name"),
+        ("con.txt", "reserved_dos_name"),
+        ("PRN.json", "reserved_dos_name"),
+        ("COM9", "reserved_dos_name"),
+        ("LPT1.log", "reserved_dos_name"),
+        ("COM¹", "reserved_dos_name"),
+        ("LPT³.txt", "reserved_dos_name"),
+        ("result.json:payload", "invalid_or_stream_character"),
+        ("trailing.", "trailing_dot_or_space"),
+        ("trailing ", "trailing_dot_or_space"),
+        ("control\x01name", "control_character"),
+    ],
+)
+def test_confined_writer_refuses_ambiguous_windows_components(
+    tmp_path: Path, component: str, reason: str
+) -> None:
+    root = tmp_path / "root"
+    destination = root / component
+
+    with pytest.raises(ContractViolation) as refusal:
+        write_new_file(root, destination, b"must not exist", what="test destination")
+
+    assert isinstance(refusal.value.detail, dict)
+    assert refusal.value.detail["reason"] == reason
+    assert not root.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reserved device names")
+@pytest.mark.parametrize("reserved_name", ["CON", "COM¹", "LPT³.txt"])
+def test_pairwise_capture_refuses_reserved_name_as_a_typed_contract_violation(
+    tmp_path: Path, reserved_name: str
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    source = write_json(tmp_path / "projection.json", pairwise_projection_payload())
+
+    code, _, error = run(
+        "pairwise",
+        "capture",
+        "--projection",
+        str(source),
+        "--root",
+        str(root),
+        "--out",
+        str(root / reserved_name),
+    )
+
+    assert code == EXIT_REFUSED
+    assert error["error"] == "contract_violation"
+    assert error["detail"]["reason"] == "reserved_dos_name"
+    assert list(root.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows local-volume policy")
+@pytest.mark.parametrize(
+    "root",
+    [Path(r"\\server\share\root"), Path(r"\\?\C:\latent-compass-root")],
+)
+def test_confined_writer_refuses_unc_and_device_namespaces(root: Path) -> None:
+    with pytest.raises(ContractViolation) as refusal:
+        write_new_file(root, root / "result.json", b"must not exist", what="test destination")
+
+    assert isinstance(refusal.value.detail, dict)
+    assert refusal.value.detail["reason"] == "unc_or_device_namespace"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows delete-on-close cleanup")
+def test_confined_writer_cleanup_failure_cannot_leave_payload_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    destination = root / "winner.json"
+    destination.write_bytes(b"winner")
+
+    def cleanup_denied(_handle: int) -> None:
+        raise PermissionError("simulated cleanup refusal")
+
+    monkeypatch.setattr(confined_io, "_dispose_windows_file", cleanup_denied)
+    with pytest.raises(ContractViolation) as refusal:
+        write_new_file(root, destination, b"losing payload", what="test destination")
+
+    assert destination.read_bytes() == b"winner"
+    assert not list(root.glob(".lc-*.tmp"))
+    assert any("FILE_DELETE_ON_CLOSE remains active" in note for note in refusal.value.__notes__)
+
+
+def test_confined_writer_preserves_one_concurrent_winner(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    destination = root / "winner.json"
+    payloads = [f'{{"winner":{index}}}\n'.encode() for index in range(8)]
+
+    def publish(payload: bytes) -> bool:
+        try:
+            write_new_file(root, destination, payload, what="test destination")
+        except ContractViolation:
+            return False
+        return True
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(payloads)) as pool:
+        outcomes = list(pool.map(publish, payloads))
+
+    assert outcomes.count(True) == 1
+    assert destination.read_bytes() in payloads
+    assert not list(root.glob(".lc-*.tmp"))
 
 
 def test_a_duplicate_append_is_refused(initialised: Path, tmp_path: Path) -> None:
@@ -260,6 +598,27 @@ def test_protocol_validate_and_verdict(tmp_path: Path) -> None:
     assert code == EXIT_OK
     assert out["verdict"]["decision"] == "CONTINUE"
 
+    write_root = tmp_path / "new-protocol-root"
+    destination = write_root / "nested" / "verdict.json"
+    code, written, _ = run(
+        "protocol",
+        "verdict",
+        "--protocol",
+        str(protocol_file),
+        "--measurements",
+        str(measurements),
+        "--root",
+        str(write_root),
+        "--out",
+        str(destination),
+    )
+    assert code == EXIT_OK
+    expected = (
+        json.dumps(written["verdict"], indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        + b"\n"
+    )
+    assert destination.read_bytes() == expected
+
 
 def test_a_holdout_verdict_without_a_ledger_is_refused(tmp_path: Path) -> None:
     write_root = tmp_path / "protocol-root"
@@ -394,7 +753,7 @@ def test_the_cli_refuses_an_invented_seal_as_evidence(tmp_path: Path) -> None:
         "--from-state",
         "CANARY_ELIGIBLE",
         "--to-state",
-        "PROMOTED",
+        "REJECTED",
         "--actor",
         "human_operator",
         "--protocol",
@@ -505,6 +864,71 @@ def test_there_is_no_command_that_executes_or_promotes() -> None:
         "governance",
         "protocol",
         "authority",
+        "benchmark",
+        "pairwise",
     }
     for forbidden in ("run", "execute", "apply", "promote", "deploy", "sync", "push", "fetch"):
         assert forbidden not in commands
+
+
+def test_the_only_run_verb_acts_on_a_corpus_and_not_on_a_system() -> None:
+    """``benchmark run`` executes baselines over recorded cases, nothing else.
+
+    It is the one imperative verb on the whole surface, so it is worth stating
+    what it can reach: four file paths and a corpus directory. There is no
+    target, no host, no endpoint and no holdout ledger among its options.
+    """
+    from latent_compass.cli import build_parser
+
+    parser = build_parser()
+    groups = [
+        action
+        for action in parser._actions  # noqa: SLF001 - argparse exposes no public reader
+        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    benchmark = groups[0].choices["benchmark"]
+    benchmark_groups = [
+        action
+        for action in benchmark._actions  # noqa: SLF001
+        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    run_parser = benchmark_groups[0].choices["run"]
+    options = {
+        option
+        for action in run_parser._actions  # noqa: SLF001
+        for option in action.option_strings
+    }
+    assert options == {
+        "-h",
+        "--help",
+        "--spec",
+        "--protocol",
+        "--manifest",
+        "--corpus-dir",
+        "--root",
+        "--out",
+    }
+
+
+def test_pairwise_capture_has_only_local_pre_action_file_inputs() -> None:
+    from latent_compass.cli import build_parser
+
+    parser = build_parser()
+    groups = [
+        action
+        for action in parser._actions  # noqa: SLF001
+        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    pairwise = groups[0].choices["pairwise"]
+    pairwise_groups = [
+        action
+        for action in pairwise._actions  # noqa: SLF001
+        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    capture = pairwise_groups[0].choices["capture"]
+    options = {
+        option
+        for action in capture._actions  # noqa: SLF001
+        for option in action.option_strings
+    }
+    assert options == {"-h", "--help", "--projection", "--root", "--out"}

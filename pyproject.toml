@@ -51,6 +51,10 @@ include = [
   "/src",
   "/tests",
   "/docs",
+  # The demonstration corpus travels with the sdist so `benchmark run` is
+  # reproducible from the source distribution alone, and so the generator's
+  # byte-identity test has something to compare against.
+  "/corpus",
   "/README.md",
   "/LICENSE",
   "/NOTICE",

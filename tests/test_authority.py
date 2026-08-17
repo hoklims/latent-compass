@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from conftest import reseal
+from latent_compass import authority as authority_module
 from latent_compass import vocabulary
 from latent_compass.authority import (
     ABSTENTION_UNCERTAINTY_THRESHOLD,
@@ -25,14 +26,17 @@ from latent_compass.authority import (
     AdvisoryKind,
     Capability,
     ContinueKill,
+    EvidenceRequirement,
     LifecycleState,
     RefusalReason,
+    TransitionAuthorization,
     authority_boundary_seal,
     authority_boundary_snapshot,
     authorize_transition,
     may_issue_direction,
 )
-from latent_compass.errors import AuthorityRefusal, ContractViolation
+from latent_compass.contracts import AUTHORITY_CONTRACT_VERSION, SUPPORTED_AUTHORITY_VERSIONS
+from latent_compass.errors import AuthorityRefusal, ContractViolation, UnsupportedContractVersion
 from latent_compass.protocol import (
     HoldoutLedger,
     HoldoutPurpose,
@@ -86,10 +90,100 @@ def test_latent_compass_holds_exactly_three_capabilities() -> None:
     assert CAPABILITIES[Actor.LATENT_COMPASS] & FORBIDDEN_FOR_LATENT_COMPASS == frozenset()
 
 
+def test_fail_closed_authority_is_a_new_major_contract_with_legacy_advisory_reading() -> None:
+    assert AUTHORITY_CONTRACT_VERSION == "2.0.0"
+    assert frozenset({"1.0.0", "2.0.0"}) == SUPPORTED_AUTHORITY_VERSIONS
+
+
 def test_promotion_is_a_human_capability_only() -> None:
     holders = {actor for actor, granted in CAPABILITIES.items() if Capability.PROMOTE in granted}
     assert holders == {Actor.HUMAN_OPERATOR}
     assert EXTRA_CAPABILITY[LifecycleState.PROMOTED] is Capability.PROMOTE
+
+
+def test_structurally_valid_evidence_is_not_trusted_without_external_attestation(
+    protocol: Preregistration,
+    validation_measurements: MeasurementSet,
+    validation_verdict: Verdict,
+) -> None:
+    """Self-consistent caller-supplied evidence cannot establish its own origin."""
+    with pytest.raises(AuthorityRefusal) as refusal:
+        authorize_transition(
+            from_state=LifecycleState.SHADOW,
+            to_state=LifecycleState.OFFLINE_VERIFIED,
+            actor=Actor.EXTERNAL_JUDGE,
+            protocol=protocol,
+            measurements=validation_measurements,
+            verdict=validation_verdict,
+        )
+    detail = refusal.value.detail
+    assert isinstance(detail, dict)
+    assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
+    assert detail["missing"] == "trusted_external_attestation"
+
+
+def test_widening_the_evidence_table_does_not_disable_the_attestation_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: Preregistration,
+    validation_measurements: MeasurementSet,
+    validation_verdict: Verdict,
+) -> None:
+    monkeypatch.setitem(
+        authority_module._EVIDENCE_REQUIREMENTS,  # noqa: SLF001 - compromised table
+        LifecycleState.OFFLINE_VERIFIED,
+        EvidenceRequirement(protocol=True, measurements=True, verdict=True),
+    )
+
+    with pytest.raises(AuthorityRefusal) as refusal:
+        authorize_transition(
+            from_state=LifecycleState.SHADOW,
+            to_state=LifecycleState.OFFLINE_VERIFIED,
+            actor=Actor.EXTERNAL_JUDGE,
+            protocol=protocol,
+            measurements=validation_measurements,
+            verdict=validation_verdict,
+        )
+    detail = refusal.value.detail
+    assert isinstance(detail, dict)
+    assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
+
+
+def test_fail_closed_refusal_happens_before_any_holdout_ledger_access(
+    monkeypatch: pytest.MonkeyPatch,
+    protocol: Preregistration,
+    holdout_measurements: MeasurementSet,
+    holdout_ledger: HoldoutLedger,
+    holdout_verdict: Verdict,
+) -> None:
+    def unexpected_access(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a doomed transition accessed the holdout ledger")
+
+    monkeypatch.setattr(HoldoutLedger, "require_consumption", unexpected_access)
+    with pytest.raises(AuthorityRefusal) as refusal:
+        authorize_transition(
+            from_state=LifecycleState.CANARY_ELIGIBLE,
+            to_state=LifecycleState.PROMOTED,
+            actor=Actor.HUMAN_OPERATOR,
+            protocol=protocol,
+            measurements=holdout_measurements,
+            verdict=holdout_verdict,
+            holdout_ledger=holdout_ledger,
+            human_acknowledged=True,
+        )
+    detail = refusal.value.detail
+    assert isinstance(detail, dict)
+    assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
+
+
+def test_transition_authorization_rejects_an_unsupported_contract_version() -> None:
+    with pytest.raises(UnsupportedContractVersion):
+        TransitionAuthorization(
+            contract_version="9.0.0",
+            from_state=LifecycleState.DEFINE,
+            to_state=LifecycleState.SHADOW,
+            actor=Actor.HUMAN_OPERATOR,
+            authorization_seal="sha256:" + "0" * 64,
+        )
 
 
 @pytest.mark.parametrize(
@@ -106,7 +200,7 @@ def test_the_enforcement_tables_are_not_mutable_by_consumers(table: Any) -> None
 
 
 @pytest.mark.parametrize(("from_state", "to_state"), FORWARD_EDGES)
-def test_latent_compass_is_refused_the_very_moves_a_human_is_granted(
+def test_latent_compass_is_refused_and_evidence_moves_fail_closed_without_attestation(
     from_state: LifecycleState,
     to_state: LifecycleState,
     protocol: Preregistration,
@@ -114,19 +208,29 @@ def test_latent_compass_is_refused_the_very_moves_a_human_is_granted(
     holdout_ledger: HoldoutLedger,
     holdout_verdict: Verdict,
 ) -> None:
-    """The refusal is about the actor, not about the move.
-
-    A blanket "always refuse" implementation fails the first assertion, because
-    every move exercised here is a legal edge that a human operator, with
-    complete verified evidence, is granted.
-    """
+    """Self-authorisation and missing provenance remain distinct refusals."""
     supplied = evidence_for(
         to_state, protocol, holdout_measurements, holdout_ledger, holdout_verdict
     )
-    granted = authorize_transition(
-        from_state=from_state, to_state=to_state, actor=Actor.HUMAN_OPERATOR, **supplied
-    )
-    assert granted.to_state is to_state
+    if to_state is LifecycleState.SHADOW:
+        granted = authorize_transition(
+            from_state=from_state,
+            to_state=to_state,
+            actor=Actor.HUMAN_OPERATOR,
+            **supplied,
+        )
+        assert granted.to_state is to_state
+    else:
+        with pytest.raises(AuthorityRefusal) as refusal:
+            authorize_transition(
+                from_state=from_state,
+                to_state=to_state,
+                actor=Actor.HUMAN_OPERATOR,
+                **supplied,
+            )
+        detail = refusal.value.detail
+        assert isinstance(detail, dict)
+        assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
 
     with pytest.raises(AuthorityRefusal) as refusal:
         authorize_transition(
@@ -184,9 +288,10 @@ def test_the_actor_by_transition_matrix_is_exact(
     supplied = evidence_for(
         to_state, protocol, holdout_measurements, holdout_ledger, holdout_verdict
     )
-    may_pass = actor is Actor.HUMAN_OPERATOR or (
-        actor is Actor.EXTERNAL_JUDGE and to_state is not LifecycleState.PROMOTED
-    )
+    may_pass = to_state is LifecycleState.SHADOW and actor in {
+        Actor.HUMAN_OPERATOR,
+        Actor.EXTERNAL_JUDGE,
+    }
     if may_pass:
         granted = authorize_transition(
             from_state=from_state, to_state=to_state, actor=actor, **supplied
@@ -201,7 +306,12 @@ def test_the_actor_by_transition_matrix_is_exact(
     expected = {
         Actor.LATENT_COMPASS: RefusalReason.SELF_AUTHORISATION.value,
         Actor.OBSERVED_AGENT: RefusalReason.ACTOR_LACKS_CAPABILITY.value,
-        Actor.EXTERNAL_JUDGE: RefusalReason.ACTOR_LACKS_CAPABILITY.value,
+        Actor.EXTERNAL_JUDGE: (
+            RefusalReason.ACTOR_LACKS_CAPABILITY.value
+            if to_state is LifecycleState.PROMOTED
+            else RefusalReason.UNTRUSTED_EVIDENCE.value
+        ),
+        Actor.HUMAN_OPERATOR: RefusalReason.UNTRUSTED_EVIDENCE.value,
     }[actor]
     assert detail["reason"] == expected
 
@@ -236,49 +346,37 @@ def test_the_external_judge_may_advance_but_never_promote(
 # -- verified evidence ------------------------------------------------------
 
 
-def test_a_promotion_needs_a_real_protocol_and_a_real_verdict(
+def test_a_promotion_refuses_before_inspecting_unattested_evidence(
     protocol: Preregistration,
     holdout_measurements: MeasurementSet,
     holdout_ledger: HoldoutLedger,
     holdout_verdict: Verdict,
 ) -> None:
-    for missing, supplied in (
-        (
-            "protocol",
-            {
-                "measurements": holdout_measurements,
-                "verdict": holdout_verdict,
-                "holdout_ledger": holdout_ledger,
-                "human_acknowledged": True,
-            },
-        ),
-        (
-            "verdict",
-            {
-                "protocol": protocol,
-                "measurements": holdout_measurements,
-                "holdout_ledger": holdout_ledger,
-                "human_acknowledged": True,
-            },
-        ),
-        (
-            "measurements",
-            {
-                "protocol": protocol,
-                "verdict": holdout_verdict,
-                "holdout_ledger": holdout_ledger,
-                "human_acknowledged": True,
-            },
-        ),
-        (
-            "human_acknowledgement",
-            {
-                "protocol": protocol,
-                "measurements": holdout_measurements,
-                "verdict": holdout_verdict,
-                "holdout_ledger": holdout_ledger,
-            },
-        ),
+    for supplied in (
+        {
+            "measurements": holdout_measurements,
+            "verdict": holdout_verdict,
+            "holdout_ledger": holdout_ledger,
+            "human_acknowledged": True,
+        },
+        {
+            "protocol": protocol,
+            "measurements": holdout_measurements,
+            "holdout_ledger": holdout_ledger,
+            "human_acknowledged": True,
+        },
+        {
+            "protocol": protocol,
+            "verdict": holdout_verdict,
+            "holdout_ledger": holdout_ledger,
+            "human_acknowledged": True,
+        },
+        {
+            "protocol": protocol,
+            "measurements": holdout_measurements,
+            "verdict": holdout_verdict,
+            "holdout_ledger": holdout_ledger,
+        },
     ):
         with pytest.raises(AuthorityRefusal) as refusal:
             authorize_transition(
@@ -289,8 +387,8 @@ def test_a_promotion_needs_a_real_protocol_and_a_real_verdict(
             )
         detail = refusal.value.detail
         assert isinstance(detail, dict)
-        assert detail["reason"] == RefusalReason.MISSING_EVIDENCE.value
-        assert detail["missing"] == missing
+        assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
+        assert detail["missing"] == "trusted_external_attestation"
 
 
 def test_a_verdict_edited_after_sealing_is_refused(
@@ -306,7 +404,7 @@ def test_a_verdict_edited_after_sealing_is_refused(
     with pytest.raises(AuthorityRefusal) as refusal:
         authorize_transition(
             from_state=LifecycleState.CANARY_ELIGIBLE,
-            to_state=LifecycleState.PROMOTED,
+            to_state=LifecycleState.REJECTED,
             actor=Actor.HUMAN_OPERATOR,
             protocol=protocol,
             measurements=failing_holdout_measurements,
@@ -328,7 +426,7 @@ def test_an_invented_verdict_is_refused(
     with pytest.raises(AuthorityRefusal) as refusal:
         authorize_transition(
             from_state=LifecycleState.CANARY_ELIGIBLE,
-            to_state=LifecycleState.PROMOTED,
+            to_state=LifecycleState.REJECTED,
             actor=Actor.HUMAN_OPERATOR,
             protocol=protocol,
             measurements=holdout_measurements,
@@ -360,7 +458,7 @@ def test_a_correctly_sealed_verdict_from_elsewhere_is_refused(
     with pytest.raises(AuthorityRefusal) as refusal:
         authorize_transition(
             from_state=LifecycleState.CANARY_ELIGIBLE,
-            to_state=LifecycleState.PROMOTED,
+            to_state=LifecycleState.REJECTED,
             actor=Actor.HUMAN_OPERATOR,
             protocol=protocol,
             measurements=holdout_measurements,
@@ -381,15 +479,18 @@ def test_promotion_requires_a_final_holdout_verdict(
     assert validation_verdict.decision is ContinueKill.CONTINUE
     assert validation_verdict.split is Split.VALIDATION
 
-    offline = authorize_transition(
-        from_state=LifecycleState.SHADOW,
-        to_state=LifecycleState.OFFLINE_VERIFIED,
-        actor=Actor.HUMAN_OPERATOR,
-        protocol=protocol,
-        measurements=validation_measurements,
-        verdict=validation_verdict,
-    )
-    assert offline.to_state is LifecycleState.OFFLINE_VERIFIED
+    with pytest.raises(AuthorityRefusal) as offline_refusal:
+        authorize_transition(
+            from_state=LifecycleState.SHADOW,
+            to_state=LifecycleState.OFFLINE_VERIFIED,
+            actor=Actor.HUMAN_OPERATOR,
+            protocol=protocol,
+            measurements=validation_measurements,
+            verdict=validation_verdict,
+        )
+    offline_detail = offline_refusal.value.detail
+    assert isinstance(offline_detail, dict)
+    assert offline_detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
 
     with pytest.raises(AuthorityRefusal) as refusal:
         authorize_transition(
@@ -403,7 +504,8 @@ def test_promotion_requires_a_final_holdout_verdict(
         )
     detail = refusal.value.detail
     assert isinstance(detail, dict)
-    assert detail["missing"] == "final_holdout_verdict"
+    assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
+    assert detail["missing"] == "trusted_external_attestation"
 
 
 def test_a_kill_verdict_admits_only_rejection(
@@ -423,7 +525,7 @@ def test_a_kill_verdict_admits_only_rejection(
         )
     detail = refusal.value.detail
     assert isinstance(detail, dict)
-    assert detail["reason"] == RefusalReason.EVIDENCE_REJECTS.value
+    assert detail["reason"] == RefusalReason.UNTRUSTED_EVIDENCE.value
 
     allowed = authorize_transition(
         from_state=LifecycleState.CANARY_ELIGIBLE,
@@ -436,28 +538,21 @@ def test_a_kill_verdict_admits_only_rejection(
     assert allowed.to_state is LifecycleState.REJECTED
 
 
-def test_the_authorisation_records_the_verified_evidence(
+def test_the_authorisation_records_the_verified_shadow_protocol(
     protocol: Preregistration,
-    holdout_measurements: MeasurementSet,
-    holdout_ledger: HoldoutLedger,
-    holdout_verdict: Verdict,
 ) -> None:
     granted = authorize_transition(
-        from_state=LifecycleState.CANARY_ELIGIBLE,
-        to_state=LifecycleState.PROMOTED,
+        from_state=LifecycleState.DEFINE,
+        to_state=LifecycleState.SHADOW,
         actor=Actor.HUMAN_OPERATOR,
         protocol=protocol,
-        measurements=holdout_measurements,
-        verdict=holdout_verdict,
-        holdout_ledger=holdout_ledger,
-        human_acknowledged=True,
     )
     assert granted.protocol_seal == protocol.protocol_seal()
-    assert granted.verdict_seal == holdout_verdict.verdict_seal
-    assert granted.measurement_set_seal == holdout_measurements.measurement_seal()
-    assert granted.corpus_seal == protocol.holdout_corpus_seal()
+    assert granted.verdict_seal is None
+    assert granted.measurement_set_seal is None
+    assert granted.corpus_seal is None
     assert granted.protocol_id == protocol.protocol_id
-    assert granted.human_acknowledged is True
+    assert granted.human_acknowledged is False
 
 
 # -- the transition table ---------------------------------------------------
@@ -624,6 +719,11 @@ def test_boundary_snapshot_is_stable_and_reflects_the_grant() -> None:
     assert first["unconditional_refusals"] == ["latent_compass"]
     assert transitions["REJECTED"] == []
     assert first["extra_capability_per_target"] == {"PROMOTED": "promote"}
+    requirements = cast(dict[str, dict[str, object]], first["evidence_requirements"])
+    assert requirements["SHADOW"]["trusted_external_attestation"] is False
+    assert requirements["OFFLINE_VERIFIED"]["trusted_external_attestation"] is True
+    assert requirements["CANARY_ELIGIBLE"]["trusted_external_attestation"] is True
+    assert requirements["PROMOTED"]["trusted_external_attestation"] is True
 
 
 def test_widening_the_grant_would_change_the_boundary_seal(

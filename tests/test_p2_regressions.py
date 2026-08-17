@@ -140,7 +140,7 @@ def test_a_nested_advisory_from_the_future_is_refused() -> None:
         "contract": "authority",
         "version": "9.0.0",
         "reason": "future",
-        "supported": ["1.0.0"],
+        "supported": ["1.0.0", "2.0.0"],
     }
 
 

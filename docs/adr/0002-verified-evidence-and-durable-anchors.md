@@ -1,6 +1,6 @@
 # ADR 0002 — Verified evidence, durable anchors, and a corpus-keyed holdout
 
-- **Status**: accepted
+- **Status**: accepted, amended by ADR 0003
 - **Date**: 2026-08-14
 - **Supersedes**: nothing. Amends the contracts introduced in ADR 0001.
 - **Scope**: HOK-184, HOK-185, HOK-186, HOK-187, HOK-189

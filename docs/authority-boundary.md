@@ -1,6 +1,6 @@
 # Authority boundary (HOK-184)
 
-Contract version `1.0.0`. The authoritative statement is the code in
+Contract version `2.0.0`; advisory payloads at `1.0.0` remain readable. The authoritative statement is the code in
 `src/latent_compass/authority.py` and `src/latent_compass/vocabulary.py`; this
 document explains it. Where the two disagree, the code is what runs, and the
 disagreement is a bug in this file.
@@ -50,9 +50,10 @@ merely "this actor lacks the capability" authorises in that test and fails it.
 Reaching `PROMOTED` requires `Capability.PROMOTE` **in addition to**
 `authorize_transition`. Only `human_operator` holds it.
 
-`external_judge` holds `authorize_transition`, so it can advance a candidate
-through the lifecycle. It can never promote one — the refusal names
-`required_capability: promote`.
+`external_judge` holds `authorize_transition`, so it can enter `SHADOW`. The
+built-in path cannot advance any actor farther without a trusted external
+attestation. Even after such a verifier exists, the judge can never promote:
+that still requires `promote`.
 
 ## Inputs and outputs
 
@@ -102,52 +103,44 @@ state can reach `REJECTED` with **no evidence at all**: refusing is never gated.
 
 ### Evidence per target state
 
-| Target | Protocol | Raw measurements + verdict | Holdout receipt | Human ack | Extra capability |
-| --- | :-: | :-: | :-: | :-: | :-: |
-| `SHADOW` | ✓ | — | — | — | — |
-| `OFFLINE_VERIFIED` | ✓ | ✓ | — | — | — |
-| `CANARY_ELIGIBLE` | ✓ | ✓ | ✓ | ✓ | — |
-| `PROMOTED` | ✓ | ✓ | ✓ | ✓ | `promote` |
-| `REJECTED` | — | — | — | — | — |
+| Target | Protocol | Raw measurements + verdict | Holdout receipt | Human ack | External attestation | Extra capability |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: |
+| `SHADOW` | ✓ | — | — | — | — | — |
+| `OFFLINE_VERIFIED` | ✓ | ✓ | — | — | ✓ | — |
+| `CANARY_ELIGIBLE` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+| `PROMOTED` | ✓ | ✓ | ✓ | ✓ | ✓ | `promote` |
+| `REJECTED` | — | — | — | — | — | — |
 
-### Evidence is verified, not trusted
+### Provenance fails closed before evidence access
 
-`authorize_transition` takes the **artefacts**, not claims about them:
+This call is deliberately refused:
 
 ```python
 authorize_transition(
     from_state=LifecycleState.CANARY_ELIGIBLE,
     to_state=LifecycleState.PROMOTED,
     actor=Actor.HUMAN_OPERATOR,
-    protocol=preregistration,  # a real Preregistration
-    measurements=measurements,  # the complete raw MeasurementSet
-    verdict=verdict,  # a real, sealed Verdict
-    holdout_ledger=usage,  # the matching durable consumption receipt
+    protocol=preregistration,
+    measurements=measurements,
+    verdict=verdict,
+    holdout_ledger=usage,
     human_acknowledged=True,
 )
 ```
 
-and then, in order:
+After actor capabilities and the transition edge are checked,
+`OFFLINE_VERIFIED`, `CANARY_ELIGIBLE` and `PROMOTED` refuse immediately as
+`untrusted_evidence`. The refusal is literal and table-independent: mutating the
+private evidence-requirement table cannot disable it. No protocol,
+measurement, verdict or holdout ledger is inspected, and a refused call creates
+no ledger lock.
 
-1. **recomputes the verdict's seal** from the verdict's own contents. A verdict
-   edited after sealing — `KILL` rewritten to `CONTINUE` — no longer reproduces
-   its seal. Refused as `evidence_forged`.
-2. **recomputes the protocol's seal** and matches the verdict against it, plus
-   the epoch and the split's pre-registered corpus seal. A verdict that is
-   internally consistent but belongs to a different protocol, epoch or corpus is
-   refused as `evidence_mismatch`.
-3. **re-scores the raw measurements** under the validated protocol and compares
-   the complete expected verdict with the supplied one. A caller can recompute
-   a hash over invented metrics, but cannot make them reproduce from different
-   raw evidence.
-4. requires `decision == CONTINUE`; a `KILL` admits no target but `REJECTED`.
-5. for `CANARY_ELIGIBLE` and `PROMOTED`, requires the verdict to be a
-   `FINAL_VERDICT` on the `HOLDOUT` split. A genuine `CONTINUE` on validation is
-   enough for `OFFLINE_VERIFIED` and not enough for promotion.
-6. requires the durable holdout receipt to bind this protocol, epoch,
-   measurement-set seal and verdict seal exactly.
-
-There is no parameter left through which a caller can assert a conclusion.
+Hashes and rescoring cannot establish where measurements came from. A future
+positive path must be rooted outside the request payload, bind every evidence
+seal and keep the verifier fixed at the composition root rather than accepting
+one per call. The existing structural and semantic verification code remains
+useful for supplied evidence on ungated rejection paths and for that future
+attested composition root; it is not presented as provenance.
 
 ### Named refusals
 
@@ -159,7 +152,8 @@ These shortcuts are refused for **every** actor, including a human operator:
 
 Every refusal carries a machine-readable reason: `self_authorisation`,
 `actor_lacks_capability`, `illegal_transition`, `terminal_state`,
-`missing_evidence`, `evidence_forged`, `evidence_mismatch`, `evidence_rejects`.
+`missing_evidence`, `evidence_forged`, `evidence_mismatch`, `evidence_rejects`,
+`untrusted_evidence`.
 
 ## Continue / kill and rollback
 
@@ -189,7 +183,8 @@ than rolling forward.
 | Episode carries an action or authority field | Unknown fields rejected, not ignored | Defended, tested |
 | Caller asks Latent Compass to authorise a legal move | Refused unconditionally, before any table is read | Defended, tested |
 | Capability table widened by a consumer | Public tables are read-only views; and the refusal does not consult them | Defended, tested |
-| Caller invents self-consistent metrics and the word `CONTINUE` | Raw measurements are re-scored; the complete expected verdict must match | Defended, tested |
+| Caller invents self-consistent metrics and the word `CONTINUE` | Rescoring checks consistency; absence of external attestation then refuses the transition | Defended fail-closed, tested |
+| Benchmark marker removed and values reconstructed as protocol evidence | Evidence-bearing transitions require external attestation unavailable to the report | Defended fail-closed, tested |
 | Sealed verdict edited from `KILL` to `CONTINUE` | Recomputed seal no longer matches the carried one | Defended, tested |
 | External judge asks for a promotion | Promotion demands `promote`, which only a human holds | Defended, tested |
 | A validation `CONTINUE` used to promote | Promotion demands a final verdict on the holdout | Defended, tested |
@@ -213,11 +208,11 @@ consumes the advisory. Recording is the whole effect.
 `DIRECTION` cannot be constructed; an `ESCALATE` advisory is recorded with no
 `direction_id`. A human decides.
 
-**Positive — a promotion with real evidence.** A protocol is pre-registered and
-sealed. Holdout measurements are scored once, producing a sealed `CONTINUE`
-final verdict. A human operator presents both, acknowledges, and
-`CANARY_ELIGIBLE → PROMOTED` is authorised. The authorisation records the
-protocol seal, the verdict seal and the corpus seal.
+**Fail-closed — a promotion with internally valid evidence.** A protocol is
+pre-registered and sealed. Holdout measurements reproduce a sealed `CONTINUE`
+final verdict and have a matching consumption receipt. A human presents all of
+it and acknowledges. The transition is still refused as `untrusted_evidence`:
+none of those local hashes proves measurement origin.
 
 **Hostile — self-promotion.** A caller requests `CANARY_ELIGIBLE → PROMOTED` as
 `latent_compass` with complete, genuine evidence. Refused with

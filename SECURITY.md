@@ -91,5 +91,6 @@ These are documented properties, not vulnerabilities.
   and `GOVERNANCE.md`.
 - Confinement: every durable write resolves canonically and must land strictly
   inside a root named on the command line.
-- Verified evidence: no authorisation rests on a string the caller supplied;
-  seals are recomputed from the artefacts they belong to.
+- Evidence provenance: local seals and rescoring can prove consistency rather
+  than origin. Evidence-based lifecycle transitions therefore refuse before
+  evidence or ledger access without external attestation.

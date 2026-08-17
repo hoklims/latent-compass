@@ -25,10 +25,20 @@ REQUIRED_FILES = (
     "docs/authority-boundary.md",
     "docs/episode-contract.md",
     "docs/evaluation-protocol.md",
+    "docs/benchmark-protocol.md",
+    "docs/pairwise-supervision.md",
+    "docs/judgeable-projection.md",
+    "docs/independent-labeler.md",
+    "docs/pairwise-corpus-readiness.md",
     "docs/ledger.md",
     "docs/adr/0001-minimal-durable-stack.md",
     "docs/adr/0002-verified-evidence-and-durable-anchors.md",
+    "docs/adr/0003-evidence-provenance-fails-closed.md",
+    "docs/adr/0004-independent-pairwise-supervision.md",
+    "docs/adr/0005-judgeable-pre-action-sidecar.md",
+    "docs/adr/0006-keyless-independent-pairwise-labeler.md",
     "docs/licenses/dependency-audit.md",
+    "corpus/synthetic-v1/PROVENANCE.md",
 )
 
 
@@ -85,6 +95,12 @@ def test_the_readme_separates_demonstrated_experimental_and_projected() -> None:
     for heading in ("### Demonstrated", "### Experimental", "### Projected"):
         assert heading in readme
     assert "no such claim is made" in prose("README.md")
+
+
+def test_benchmark_docs_do_not_claim_a_seal_proves_registration_time() -> None:
+    protocol = prose("docs/benchmark-protocol.md")
+    assert "does not prove when the plan was registered" in protocol
+    assert "external durable anchor" in protocol
 
 
 def test_the_readme_documents_install_and_validation() -> None:
@@ -187,12 +203,22 @@ def test_no_private_host_path_leaks_into_the_repository() -> None:
 
 @pytest.mark.parametrize(
     "relative",
-    ["README.md", "docs/authority-boundary.md", "GOVERNANCE.md", "SECURITY.md"],
+    [
+        "README.md",
+        "docs/authority-boundary.md",
+        "GOVERNANCE.md",
+        "SECURITY.md",
+        "docs/benchmark-protocol.md",
+    ],
 )
 def test_no_document_claims_an_emission_this_foundation_does_not_perform(
     relative: str,
 ) -> None:
-    """HOK-182 does not exist; nothing may describe this as if it did."""
+    """HOK-182 does not exist; nothing may describe this as if it did.
+
+    HOK-188 runs baseline policies *offline*, over recorded cases. That is not
+    an emission, and no document may blur the two.
+    """
     text = prose(relative)
     for claim in (
         "probabilistic, vectorised",
@@ -208,7 +234,100 @@ def test_the_readme_describes_this_foundation_as_a_validator_and_recorder() -> N
     readme = prose("README.md")
     assert "validates and records" in readme
     assert "hok-182" in readme
-    assert "does not compute anything about a decision" in readme
+    assert "emits no operational advisory" in readme
+
+
+def test_the_benchmark_documents_separate_a_working_pipeline_from_a_result() -> None:
+    """HOK-188 runs. Nothing it produced on synthetic data is evidence of value."""
+    benchmark = prose("docs/benchmark-protocol.md")
+    assert "small and synthetic" in benchmark
+    assert "trains nothing" in benchmark
+    assert "emits no operational advisory" in benchmark
+    assert "known limits" in benchmark
+
+    provenance = prose("corpus/synthetic-v1/PROVENANCE.md")
+    assert "is not evidence about anything" in provenance
+    assert "apache-2.0" in provenance
+
+    readme = prose("README.md")
+    assert "offline" in readme
+    assert "never reach a live agent" in readme
+
+
+def test_no_document_presents_the_benchmark_as_an_authorisation() -> None:
+    """A SELECTION verdict on VALIDATION is not a final verdict."""
+    benchmark = prose("docs/benchmark-protocol.md")
+    assert "is not an authorisation" in benchmark
+    assert "hok-190" in benchmark
+
+
+def test_pairwise_supervision_separates_labels_calibration_and_authority() -> None:
+    contract = prose("docs/pairwise-supervision.md")
+    adr = prose("docs/adr/0004-independent-pairwise-supervision.md")
+
+    for claim in (
+        "a judge preference is not an observed outcome",
+        "uncalibrated preference score",
+        "calibration must compare predictions with events",
+        "holdout remains a one-shot final gate",
+        "creates no authority",
+    ):
+        assert claim in contract
+
+    assert "zero eligible explicit pairwise judgments" in contract
+    assert "discovery_required" in contract
+    assert "no universal row-count threshold" in adr
+    assert "no ranker implementation" in adr
+
+
+def test_pairwise_corpus_readiness_refuses_invented_supervision() -> None:
+    readiness = prose("docs/pairwise-corpus-readiness.md")
+
+    for claim in (
+        "decision**: `refused`",
+        "lexical order is a tie-break, not a preference",
+        "copies the logging policy and its selection bias",
+        "invents counterfactual outcomes",
+        "cannot satisfy this gate or unblock hok-190",
+        "sample-size analysis is not reached today",
+    ):
+        assert claim in readiness
+
+
+def test_judgeable_projection_docs_preserve_the_capture_and_proof_boundaries() -> None:
+    contract = prose("docs/judgeable-projection.md")
+    adr = prose("docs/adr/0005-judgeable-pre-action-sidecar.md")
+
+    for claim in (
+        "capture contract, not a label",
+        "remains `unjudgeable`",
+        "performs no corpus or holdout i/o",
+        "do not prove when capture occurred",
+        "does not provision or call a labeler",
+        "pairwise capture",
+        "does not prove that the producer invoked it before acting",
+    ):
+        assert claim in contract
+
+    assert "historical episodes remain `unjudgeable`" in adr
+    assert "no migration may invent one" in adr
+
+
+def test_independent_labeler_docs_pin_proof_without_claiming_useful_supervision() -> None:
+    contract = prose("docs/independent-labeler.md")
+    adr = prose("docs/adr/0006-keyless-independent-pairwise-labeler.md")
+
+    for claim in (
+        "accepted workflow sha: fd4e9c50947403a638817404fc6c596add1b0cf3",
+        "verification pins the certificate's workflow sha extension",
+        "label result: `abstain`",
+        "cannot retroactively prove that a source projection predates a real action",
+        "does not establish that the project owner is independent from themself",
+    ):
+        assert claim in contract or claim in prose("docs/judgeable-projection.md")
+
+    assert "never emits a left or right winner" in adr
+    assert "pairwise training labels do not constitute an authority attestation" in adr
 
 
 def test_the_package_metadata_makes_no_emission_claim() -> None:
