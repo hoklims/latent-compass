@@ -19,6 +19,3 @@ __pycache__/
 /store/
 /snapshot.json
 /holdout-usage.json
-
-# The sealed holdout is provisioned locally and must never enter source control.
-/corpus/synthetic-v1/holdout.json

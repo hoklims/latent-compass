@@ -81,4 +81,3 @@ authorized by this ADR.
   Estimation* (2007), <https://doi.org/10.1198/016214506000001437>
 - Guo et al., *On Calibration of Modern Neural Networks* (2017),
   <https://proceedings.mlr.press/v70/guo17a.html>
-
