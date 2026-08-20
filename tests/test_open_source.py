@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from latent_compass.canonical import seal
+
 REPO = Path(__file__).resolve().parents[1]
 
 REQUIRED_FILES = (
@@ -339,6 +341,42 @@ def test_independent_labeler_docs_pin_proof_without_claiming_useful_supervision(
         )
     )
     assert decision["evidence_links"]["labeler_workflow_sha"] == accepted.group(1)
+
+
+def test_terminal_decision_is_immutable_and_the_later_replay_is_reconciled() -> None:
+    decision = json.loads(
+        (REPO / "evidence/decisions/latent-compass-kill-discovery-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    reconciliation = json.loads(
+        (
+            REPO
+            / "evidence/decisions/latent-compass-kill-discovery-v1-reconciliation-2026-08-20.json"
+        ).read_text(encoding="utf-8")
+    )
+    historical_report = json.loads(
+        (REPO / "evidence/hok188-run/report.json").read_text(encoding="utf-8")
+    )
+    corrected_report = json.loads(
+        (REPO / "evidence/hok188-run-v1.1.0/report.json").read_text(encoding="utf-8")
+    )
+
+    decision_seal = decision.pop("decision_seal")
+    reconciliation_seal = reconciliation.pop("reconciliation_seal")
+    assert (
+        decision_seal == "sha256:f36ad614b89c43fa2eab733fb9a995ca50de933d92929cb00a8a4e29392a8cb4"
+    )
+    assert decision_seal == seal("project.discovery-decision.v1", decision)
+    assert reconciliation["reconciled_at"] > decision["decided_at"]
+    assert reconciliation["historical_decision_seal"] == decision_seal
+    assert (
+        reconciliation["historical_evidence"]["report_seal"] == (historical_report["report_seal"])
+    )
+    assert reconciliation["corrected_evidence"]["report_seal"] == corrected_report["report_seal"]
+    assert reconciliation_seal == seal(
+        "project.discovery-decision-reconciliation.v1", reconciliation
+    )
 
 
 def test_the_package_metadata_makes_no_emission_claim() -> None:

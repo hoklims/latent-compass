@@ -1,0 +1,20 @@
+{
+  "baseline_registry_seal": "sha256:eca4b9c509e7295218bf784447e3e69ae914a2c7ca34b7a70eae864f9c6d8b73",
+  "benchmark_id": "lc-hok188-b1",
+  "contract_version": "1.1.0",
+  "corpus_id": "lc-synthetic-bench",
+  "corpus_version": "v1.0.0",
+  "epoch": "LC-HOK188-E1",
+  "holdout_corpus_seal": "sha256:8d6f764b2f7c0a1d7beb3a4db1ea9107e5661b32cfc2e2a1d6104ce24390a418",
+  "holdout_executed": false,
+  "plan_seal": "sha256:00d3ad7d8b72f00d604eb0a3568ee2ea4fcce4b1a06c7046371ba3594547dde5",
+  "protocol_id": "lc-hok188-p1",
+  "protocol_seal": "sha256:2957a32acb75cb368d079840a69c3473839d9c831f4fbbb36edb394c912a5e21",
+  "scope": "FINAL_HOLDOUT_PLAN_ONLY",
+  "selected_algorithm_version": "1.0.0",
+  "selected_baseline_id": "least-uncertainty",
+  "selection_mode": "EXTERNAL_EXPLICIT",
+  "spec_seal": "sha256:95a7001c6860cfd658421485c2f04fc2cc2bd6dd248d104cce704592c516f73d",
+  "validation_corpus_seal": "sha256:bb1c7dc271d390d932ca8e6304e0a2beb2d07d3669bb273d790dbcf511e70bd9",
+  "validation_report_seal": "sha256:b111df065c5f7836addbddf8b2e99c5abef37d0e7b0e2f6c8df181926ada2ce4"
+}

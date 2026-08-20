@@ -6,9 +6,16 @@ authorize a lifecycle transition.
 
 ## HOK-188 validation replay
 
-`hok188-run/report.json` is the canonical report produced by the four frozen
-baselines on `VALIDATION`. `hok188-run/holdout-plan.json` binds the selected
-baseline and validation report while recording that no holdout was executed.
+`hok188-run/report.json` and `hok188-run/holdout-plan.json` preserve the exact
+benchmark 1.0.0 evidence available to the terminal decision on 2026-08-17. They
+remain immutable historical evidence, including the subsequently identified
+`TAIL` defect.
+
+`hok188-run-v1.1.0/report.json` is the corrected replay produced by the same four
+frozen baselines on `VALIDATION`. Its companion holdout plan binds the selected
+baseline and corrected validation report while recording that no holdout was
+executed. Benchmark 1.1.0 preserves cost units by using importance weights as
+empirical probability mass rather than multiplying them into observed costs.
 
 Reproduce the report and verification with the commands in
 [`docs/benchmark-protocol.md`](../docs/benchmark-protocol.md#the-command-line).
@@ -42,9 +49,21 @@ failure: no ranker was trained, so the decision makes no performance claim.
 Its domain-separated seal is:
 
 ```text
-sha256:a85103f85a3e8659cb893693df2084630ca949bac0a66cc30227240572b152fe
+sha256:f36ad614b89c43fa2eab733fb9a995ca50de933d92929cb00a8a4e29392a8cb4
 ```
 
 The corresponding HOK-194 Linear comment is the dated human attestation. A
 future restart requires a new project and epoch, prospective supervision and
 outcome budgets, and a newly provisioned claim-bearing holdout.
+
+## Dated reconciliation
+
+`decisions/latent-compass-kill-discovery-v1-reconciliation-2026-08-20.json`
+preserves the original decision and its attestation, then binds the historical
+benchmark 1.0.0 report to the corrected 1.1.0 replay. It explicitly states that
+the later evidence did not exist on 2026-08-17 and requires its own Linear
+attestation. Its domain-separated seal is:
+
+```text
+sha256:da17854eee708e6ec0e6c647475c222db6829e7a076d3a0219ace8c92c75c51e
+```

@@ -1,20 +1,20 @@
 {
   "baseline_registry_seal": "sha256:eca4b9c509e7295218bf784447e3e69ae914a2c7ca34b7a70eae864f9c6d8b73",
   "benchmark_id": "lc-hok188-b1",
-  "contract_version": "1.1.0",
+  "contract_version": "1.0.0",
   "corpus_id": "lc-synthetic-bench",
   "corpus_version": "v1.0.0",
   "epoch": "LC-HOK188-E1",
-  "holdout_corpus_seal": "sha256:8d6f764b2f7c0a1d7beb3a4db1ea9107e5661b32cfc2e2a1d6104ce24390a418",
+  "holdout_corpus_seal": "sha256:fe8e7d5cda777746fb781a8c18cfcbc8f377600c9b9feee2cecc34afb6d5404c",
   "holdout_executed": false,
-  "plan_seal": "sha256:00d3ad7d8b72f00d604eb0a3568ee2ea4fcce4b1a06c7046371ba3594547dde5",
+  "plan_seal": "sha256:08f1dd4b6de2de6a223b2b80ae844a3f9f696b7ded356358fbfc1b7f6029fe86",
   "protocol_id": "lc-hok188-p1",
-  "protocol_seal": "sha256:2957a32acb75cb368d079840a69c3473839d9c831f4fbbb36edb394c912a5e21",
+  "protocol_seal": "sha256:28d844135e2b4426d26115a8d84d00e166149c3da480fe40edb8b08791c221c7",
   "scope": "FINAL_HOLDOUT_PLAN_ONLY",
   "selected_algorithm_version": "1.0.0",
   "selected_baseline_id": "least-uncertainty",
   "selection_mode": "EXTERNAL_EXPLICIT",
-  "spec_seal": "sha256:95a7001c6860cfd658421485c2f04fc2cc2bd6dd248d104cce704592c516f73d",
-  "validation_corpus_seal": "sha256:bb1c7dc271d390d932ca8e6304e0a2beb2d07d3669bb273d790dbcf511e70bd9",
-  "validation_report_seal": "sha256:b111df065c5f7836addbddf8b2e99c5abef37d0e7b0e2f6c8df181926ada2ce4"
+  "spec_seal": "sha256:f8212aaf45f3f99f8e4bf8357bed6120fc80ad7bc4ef1f8b960633961df2e4ee",
+  "validation_corpus_seal": "sha256:68d1831e28a43efbc1d371a50ff22491138fbf37c70490678c41865a00bdaf5b",
+  "validation_report_seal": "sha256:7763e36f5bde5ebe2f4aa6e47fe166ff0220ba82e4385bbdd65df5e63185c3a1"
 }
