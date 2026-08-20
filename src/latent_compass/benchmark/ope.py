@@ -66,6 +66,7 @@ __all__ = [
     "reward",
     "summarise_support",
     "trial_binding_seal",
+    "weighted_quantile",
 ]
 
 TRIAL_SEAL_DOMAIN: Final = "benchmark.trial"
@@ -233,6 +234,34 @@ def quantile(values: list[float], probability: float) -> float:
     ordered = sorted(values)
     rank = max(1, math.ceil(probability * len(ordered)))
     return ordered[min(rank, len(ordered)) - 1]
+
+
+def weighted_quantile(weighted_values: list[tuple[float, float]], probability: float) -> float:
+    """Self-normalized importance-weighted empirical quantile.
+
+    The importance weight contributes probability mass; it never scales the
+    observed value. The returned value therefore keeps the outcome's unit and
+    is always traceable to one positively weighted observation.
+    """
+    if not 0.0 < probability <= 1.0:
+        raise BenchmarkViolation(
+            "a weighted quantile probability must be in (0, 1]",
+            detail={"probability": probability},
+        )
+    positive = sorted((value, weight) for weight, value in weighted_values if weight > 0.0)
+    if not positive:
+        raise BenchmarkViolation(
+            "a weighted quantile was requested without positive importance mass",
+            detail={"probability": probability},
+        )
+    total_weight = math.fsum(weight for _, weight in positive)
+    threshold = probability * total_weight
+    cumulative = 0.0
+    for value, weight in positive:
+        cumulative = math.fsum((cumulative, weight))
+        if cumulative >= threshold:
+            return value
+    return positive[-1][0]
 
 
 class SupportDiagnostics(StrictModel):

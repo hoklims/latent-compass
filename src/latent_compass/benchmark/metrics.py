@@ -19,9 +19,9 @@ Six are IPS values over an observed channel. Two are shaped differently and are
 pre-registered as such:
 
 ``TAIL``
-    A nearest-rank quantile of the per-case weighted cost contributions
-    ``w_i * cost_i``, at the quantile fixed in the spec. Long-tail behaviour of
-    cost, on the same weighting as every other estimate, lower is better.
+    A self-normalized importance-weighted empirical quantile of observed cost,
+    at the quantile fixed in the spec. Importance weights contribute probability
+    mass rather than scaling costs, so the result stays in cost units.
 
 ``DRIFT``
     The largest absolute gap between the nominal population's success estimate
@@ -46,9 +46,9 @@ from latent_compass.benchmark.ope import (
     SupportDiagnostics,
     TrialRecord,
     estimate_channel,
-    quantile,
     reward,
     summarise_support,
+    weighted_quantile,
 )
 from latent_compass.benchmark.spec import BENCHMARK_METRIC_NAMES, BenchmarkSpec
 from latent_compass.contracts import FiniteFloat, Identifier, StrictModel
@@ -217,10 +217,12 @@ def evaluate_seed(
     by_channel = {estimate.channel: estimate for estimate in estimates}
 
     drift_groups, drift_gap = _drift(records, cases)
-    tail = quantile(
+    tail = weighted_quantile(
         [
-            record.weight
-            * reward(cases[record.case_id], OutcomeChannel.COST, confidence=record.confidence)
+            (
+                record.weight,
+                reward(cases[record.case_id], OutcomeChannel.COST, confidence=record.confidence),
+            )
             for record in eligible
         ],
         spec.tail_quantile,

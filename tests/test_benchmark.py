@@ -33,7 +33,13 @@ from latent_compass.benchmark import (
 )
 from latent_compass.benchmark.budget import BudgetGrant, CaseBudgetMeter
 from latent_compass.benchmark.corpus import BenchmarkCase, build_manifest
-from latent_compass.benchmark.ope import estimate_channel, quantile, summarise_support
+from latent_compass.benchmark.ope import (
+    estimate_channel,
+    quantile,
+    reward,
+    summarise_support,
+    weighted_quantile,
+)
 from latent_compass.benchmark.report import load_benchmark_report, recompute_report_seal
 from latent_compass.benchmark.spec import require_spec_matches_protocol
 from latent_compass.contracts import BENCHMARK_CONTRACT_VERSION
@@ -329,6 +335,14 @@ def test_the_quantile_is_nearest_rank_and_invents_no_value() -> None:
         quantile([], 0.5)
 
 
+def test_the_weighted_cost_quantile_preserves_units_and_is_scale_invariant() -> None:
+    sample = [(2.0, 1.0), (2.0, 10.0)]
+    assert weighted_quantile(sample, 0.9) == 10.0
+    assert weighted_quantile([(20.0, 1.0), (20.0, 10.0)], 0.9) == 10.0
+    with pytest.raises(BenchmarkViolation, match="positive importance mass"):
+        weighted_quantile([(0.0, 1.0), (0.0, 10.0)], 0.9)
+
+
 def test_support_diagnostics_refuse_unless_every_case_is_accounted_for(
     benchmark_report: Any,
 ) -> None:
@@ -389,6 +403,38 @@ def test_the_vector_carries_all_eight_families_and_no_composite(
             assert {value.metric for value in evaluation.metrics} == set(
                 BENCHMARK_METRIC_NAMES.values()
             )
+
+
+def test_tail_metrics_recompute_as_importance_weighted_cost_quantiles(
+    benchmark_report: Any, benchmark_spec: Any, benchmark_corpus_dir: Path
+) -> None:
+    cases = {
+        case.case_id: case
+        for case in load_case_file(read_corpus_json(benchmark_corpus_dir, "validation.json")).cases
+    }
+    for baseline in benchmark_report.baselines:
+        for evaluation in baseline.seed_evaluations:
+            records = [
+                trial
+                for trial in baseline.trials
+                if trial.seed == evaluation.seed and trial.eligibility is CaseEligibility.ELIGIBLE
+            ]
+            expected = weighted_quantile(
+                [
+                    (
+                        trial.weight,
+                        reward(
+                            cases[trial.case_id], OutcomeChannel.COST, confidence=trial.confidence
+                        ),
+                    )
+                    for trial in records
+                ],
+                benchmark_spec.tail_quantile,
+            )
+            actual = next(
+                metric.value for metric in evaluation.metrics if metric.family is MetricFamily.TAIL
+            )
+            assert actual == expected
 
 
 def test_per_seed_values_precede_aggregation(benchmark_report: Any) -> None:

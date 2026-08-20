@@ -54,6 +54,7 @@ HIGH_UNCERTAINTY: Final = "shift.high-uncertainty"
 
 MINIMUM_PROPENSITY: Final = 0.015625
 TAIL_QUANTILE: Final = 0.9
+BENCHMARK_CONTRACT_VERSION: Final = "1.1.0"
 
 #: ``(case number, group, ambiguous, candidates, logged direction, outcome kind,
 #: success, violations, cost, information gain, reversibility)``.
@@ -503,7 +504,7 @@ def _case(split: str, prefix: str, row: tuple[Any, ...]) -> dict[str, Any]:
     # rewritten into an abstention the agent did not take.
     advisory_uncertainty = min(logged_uncertainty, 0.35)
     return {
-        "contract_version": "1.0.0",
+        "contract_version": BENCHMARK_CONTRACT_VERSION,
         "case_id": f"case-{prefix}-{number:02d}",
         "split": split,
         "distribution_kind": "NOMINAL" if group == NOMINAL else "SHIFT",
@@ -582,7 +583,7 @@ def _case(split: str, prefix: str, row: tuple[Any, ...]) -> dict[str, Any]:
 def split_payload(split: str, prefix: str, table: tuple[tuple[Any, ...], ...]) -> dict[str, Any]:
     """The complete on-disk payload for one split."""
     return {
-        "contract_version": "1.0.0",
+        "contract_version": BENCHMARK_CONTRACT_VERSION,
         "split": split,
         "cases": [_case(split, prefix, row) for row in table],
     }
@@ -719,7 +720,7 @@ def protocol_payload(seals: dict[str, str], counts: dict[str, int]) -> dict[str,
 def spec_payload(protocol_seal: str, seals: dict[str, str]) -> dict[str, Any]:
     """The benchmark plan bound to that pre-registration and that corpus."""
     return {
-        "contract_version": "1.0.0",
+        "contract_version": BENCHMARK_CONTRACT_VERSION,
         "benchmark_id": BENCHMARK_ID,
         "protocol_id": PROTOCOL_ID,
         "protocol_seal": protocol_seal,

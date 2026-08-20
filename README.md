@@ -78,12 +78,6 @@ one.
   corpus or holdout I/O and creates no label, chronology or independence claim.
   A confined `pairwise capture` command publishes canonical sidecars atomically
   without overwriting an existing capture.
-- **A separately provisioned keyless labeler.** The private
-  `hoklims/latent-compass-labeler` repository runs a locked GitHub-hosted
-  workflow, signs canonical labels through GitHub OIDC and Sigstore, and binds
-  verification to its exact workflow SHA. Its conservative v1 rubric produces
-  only honest ties or abstentions, so provisioning is real without pretending
-  that HOK-190 already has useful supervision.
 - **Confinement.** Every durable write resolves canonically and must land
   strictly inside a root named on the command line. Traversals, siblings,
   external absolute paths and silent overwrites are refused, and a refused
@@ -116,6 +110,11 @@ one.
 - The **pre-HOK-190 holdout plan**. It freezes an explicit selection after
   validation replay; it does not rank baselines, execute or consume the holdout,
   compare final results, provide an attestation, or complete HOK-190.
+- The **externally evidenced keyless labeler**. A private repository runs a
+  pinned GitHub-hosted workflow and signs canonical labels through GitHub OIDC
+  and Sigstore. This repository records the accepted workflow identity and
+  verification receipt, but cannot reproduce the private source locally. Its
+  rubric produced only honest abstention, not useful HOK-190 supervision.
 
 ### Projected — not implemented, not started, no evidence
 
@@ -317,6 +316,7 @@ external anchor this package does not have. See [docs/ledger.md](docs/ledger.md)
 | [docs/adr/0004-independent-pairwise-supervision.md](docs/adr/0004-independent-pairwise-supervision.md) | why judge preferences and observed outcomes remain separate |
 | [docs/adr/0005-judgeable-pre-action-sidecar.md](docs/adr/0005-judgeable-pre-action-sidecar.md) | why judgeable capture is a separate compatible sidecar |
 | [docs/adr/0006-keyless-independent-pairwise-labeler.md](docs/adr/0006-keyless-independent-pairwise-labeler.md) | why the external labeler uses GitHub OIDC, Sigstore and an exact workflow SHA |
+| [docs/adr/0007-correct-off-policy-tail-and-labeler-trust.md](docs/adr/0007-correct-off-policy-tail-and-labeler-trust.md) | why `TAIL` preserves cost units and labeler evidence matches the accepted workflow SHA |
 | [docs/licenses/dependency-audit.md](docs/licenses/dependency-audit.md) | audited licence inventory |
 | [GOVERNANCE.md](GOVERNANCE.md) | data provenance, retention, deletion, project governance |
 | [SECURITY.md](SECURITY.md) | vulnerability reporting |

@@ -66,7 +66,7 @@ LEDGER_FORMAT_VERSION: Final = "1.0.0"
 #: on its own axis: the benchmark is a *consumer* of the HOK-181 protocol
 #: contract, so it must be able to move without dragging the pre-registration
 #: contract with it, and vice versa.
-BENCHMARK_CONTRACT_VERSION: Final = "1.0.0"
+BENCHMARK_CONTRACT_VERSION: Final = "1.1.0"
 
 SUPPORTED_EPISODE_VERSIONS: Final = frozenset({EPISODE_CONTRACT_VERSION})
 SUPPORTED_JUDGEABLE_PROJECTION_VERSIONS: Final = frozenset({JUDGEABLE_PROJECTION_CONTRACT_VERSION})

@@ -16,7 +16,7 @@
       "criterion_id": "baseline-pipeline",
       "required": true,
       "status": "PASS",
-      "evidence": "sha256:7763e36f5bde5ebe2f4aa6e47fe166ff0220ba82e4385bbdd65df5e63185c3a1"
+      "evidence": "sha256:b111df065c5f7836addbddf8b2e99c5abef37d0e7b0e2f6c8df181926ada2ce4"
     },
     {
       "criterion_id": "pre-action-capture",
@@ -105,5 +105,5 @@
     "a new claim-bearing holdout is provisioned outside the training loop"
   ],
   "claim_boundary": "This decision establishes discovery insufficiency and portfolio stop only. It makes no claim about the performance of an untrained ranker, bandit or advisory.",
-  "decision_seal": "sha256:f36ad614b89c43fa2eab733fb9a995ca50de933d92929cb00a8a4e29392a8cb4"
+  "decision_seal": "sha256:a85103f85a3e8659cb893693df2084630ca949bac0a66cc30227240572b152fe"
 }

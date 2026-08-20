@@ -3,7 +3,7 @@
     {
       "ambiguous": false,
       "case_id": "case-hld-01",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -88,7 +88,7 @@
     {
       "ambiguous": true,
       "case_id": "case-hld-02",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -178,7 +178,7 @@
     {
       "ambiguous": false,
       "case_id": "case-hld-03",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -268,7 +268,7 @@
     {
       "ambiguous": false,
       "case_id": "case-hld-04",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -358,7 +358,7 @@
     {
       "ambiguous": true,
       "case_id": "case-hld-05",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -448,7 +448,7 @@
     {
       "ambiguous": false,
       "case_id": "case-hld-06",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -538,7 +538,7 @@
     {
       "ambiguous": false,
       "case_id": "case-hld-07",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -628,7 +628,7 @@
     {
       "ambiguous": true,
       "case_id": "case-hld-08",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -716,6 +716,6 @@
       "split": "HOLDOUT"
     }
   ],
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "split": "HOLDOUT"
 }

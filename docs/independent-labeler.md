@@ -10,7 +10,7 @@ Its claim-bearing principal is the GitHub-hosted workflow:
 ```text
 issuer: https://token.actions.githubusercontent.com
 identity: https://github.com/hoklims/latent-compass-labeler/.github/workflows/label.yml@refs/heads/main
-accepted workflow SHA: fd4e9c50947403a638817404fc6c596add1b0cf3
+accepted workflow SHA: 75af31a8aee941469fe088891cb090747ec0ce89
 trigger: workflow_dispatch
 repository: hoklims/latent-compass-labeler
 ref: refs/heads/main
@@ -101,6 +101,28 @@ workflow ref: refs/heads/main
 runner environment: github-hosted
 repository visibility: private
 ```
+
+## Accepted rotation proof
+
+The trust policy was rotated from `fd4e9c50947403a638817404fc6c596add1b0cf3`
+to `75af31a8aee941469fe088891cb090747ec0ce89` after the version-boundary fix was
+reviewed and run successfully. GitHub Actions run
+<https://github.com/hoklims/latent-compass-labeler/actions/runs/32008390667>
+produced the HOK-190 abstention bundle used by the terminal discovery record.
+
+Independent offline Sigstore verification of the downloaded artifact accepted
+the canonical label against the pinned workflow identity and OIDC issuer. The
+certificate extensions bind workflow SHA `75af31a8aee941469fe088891cb090747ec0ce89`,
+trigger `workflow_dispatch`, repository `hoklims/latent-compass-labeler`, ref
+`refs/heads/main`, a GitHub-hosted runner and run `32008390667` attempt 1. The
+downloaded SHA-256 values are:
+
+- label: `8137e43e77f939c9ccf05991302a355ecb6e18a2c32a03fb9079efbb590e819c`;
+- Sigstore bundle: `e40cef892b71e9bab4144390b6224807caa525a12bdeebdd343dbcb84b009fbf`.
+
+This rotation proves artifact identity and integrity only. It does not turn an
+`ABSTAIN` into directional supervision or make the project owner independent
+from themself.
 
 ## Rotation and revocation
 

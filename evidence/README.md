@@ -42,7 +42,7 @@ failure: no ranker was trained, so the decision makes no performance claim.
 Its domain-separated seal is:
 
 ```text
-sha256:f36ad614b89c43fa2eab733fb9a995ca50de933d92929cb00a8a4e29392a8cb4
+sha256:a85103f85a3e8659cb893693df2084630ca949bac0a66cc30227240572b152fe
 ```
 
 The corresponding HOK-194 Linear comment is the dated human attestation. A

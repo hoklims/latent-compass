@@ -3,7 +3,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-01",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -93,7 +93,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-02",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -183,7 +183,7 @@
     {
       "ambiguous": true,
       "case_id": "case-val-03",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -278,7 +278,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-04",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -368,7 +368,7 @@
     {
       "ambiguous": true,
       "case_id": "case-val-05",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -453,7 +453,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-06",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -535,7 +535,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-07",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -625,7 +625,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-08",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -714,7 +714,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-09",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -809,7 +809,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-10",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -899,7 +899,7 @@
     {
       "ambiguous": true,
       "case_id": "case-val-11",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -989,7 +989,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-12",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -1079,7 +1079,7 @@
     {
       "ambiguous": true,
       "case_id": "case-val-13",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -1169,7 +1169,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-14",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -1259,7 +1259,7 @@
     {
       "ambiguous": false,
       "case_id": "case-val-15",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -1349,7 +1349,7 @@
     {
       "ambiguous": true,
       "case_id": "case-val-16",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -1437,6 +1437,6 @@
       "split": "VALIDATION"
     }
   ],
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "split": "VALIDATION"
 }

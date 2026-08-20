@@ -3,7 +3,7 @@
     {
       "ambiguous": false,
       "case_id": "case-trn-01",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -88,7 +88,7 @@
     {
       "ambiguous": true,
       "case_id": "case-trn-02",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -173,7 +173,7 @@
     {
       "ambiguous": false,
       "case_id": "case-trn-03",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "nominal",
       "distribution_kind": "NOMINAL",
       "episode": {
@@ -263,7 +263,7 @@
     {
       "ambiguous": false,
       "case_id": "case-trn-04",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -353,7 +353,7 @@
     {
       "ambiguous": true,
       "case_id": "case-trn-05",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.long-horizon",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -443,7 +443,7 @@
     {
       "ambiguous": false,
       "case_id": "case-trn-06",
-      "contract_version": "1.0.0",
+      "contract_version": "1.1.0",
       "distribution_group": "shift.high-uncertainty",
       "distribution_kind": "SHIFT",
       "episode": {
@@ -531,6 +531,6 @@
       "split": "TRAIN"
     }
   ],
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "split": "TRAIN"
 }

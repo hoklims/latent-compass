@@ -1,5 +1,5 @@
 {
-  "contract_version": "1.0.0",
+  "contract_version": "1.1.0",
   "corpus_id": "lc-synthetic-bench",
   "corpus_version": "v1.0.0",
   "provenance": {
@@ -12,7 +12,7 @@
     {
       "ambiguous_case_count": 3,
       "case_count": 8,
-      "corpus_seal": "sha256:fe8e7d5cda777746fb781a8c18cfcbc8f377600c9b9feee2cecc34afb6d5404c",
+      "corpus_seal": "sha256:8d6f764b2f7c0a1d7beb3a4db1ea9107e5661b32cfc2e2a1d6104ce24390a418",
       "distribution_groups": [
         "nominal",
         "shift.high-uncertainty",
@@ -24,7 +24,7 @@
     {
       "ambiguous_case_count": 2,
       "case_count": 6,
-      "corpus_seal": "sha256:e323f2f6b0ed0180c33c779c11e3b565d6c1b816bed65c9cb5c8499c5950cd03",
+      "corpus_seal": "sha256:703748ed09b2c7c0b9053af9e68979096ac39e30832cb4e9fe928e542bf63427",
       "distribution_groups": [
         "nominal",
         "shift.high-uncertainty",
@@ -36,7 +36,7 @@
     {
       "ambiguous_case_count": 5,
       "case_count": 16,
-      "corpus_seal": "sha256:68d1831e28a43efbc1d371a50ff22491138fbf37c70490678c41865a00bdaf5b",
+      "corpus_seal": "sha256:bb1c7dc271d390d932ca8e6304e0a2beb2d07d3669bb273d790dbcf511e70bd9",
       "distribution_groups": [
         "nominal",
         "shift.high-uncertainty",

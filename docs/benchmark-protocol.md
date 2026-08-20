@@ -1,6 +1,6 @@
 # Offline baseline benchmark (HOK-188)
 
-Contract version `1.0.0`. Implementation: `src/latent_compass/benchmark/`.
+Contract version `1.1.0`. Implementation: `src/latent_compass/benchmark/`.
 
 Four pre-registered baselines are run over the `VALIDATION` split of a sealed
 corpus, under one common deterministic budget, evaluated against logged bandit
@@ -200,12 +200,15 @@ pre-registered as such.
 | `INFORMATION` | `ips-information-gain` | higher | IPS over observed information gain |
 | `REVERSIBILITY` | `ips-reversibility` | higher | IPS over observed reversibility |
 | `CALIBRATION` | `ips-brier` | lower | IPS over `(confidence - success)^2` |
-| `TAIL` | `tail-weighted-cost-quantile` | lower | nearest-rank quantile of `w_i * cost_i` at the spec's `tail_quantile` |
+| `TAIL` | `tail-weighted-cost-quantile` | lower | self-normalized importance-weighted empirical quantile of observed `cost_i`; `w_i` contributes probability mass and never scales the cost |
 | `DRIFT` | `drift-max-success-gap` | lower | largest `abs` gap between the nominal success estimate and any one shift group's |
 
-Quantiles are **nearest-rank**, never interpolating: interpolation invents a
-value no case produced, and every number in the report has to be traceable to a
-case. `DRIFT` refuses rather than reports when a stratum has no eligible case.
+Quantiles are **empirical**, never interpolating: interpolation invents a value
+no case produced. `TAIL` sorts observed costs, accumulates positive importance
+mass and returns the first cost whose cumulative normalized mass reaches the
+declared quantile. Uniformly scaling all weights cannot change it, and its unit
+remains the cost unit. `DRIFT` refuses rather than reports when a stratum has no
+eligible case.
 
 There is no global mean and no composite score. Eight numbers stay eight
 numbers; a scalar champion would hide the trade-off the vector exists to expose.

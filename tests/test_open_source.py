@@ -6,6 +6,7 @@ looking at a real file. A check that silently examines nothing always passes.
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -318,7 +319,7 @@ def test_independent_labeler_docs_pin_proof_without_claiming_useful_supervision(
     adr = prose("docs/adr/0006-keyless-independent-pairwise-labeler.md")
 
     for claim in (
-        "accepted workflow sha: fd4e9c50947403a638817404fc6c596add1b0cf3",
+        "accepted workflow sha: 75af31a8aee941469fe088891cb090747ec0ce89",
         "verification pins the certificate's workflow sha extension",
         "label result: `abstain`",
         "cannot retroactively prove that a source projection predates a real action",
@@ -328,6 +329,16 @@ def test_independent_labeler_docs_pin_proof_without_claiming_useful_supervision(
 
     assert "never emits a left or right winner" in adr
     assert "pairwise training labels do not constitute an authority attestation" in adr
+
+    raw_contract = (REPO / "docs/independent-labeler.md").read_text(encoding="utf-8")
+    accepted = re.search(r"accepted workflow SHA: ([0-9a-f]{40})", raw_contract)
+    assert accepted is not None
+    decision = json.loads(
+        (REPO / "evidence/decisions/latent-compass-kill-discovery-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert decision["evidence_links"]["labeler_workflow_sha"] == accepted.group(1)
 
 
 def test_the_package_metadata_makes_no_emission_claim() -> None:
