@@ -1,0 +1,109 @@
+{
+  "contract_version": "1.0.0",
+  "decision_id": "latent-compass-h2-2026-kill-discovery-v1",
+  "decided_at": "2026-08-17T08:21:30Z",
+  "decided_by": {
+    "linear_user_id": "b36bdf95-e3fd-40b6-8b25-003f81481391",
+    "name": "Guillaume Fossier",
+    "email": "hoklims@gmail.com"
+  },
+  "project_id": "2d29f7e2-f682-4f08-a582-db96a5ed31e3",
+  "epoch": "discovery-2026-08-17",
+  "decision": "KILL_DISCOVERY",
+  "decision_meaning": "Stop the current research programme because its evidence is insufficient to authorize training, not because an evaluated ranker failed.",
+  "criteria": [
+    {
+      "criterion_id": "baseline-pipeline",
+      "required": true,
+      "status": "PASS",
+      "evidence": "sha256:7763e36f5bde5ebe2f4aa6e47fe166ff0220ba82e4385bbdd65df5e63185c3a1"
+    },
+    {
+      "criterion_id": "pre-action-capture",
+      "required": true,
+      "status": "PASS",
+      "evidence": "sha256:216b14adf3aafa758a7b4459306469ccefdfce7a43fc196f7f50242540033b74"
+    },
+    {
+      "criterion_id": "independent-signed-labeler",
+      "required": true,
+      "status": "PASS",
+      "evidence": "sha256:ab1a962ef7ded110d77023c57427055a7ba4dc4b3e10100a9f0593b782827a0b"
+    },
+    {
+      "criterion_id": "eligible-directional-supervision",
+      "required": true,
+      "status": "FAIL",
+      "evidence": "sha256:24245d94912d08cbbb53027c0993d73a8885c3db014daf93e4c805056b1e6cc6"
+    },
+    {
+      "criterion_id": "calibration-outcomes-y",
+      "required": true,
+      "status": "ABSENT",
+      "evidence": null
+    },
+    {
+      "criterion_id": "claim-bearing-holdout",
+      "required": true,
+      "status": "UNAVAILABLE",
+      "evidence": null
+    },
+    {
+      "criterion_id": "ranker-evaluation",
+      "required": true,
+      "status": "NOT_RUN",
+      "evidence": null
+    },
+    {
+      "criterion_id": "bandit-shadow-evaluation",
+      "required": false,
+      "status": "NOT_AUTHORIZED",
+      "evidence": null
+    },
+    {
+      "criterion_id": "semctx-canary",
+      "required": false,
+      "status": "NOT_AUTHORIZED",
+      "evidence": null
+    }
+  ],
+  "observations": {
+    "real_pre_action_decision_count": 1,
+    "signed_label_bundle_count": 1,
+    "eligible_directional_label_count": 0,
+    "aggregate_abstention_count": 1,
+    "aggregate_abstention_rate": 1.0,
+    "counterfactual_outcome_count": 0,
+    "ranker_trained": false,
+    "holdout_consumed": false
+  },
+  "evidence_links": {
+    "baseline_report": "evidence/hok188-run/report.json",
+    "holdout_plan": "evidence/hok188-run/holdout-plan.json",
+    "pre_action_capture": "evidence/captures/hok-190-first-directional-label-source-v1.json",
+    "signed_abstention_run": "https://github.com/hoklims/latent-compass-labeler/actions/runs/32008390667",
+    "labeler_workflow_sha": "75af31a8aee941469fe088891cb090747ec0ce89",
+    "labeler_request_sha": "f315dc7ddae4775bf98d52b53be86de259886822"
+  },
+  "allowed_next_actions": [
+    "preserve and audit the negative evidence",
+    "maintain the non-authoritative foundation",
+    "start a separately funded future project with a new preregistered epoch"
+  ],
+  "forbidden_next_actions": [
+    "train or evaluate a ranker from the current corpus",
+    "convert TIE or ABSTAIN into a directional label",
+    "reuse the historical holdout for a claim",
+    "start the contextual bandit lane",
+    "integrate an advisory into Semctx",
+    "start a canary or promote a candidate"
+  ],
+  "restart_conditions": [
+    "a new project and epoch are explicitly created",
+    "a prospective data and information budget is preregistered before labels",
+    "eligible J supervision and valid Y outcomes are collected independently",
+    "a new claim-bearing holdout is provisioned outside the training loop"
+  ],
+  "claim_boundary": "This decision establishes discovery insufficiency and portfolio stop only. It makes no claim about the performance of an untrained ranker, bandit or advisory.",
+  "decision_seal": "sha256:f36ad614b89c43fa2eab733fb9a995ca50de933d92929cb00a8a4e29392a8cb4"
+}

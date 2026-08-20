@@ -1,0 +1,536 @@
+{
+  "cases": [
+    {
+      "ambiguous": false,
+      "case_id": "case-trn-01",
+      "contract_version": "1.1.0",
+      "distribution_group": "nominal",
+      "distribution_kind": "NOMINAL",
+      "episode": {
+        "candidates": [
+          {
+            "direction_id": "dir-a",
+            "prior_uncertainty": 0.2,
+            "propensity": 0.5
+          },
+          {
+            "direction_id": "dir-b",
+            "prior_uncertainty": 0.3,
+            "propensity": 0.5
+          }
+        ],
+        "decision": {
+          "advisory": {
+            "confidence": 0.8,
+            "contract_version": "1.0.0",
+            "direction_id": "dir-a",
+            "issued_by": "latent_compass",
+            "kind": "DIRECTION",
+            "rationale": "logged by the synthetic behaviour policy",
+            "uncertainty": 0.2
+          },
+          "selected_direction_id": "dir-a"
+        },
+        "economics": {
+          "cost": 1.0,
+          "information_gain": 0.2,
+          "reversibility": 0.8,
+          "uncertainty": 0.2
+        },
+        "episode_id": "ep-trn-01",
+        "external_verdict": null,
+        "outcome": {
+          "observability": "FULL",
+          "observed": true,
+          "observed_at": "2026-06-02T09:00:00Z",
+          "success": true,
+          "violations": 0
+        },
+        "provenance": {
+          "agent_family": "other",
+          "epoch": "LC-HOK188-E1",
+          "host_id": "synthetic-host",
+          "recorded_at": "2026-06-01T09:00:00Z",
+          "store_id": "synthetic-store",
+          "tool_version": "0.1.0"
+        },
+        "redactions": [
+          {
+            "path": "external_verdict",
+            "reason": "no deterministic judge in the synthetic corpus"
+          }
+        ],
+        "schema_version": "1.0.0",
+        "state": {
+          "branch_point": {
+            "depth": 1,
+            "node_id": "node-trn-01",
+            "parent_node_id": null
+          },
+          "levels": [
+            {
+              "depth": 0,
+              "name": "L4-invariants",
+              "summary_digest": "digest-trn-01-l4"
+            },
+            {
+              "depth": 1,
+              "name": "L2-components",
+              "summary_digest": "digest-trn-01-l2"
+            }
+          ]
+        }
+      },
+      "observation_cutoff": "2026-07-01T00:00:00Z",
+      "observation_horizon_seconds": 2592000,
+      "split": "TRAIN"
+    },
+    {
+      "ambiguous": true,
+      "case_id": "case-trn-02",
+      "contract_version": "1.1.0",
+      "distribution_group": "nominal",
+      "distribution_kind": "NOMINAL",
+      "episode": {
+        "candidates": [
+          {
+            "direction_id": "dir-a",
+            "prior_uncertainty": 0.35,
+            "propensity": 0.25
+          },
+          {
+            "direction_id": "dir-b",
+            "prior_uncertainty": 0.15,
+            "propensity": 0.75
+          }
+        ],
+        "decision": {
+          "advisory": {
+            "confidence": 0.85,
+            "contract_version": "1.0.0",
+            "direction_id": "dir-b",
+            "issued_by": "latent_compass",
+            "kind": "DIRECTION",
+            "rationale": "logged by the synthetic behaviour policy",
+            "uncertainty": 0.15
+          },
+          "selected_direction_id": "dir-b"
+        },
+        "economics": {
+          "cost": 1.5,
+          "information_gain": 0.25,
+          "reversibility": 0.75,
+          "uncertainty": 0.15
+        },
+        "episode_id": "ep-trn-02",
+        "external_verdict": null,
+        "outcome": {
+          "observability": "FULL",
+          "observed": true,
+          "observed_at": "2026-06-02T09:00:00Z",
+          "success": true,
+          "violations": 0
+        },
+        "provenance": {
+          "agent_family": "other",
+          "epoch": "LC-HOK188-E1",
+          "host_id": "synthetic-host",
+          "recorded_at": "2026-06-01T09:00:00Z",
+          "store_id": "synthetic-store",
+          "tool_version": "0.1.0"
+        },
+        "redactions": [
+          {
+            "path": "external_verdict",
+            "reason": "no deterministic judge in the synthetic corpus"
+          }
+        ],
+        "schema_version": "1.0.0",
+        "state": {
+          "branch_point": {
+            "depth": 1,
+            "node_id": "node-trn-02",
+            "parent_node_id": null
+          },
+          "levels": [
+            {
+              "depth": 0,
+              "name": "L4-invariants",
+              "summary_digest": "digest-trn-02-l4"
+            },
+            {
+              "depth": 1,
+              "name": "L2-components",
+              "summary_digest": "digest-trn-02-l2"
+            }
+          ]
+        }
+      },
+      "observation_cutoff": "2026-07-01T00:00:00Z",
+      "observation_horizon_seconds": 2592000,
+      "split": "TRAIN"
+    },
+    {
+      "ambiguous": false,
+      "case_id": "case-trn-03",
+      "contract_version": "1.1.0",
+      "distribution_group": "nominal",
+      "distribution_kind": "NOMINAL",
+      "episode": {
+        "candidates": [
+          {
+            "direction_id": "dir-a",
+            "prior_uncertainty": 0.1,
+            "propensity": 0.375
+          },
+          {
+            "direction_id": "dir-b",
+            "prior_uncertainty": 0.4,
+            "propensity": 0.375
+          },
+          {
+            "direction_id": "dir-c",
+            "prior_uncertainty": 0.3,
+            "propensity": 0.25
+          }
+        ],
+        "decision": {
+          "advisory": {
+            "confidence": 0.9,
+            "contract_version": "1.0.0",
+            "direction_id": "dir-a",
+            "issued_by": "latent_compass",
+            "kind": "DIRECTION",
+            "rationale": "logged by the synthetic behaviour policy",
+            "uncertainty": 0.1
+          },
+          "selected_direction_id": "dir-a"
+        },
+        "economics": {
+          "cost": 2.0,
+          "information_gain": 0.1,
+          "reversibility": 0.5,
+          "uncertainty": 0.1
+        },
+        "episode_id": "ep-trn-03",
+        "external_verdict": null,
+        "outcome": {
+          "observability": "FULL",
+          "observed": true,
+          "observed_at": "2026-06-02T09:00:00Z",
+          "success": false,
+          "violations": 1
+        },
+        "provenance": {
+          "agent_family": "other",
+          "epoch": "LC-HOK188-E1",
+          "host_id": "synthetic-host",
+          "recorded_at": "2026-06-01T09:00:00Z",
+          "store_id": "synthetic-store",
+          "tool_version": "0.1.0"
+        },
+        "redactions": [
+          {
+            "path": "external_verdict",
+            "reason": "no deterministic judge in the synthetic corpus"
+          }
+        ],
+        "schema_version": "1.0.0",
+        "state": {
+          "branch_point": {
+            "depth": 1,
+            "node_id": "node-trn-03",
+            "parent_node_id": null
+          },
+          "levels": [
+            {
+              "depth": 0,
+              "name": "L4-invariants",
+              "summary_digest": "digest-trn-03-l4"
+            },
+            {
+              "depth": 1,
+              "name": "L2-components",
+              "summary_digest": "digest-trn-03-l2"
+            }
+          ]
+        }
+      },
+      "observation_cutoff": "2026-07-01T00:00:00Z",
+      "observation_horizon_seconds": 2592000,
+      "split": "TRAIN"
+    },
+    {
+      "ambiguous": false,
+      "case_id": "case-trn-04",
+      "contract_version": "1.1.0",
+      "distribution_group": "shift.long-horizon",
+      "distribution_kind": "SHIFT",
+      "episode": {
+        "candidates": [
+          {
+            "direction_id": "dir-a",
+            "prior_uncertainty": 0.25,
+            "propensity": 0.5
+          },
+          {
+            "direction_id": "dir-b",
+            "prior_uncertainty": 0.2,
+            "propensity": 0.25
+          },
+          {
+            "direction_id": "dir-c",
+            "prior_uncertainty": 0.45,
+            "propensity": 0.25
+          }
+        ],
+        "decision": {
+          "advisory": {
+            "confidence": 0.75,
+            "contract_version": "1.0.0",
+            "direction_id": "dir-a",
+            "issued_by": "latent_compass",
+            "kind": "DIRECTION",
+            "rationale": "logged by the synthetic behaviour policy",
+            "uncertainty": 0.25
+          },
+          "selected_direction_id": "dir-a"
+        },
+        "economics": {
+          "cost": 1.8,
+          "information_gain": 0.3,
+          "reversibility": 0.65,
+          "uncertainty": 0.25
+        },
+        "episode_id": "ep-trn-04",
+        "external_verdict": null,
+        "outcome": {
+          "observability": "FULL",
+          "observed": true,
+          "observed_at": "2026-06-02T09:00:00Z",
+          "success": true,
+          "violations": 0
+        },
+        "provenance": {
+          "agent_family": "other",
+          "epoch": "LC-HOK188-E1",
+          "host_id": "synthetic-host",
+          "recorded_at": "2026-06-01T09:00:00Z",
+          "store_id": "synthetic-store",
+          "tool_version": "0.1.0"
+        },
+        "redactions": [
+          {
+            "path": "external_verdict",
+            "reason": "no deterministic judge in the synthetic corpus"
+          }
+        ],
+        "schema_version": "1.0.0",
+        "state": {
+          "branch_point": {
+            "depth": 1,
+            "node_id": "node-trn-04",
+            "parent_node_id": null
+          },
+          "levels": [
+            {
+              "depth": 0,
+              "name": "L4-invariants",
+              "summary_digest": "digest-trn-04-l4"
+            },
+            {
+              "depth": 1,
+              "name": "L2-components",
+              "summary_digest": "digest-trn-04-l2"
+            }
+          ]
+        }
+      },
+      "observation_cutoff": "2026-07-01T00:00:00Z",
+      "observation_horizon_seconds": 2592000,
+      "split": "TRAIN"
+    },
+    {
+      "ambiguous": true,
+      "case_id": "case-trn-05",
+      "contract_version": "1.1.0",
+      "distribution_group": "shift.long-horizon",
+      "distribution_kind": "SHIFT",
+      "episode": {
+        "candidates": [
+          {
+            "direction_id": "dir-a",
+            "prior_uncertainty": 0.5,
+            "propensity": 0.25
+          },
+          {
+            "direction_id": "dir-b",
+            "prior_uncertainty": 0.35,
+            "propensity": 0.5
+          },
+          {
+            "direction_id": "dir-c",
+            "prior_uncertainty": 0.15,
+            "propensity": 0.25
+          }
+        ],
+        "decision": {
+          "advisory": {
+            "confidence": 0.65,
+            "contract_version": "1.0.0",
+            "direction_id": "dir-b",
+            "issued_by": "latent_compass",
+            "kind": "DIRECTION",
+            "rationale": "logged by the synthetic behaviour policy",
+            "uncertainty": 0.35
+          },
+          "selected_direction_id": "dir-b"
+        },
+        "economics": {
+          "cost": 2.9,
+          "information_gain": 0.06,
+          "reversibility": 0.25,
+          "uncertainty": 0.35
+        },
+        "episode_id": "ep-trn-05",
+        "external_verdict": null,
+        "outcome": {
+          "observability": "FULL",
+          "observed": true,
+          "observed_at": "2026-06-02T09:00:00Z",
+          "success": false,
+          "violations": 2
+        },
+        "provenance": {
+          "agent_family": "other",
+          "epoch": "LC-HOK188-E1",
+          "host_id": "synthetic-host",
+          "recorded_at": "2026-06-01T09:00:00Z",
+          "store_id": "synthetic-store",
+          "tool_version": "0.1.0"
+        },
+        "redactions": [
+          {
+            "path": "external_verdict",
+            "reason": "no deterministic judge in the synthetic corpus"
+          }
+        ],
+        "schema_version": "1.0.0",
+        "state": {
+          "branch_point": {
+            "depth": 1,
+            "node_id": "node-trn-05",
+            "parent_node_id": null
+          },
+          "levels": [
+            {
+              "depth": 0,
+              "name": "L4-invariants",
+              "summary_digest": "digest-trn-05-l4"
+            },
+            {
+              "depth": 1,
+              "name": "L2-components",
+              "summary_digest": "digest-trn-05-l2"
+            }
+          ]
+        }
+      },
+      "observation_cutoff": "2026-07-01T00:00:00Z",
+      "observation_horizon_seconds": 2592000,
+      "split": "TRAIN"
+    },
+    {
+      "ambiguous": false,
+      "case_id": "case-trn-06",
+      "contract_version": "1.1.0",
+      "distribution_group": "shift.high-uncertainty",
+      "distribution_kind": "SHIFT",
+      "episode": {
+        "candidates": [
+          {
+            "direction_id": "dir-a",
+            "prior_uncertainty": 0.65,
+            "propensity": 0.25
+          },
+          {
+            "direction_id": "dir-b",
+            "prior_uncertainty": 0.55,
+            "propensity": 0.5
+          },
+          {
+            "direction_id": "dir-c",
+            "prior_uncertainty": 0.7,
+            "propensity": 0.25
+          }
+        ],
+        "decision": {
+          "advisory": {
+            "confidence": 0.65,
+            "contract_version": "1.0.0",
+            "direction_id": "dir-b",
+            "issued_by": "latent_compass",
+            "kind": "DIRECTION",
+            "rationale": "logged by the synthetic behaviour policy",
+            "uncertainty": 0.35
+          },
+          "selected_direction_id": "dir-b"
+        },
+        "economics": {
+          "cost": 2.4,
+          "information_gain": 0.19,
+          "reversibility": 0.4,
+          "uncertainty": 0.55
+        },
+        "episode_id": "ep-trn-06",
+        "external_verdict": null,
+        "outcome": {
+          "observability": "FULL",
+          "observed": true,
+          "observed_at": "2026-06-02T09:00:00Z",
+          "success": true,
+          "violations": 0
+        },
+        "provenance": {
+          "agent_family": "other",
+          "epoch": "LC-HOK188-E1",
+          "host_id": "synthetic-host",
+          "recorded_at": "2026-06-01T09:00:00Z",
+          "store_id": "synthetic-store",
+          "tool_version": "0.1.0"
+        },
+        "redactions": [
+          {
+            "path": "external_verdict",
+            "reason": "no deterministic judge in the synthetic corpus"
+          }
+        ],
+        "schema_version": "1.0.0",
+        "state": {
+          "branch_point": {
+            "depth": 1,
+            "node_id": "node-trn-06",
+            "parent_node_id": null
+          },
+          "levels": [
+            {
+              "depth": 0,
+              "name": "L4-invariants",
+              "summary_digest": "digest-trn-06-l4"
+            },
+            {
+              "depth": 1,
+              "name": "L2-components",
+              "summary_digest": "digest-trn-06-l2"
+            }
+          ]
+        }
+      },
+      "observation_cutoff": "2026-07-01T00:00:00Z",
+      "observation_horizon_seconds": 2592000,
+      "split": "TRAIN"
+    }
+  ],
+  "contract_version": "1.1.0",
+  "split": "TRAIN"
+}

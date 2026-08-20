@@ -1,0 +1,133 @@
+{
+  "baselines": [
+    {
+      "description": "select the first direction_id in canonical order",
+      "kind": "TRIVIAL",
+      "name": "fixed-canonical"
+    },
+    {
+      "description": "select the smallest prior_uncertainty, canonical tie-break",
+      "kind": "STRONG",
+      "name": "least-uncertainty"
+    },
+    {
+      "description": "maximise logged propensity, then minimise uncertainty",
+      "kind": "STRONG",
+      "name": "logged-propensity-arbiter"
+    },
+    {
+      "description": "uniform pick derived from the spec seal, corpus, case and seed",
+      "kind": "TRIVIAL",
+      "name": "seeded-uniform"
+    }
+  ],
+  "contract_version": "1.0.0",
+  "epoch": "LC-HOK188-E1",
+  "failure_cases": [
+    "a near-deterministic logging policy leaves most baselines with no non-zero weight",
+    "a distribution stratum with no eligible case makes DRIFT unmeasurable",
+    "outcomes observed after the cutoff censor a case rather than counting as failures"
+  ],
+  "metrics": [
+    {
+      "direction": "HIGHER_IS_BETTER",
+      "family": "SUCCESS",
+      "name": "ips-success",
+      "required": true,
+      "threshold": 0.5
+    },
+    {
+      "direction": "LOWER_IS_BETTER",
+      "family": "VIOLATION",
+      "name": "ips-violations",
+      "required": true,
+      "threshold": 0.5
+    },
+    {
+      "direction": "LOWER_IS_BETTER",
+      "family": "COST",
+      "name": "ips-cost",
+      "required": true,
+      "threshold": 3.0
+    },
+    {
+      "direction": "HIGHER_IS_BETTER",
+      "family": "INFORMATION",
+      "name": "ips-information-gain",
+      "required": true,
+      "threshold": 0.1
+    },
+    {
+      "direction": "HIGHER_IS_BETTER",
+      "family": "REVERSIBILITY",
+      "name": "ips-reversibility",
+      "required": true,
+      "threshold": 0.4
+    },
+    {
+      "direction": "LOWER_IS_BETTER",
+      "family": "CALIBRATION",
+      "name": "ips-brier",
+      "required": true,
+      "threshold": 1.0
+    },
+    {
+      "direction": "LOWER_IS_BETTER",
+      "family": "TAIL",
+      "name": "tail-weighted-cost-quantile",
+      "required": true,
+      "threshold": 12.0
+    },
+    {
+      "direction": "LOWER_IS_BETTER",
+      "family": "DRIFT",
+      "name": "drift-max-success-gap",
+      "required": false,
+      "threshold": 1.0
+    }
+  ],
+  "protocol_id": "lc-hok188-p1",
+  "registered_at": "2026-06-01T08:00:00Z",
+  "revision": 1,
+  "seeds": [
+    11,
+    23,
+    37
+  ],
+  "sensitivity_analyses": [
+    "report SNIPS beside IPS for every observed channel",
+    "report support, weight quantiles and effective sample size"
+  ],
+  "splits": [
+    {
+      "corpus_seal": "sha256:8d6f764b2f7c0a1d7beb3a4db1ea9107e5661b32cfc2e2a1d6104ce24390a418",
+      "disjoint_from": [
+        "TRAIN",
+        "VALIDATION"
+      ],
+      "item_count": 8,
+      "split": "HOLDOUT"
+    },
+    {
+      "corpus_seal": "sha256:703748ed09b2c7c0b9053af9e68979096ac39e30832cb4e9fe928e542bf63427",
+      "disjoint_from": [
+        "HOLDOUT",
+        "VALIDATION"
+      ],
+      "item_count": 6,
+      "split": "TRAIN"
+    },
+    {
+      "corpus_seal": "sha256:bb1c7dc271d390d932ca8e6304e0a2beb2d07d3669bb273d790dbcf511e70bd9",
+      "disjoint_from": [
+        "HOLDOUT",
+        "TRAIN"
+      ],
+      "item_count": 16,
+      "split": "VALIDATION"
+    }
+  ],
+  "tasks": [
+    "offline-baseline-benchmark"
+  ]
+}

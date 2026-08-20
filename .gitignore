@@ -1,0 +1,21 @@
+# Build artifacts
+/dist/
+/build/
+*.egg-info/
+
+# Environments
+/.venv/
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local ledger stores and holdout usage records created while trying the CLI.
+# A real store lives wherever the operator points --root; these are the paths
+# the README and docs use in their examples.
+/store/
+/snapshot.json
+/holdout-usage.json

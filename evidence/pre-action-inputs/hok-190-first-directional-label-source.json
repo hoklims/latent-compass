@@ -1,0 +1,188 @@
+{
+  "contract_version": "1.0.0",
+  "canonicalization_version": "1.0.0",
+  "decision_point_id": "hok-190-first-directional-label-source-v1",
+  "captured_at": "2026-08-17T07:28:18Z",
+  "producer_id": "codex-lead",
+  "objective_summary": "Choose the safest credible source for the first directional pairwise labels without weakening independence or holdout blindness.",
+  "context_facts": [
+    {
+      "fact_id": "context-01",
+      "statement": "The provisioned labeler v1 is separately hosted, signs bundles with GitHub OIDC and intentionally emits only TIE or ABSTAIN.",
+      "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"
+    },
+    {
+      "fact_id": "context-02",
+      "statement": "The pairwise supervision contract forbids inventing counterfactual outcomes and requires labels from an independent fixed specification.",
+      "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"
+    },
+    {
+      "fact_id": "context-03",
+      "statement": "The evaluation protocol forbids training access to the holdout and requires reproducible pre-registered evidence.",
+      "source_digest": "sha256:61addccf47be5fe813e83b17c98f62a9694b22f24a87a32fda9c194ffca4dfa3"
+    }
+  ],
+  "constraints": [
+    {
+      "constraint_id": "constraint-01",
+      "kind": "INVARIANT",
+      "statement": "The label source must not receive selected direction, outcomes, propensities, verdicts, split names or holdout content.",
+      "source_digest": "sha256:80b41473d902eff578e49339e732a313963ba8a7c7f461fe41d0ae5fa8f106a5"
+    },
+    {
+      "constraint_id": "constraint-02",
+      "kind": "INVARIANT",
+      "statement": "Every durable label must bind the exact pair input, JudgeSpec version, producer identity and externally witnessed integrity proof.",
+      "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"
+    },
+    {
+      "constraint_id": "constraint-03",
+      "kind": "OBJECTIVE",
+      "statement": "Directional labels must express defensible semantic comparison rather than merely repeat producer-authored numeric preferences.",
+      "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"
+    }
+  ],
+  "candidates": [
+    {
+      "direction_id": "deterministic-rule-labeler",
+      "sanitized_summary": "Extend the separate signer with a frozen deterministic rule engine over the structured projection.",
+      "parameters": [
+        {
+          "name": "external-service-required",
+          "value": {"kind": "BOOLEAN", "boolean_value": false}
+        },
+        {
+          "name": "repeated-run-byte-stability",
+          "value": {"kind": "BOOLEAN", "boolean_value": true}
+        }
+      ],
+      "applicable_constraint_ids": ["constraint-01", "constraint-02", "constraint-03"],
+      "evidence": [
+        {
+          "dimension": "SUCCESS",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "rule-success-01", "statement": "The existing separate workflow already proves canonical execution and keyless signing for a frozen deterministic JudgeSpec.", "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"}],
+          "reason": null
+        },
+        {
+          "dimension": "VIOLATION",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "rule-violation-01", "statement": "Rules over producer-authored fields can restate producer preferences instead of providing independent semantic judgment.", "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"}],
+          "reason": null
+        },
+        {
+          "dimension": "COST",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "rule-cost-01", "statement": "This direction needs no inference provider, human review queue or new runtime credential.", "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"}],
+          "reason": null
+        },
+        {
+          "dimension": "INFORMATION",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "rule-information-01", "statement": "A closed rule engine cannot reliably interpret arbitrary semantic summaries unless the producer pre-encodes the comparison.", "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"}],
+          "reason": null
+        },
+        {
+          "dimension": "REVERSIBILITY",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "rule-reversibility-01", "statement": "A new JudgeSpec version can be disabled without changing the HOK-234 projection or authority contracts.", "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"}],
+          "reason": null
+        }
+      ]
+    },
+    {
+      "direction_id": "frozen-model-labeler",
+      "sanitized_summary": "Use an external language model behind the separate signed workflow with a frozen prompt, model identifier and conservative abstention policy.",
+      "parameters": [
+        {
+          "name": "external-service-required",
+          "value": {"kind": "BOOLEAN", "boolean_value": true}
+        },
+        {
+          "name": "repeated-run-byte-stability",
+          "value": {"kind": "BOOLEAN", "boolean_value": false}
+        }
+      ],
+      "applicable_constraint_ids": ["constraint-01", "constraint-02", "constraint-03"],
+      "evidence": [
+        {
+          "dimension": "SUCCESS",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "model-success-01", "statement": "A language model can compare bounded semantic summaries and dimension-specific facts without receiving post-action fields.", "source_digest": "sha256:80b41473d902eff578e49339e732a313963ba8a7c7f461fe41d0ae5fa8f106a5"}],
+          "reason": null
+        },
+        {
+          "dimension": "VIOLATION",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "model-violation-01", "statement": "Provider drift and non-deterministic inference can break the exact repeated-run requirement even with a fixed prompt and temperature.", "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"}],
+          "reason": null
+        },
+        {
+          "dimension": "COST",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "model-cost-01", "statement": "This direction requires a separately governed provider credential, usage budget and retention policy.", "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"}],
+          "reason": null
+        },
+        {
+          "dimension": "INFORMATION",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "model-information-01", "statement": "The model can synthesize tradeoffs across all five declared dimensions and provide reasons for abstention.", "source_digest": "sha256:80b41473d902eff578e49339e732a313963ba8a7c7f461fe41d0ae5fa8f106a5"}],
+          "reason": null
+        },
+        {
+          "dimension": "REVERSIBILITY",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "model-reversibility-01", "statement": "The provider call can be removed while preserving the signed bundle boundary and all existing contracts.", "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"}],
+          "reason": null
+        }
+      ]
+    },
+    {
+      "direction_id": "human-rubric-labeler",
+      "sanitized_summary": "Require a named independent human reviewer to apply a frozen rubric and submit a signed structured judgment through the separate repository.",
+      "parameters": [
+        {
+          "name": "external-service-required",
+          "value": {"kind": "BOOLEAN", "boolean_value": false}
+        },
+        {
+          "name": "repeated-run-byte-stability",
+          "value": {"kind": "BOOLEAN", "boolean_value": false}
+        }
+      ],
+      "applicable_constraint_ids": ["constraint-01", "constraint-02", "constraint-03"],
+      "evidence": [
+        {
+          "dimension": "SUCCESS",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "human-success-01", "statement": "A reviewer can understand the semantic alternatives and judge evidence that a closed rule engine cannot interpret.", "source_digest": "sha256:80b41473d902eff578e49339e732a313963ba8a7c7f461fe41d0ae5fa8f106a5"}],
+          "reason": null
+        },
+        {
+          "dimension": "VIOLATION",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "human-violation-01", "statement": "A single reviewer introduces subjective and operator-correlated bias unless blinded repetition and disagreement handling are specified.", "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"}],
+          "reason": null
+        },
+        {
+          "dimension": "COST",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "human-cost-01", "statement": "Every comparison consumes manual review time and limits corpus throughput.", "source_digest": "sha256:61addccf47be5fe813e83b17c98f62a9694b22f24a87a32fda9c194ffca4dfa3"}],
+          "reason": null
+        },
+        {
+          "dimension": "INFORMATION",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "human-information-01", "statement": "A human can expose ambiguity, missing evidence and rubric defects instead of forcing a directional answer.", "source_digest": "sha256:5f7376eb30a79242a33c396e01b7a1eb7e413ab02b1e12dd8619ecab6e5f2ba1"}],
+          "reason": null
+        },
+        {
+          "dimension": "REVERSIBILITY",
+          "availability": "PRESENT",
+          "facts": [{"fact_id": "human-reversibility-01", "statement": "The review process can stop without changing the projection contract or granting execution authority.", "source_digest": "sha256:7e98a71a1db79f6294e6692876760da3a690cc66b8ee5577799a94613107920d"}],
+          "reason": null
+        }
+      ]
+    }
+  ]
+}

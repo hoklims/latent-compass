@@ -1,0 +1,129 @@
+[build-system]
+# Pinned exactly, and mirrored into the dev group below, so the backend and its
+# closure land in uv.lock and in docs/licenses/dependency-audit.md. A range here
+# would mean the audited build and the built build could differ.
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "latent-compass"
+version = "0.1.0"
+description = "Shadow-mode contracts and an append-only episode ledger for coding agents: validates and records supplied advisories, never executes, promotes or decides."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "latent-compass contributors" }]
+keywords = ["shadow-mode", "ledger", "evaluation-protocol", "agent-observability"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+  "Typing :: Typed",
+]
+dependencies = ["pydantic>=2,<3"]
+
+[project.urls]
+Homepage = "https://github.com/hoklims/latent-compass"
+Source = "https://github.com/hoklims/latent-compass"
+Issues = "https://github.com/hoklims/latent-compass/issues"
+
+[project.scripts]
+latent-compass = "latent_compass.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.6,<1",
+  "mypy>=1.11,<2",
+  # The build backend, mirrored from [build-system] so its closure is locked
+  # and licence-audited rather than resolved fresh and unexamined at build time.
+  "hatchling==1.32.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/latent_compass"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  # The demonstration corpus travels with the sdist so `benchmark run` is
+  # reproducible from the source distribution alone, and so the generator's
+  # byte-identity test has something to compare against.
+  "/corpus",
+  "/README.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/SECURITY.md",
+  "/CONTRIBUTING.md",
+  "/CODE_OF_CONDUCT.md",
+  "/GOVERNANCE.md",
+  "/pyproject.toml",
+  # Shipped so the sdist reproduces the audited environment, not merely a
+  # fresh resolution of the version ranges.
+  "/uv.lock",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W",    # pycodestyle
+  "F",         # pyflakes
+  "I",         # isort
+  "N",         # pep8-naming
+  "UP",        # pyupgrade
+  "B",         # bugbear
+  "C4",        # comprehensions
+  "SIM",       # simplify
+  "RET",       # return
+  "PTH",       # use pathlib
+  "ARG",       # unused arguments
+  "PT",        # pytest style
+  "S",         # bandit
+  "SLF",       # private-member access — deliberate in tests, never in src
+  "TID",       # tidy imports
+  "RUF",       # ruff-specific
+]
+ignore = [
+  "S101",    # asserts are the test oracle vocabulary
+  "RUF012",  # ClassVar annotation not required for pydantic model_config
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S105", "S106", "S108", "ARG001", "ARG002"]
+# N818 wants every exception to end in "Error". The refusal vocabulary is
+# deliberately domain-shaped instead — AuthorityRefusal, EpochClosed,
+# DuplicateEpisode read as what the system refused, which is the point of the
+# type. The convention is waived here, and only here.
+"src/latent_compass/errors.py" = ["N818"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["src", "tests"]
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+disallow_any_unimported = true
+enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true

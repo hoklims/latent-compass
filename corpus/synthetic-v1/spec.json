@@ -1,0 +1,47 @@
+{
+  "baselines": [
+    {
+      "algorithm_version": "1.0.0",
+      "baseline_id": "fixed-canonical",
+      "kind": "TRIVIAL"
+    },
+    {
+      "algorithm_version": "1.0.0",
+      "baseline_id": "least-uncertainty",
+      "kind": "STRONG"
+    },
+    {
+      "algorithm_version": "1.0.0",
+      "baseline_id": "logged-propensity-arbiter",
+      "kind": "STRONG"
+    },
+    {
+      "algorithm_version": "1.0.0",
+      "baseline_id": "seeded-uniform",
+      "kind": "TRIVIAL"
+    }
+  ],
+  "benchmark_id": "lc-hok188-b1",
+  "budget": {
+    "max_candidate_inspections_per_case": 4,
+    "max_cases": 64,
+    "max_random_draws_per_case": 1
+  },
+  "contract_version": "1.1.0",
+  "corpus_id": "lc-synthetic-bench",
+  "corpus_version": "v1.0.0",
+  "epoch": "LC-HOK188-E1",
+  "executed_split": "VALIDATION",
+  "holdout_corpus_seal": "sha256:8d6f764b2f7c0a1d7beb3a4db1ea9107e5661b32cfc2e2a1d6104ce24390a418",
+  "minimum_propensity": 0.015625,
+  "protocol_id": "lc-hok188-p1",
+  "protocol_seal": "sha256:2957a32acb75cb368d079840a69c3473839d9c831f4fbbb36edb394c912a5e21",
+  "seeds": [
+    11,
+    23,
+    37
+  ],
+  "tail_quantile": 0.9,
+  "train_corpus_seal": "sha256:703748ed09b2c7c0b9053af9e68979096ac39e30832cb4e9fe928e542bf63427",
+  "validation_corpus_seal": "sha256:bb1c7dc271d390d932ca8e6304e0a2beb2d07d3669bb273d790dbcf511e70bd9"
+}
