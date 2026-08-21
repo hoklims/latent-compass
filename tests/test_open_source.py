@@ -21,6 +21,7 @@ REQUIRED_FILES = (
     "LICENSE",
     "NOTICE",
     "README.md",
+    "README.fr.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
     "SECURITY.md",
@@ -98,6 +99,34 @@ def test_the_readme_separates_demonstrated_experimental_and_projected() -> None:
     for heading in ("### Demonstrated", "### Experimental", "### Projected"):
         assert heading in readme
     assert "no such claim is made" in prose("README.md")
+
+
+def test_the_readmes_share_bilingual_authority_invariants() -> None:
+    english = prose("README.md")
+    french = prose("README.fr.md")
+    assert "[français](readme.fr.md)" in english
+    assert "[english](readme.md)" in french
+    for claim in ("validates and records", "emits no operational advisory", "kill_discovery"):
+        assert claim in english
+    for claim in ("valide et enregistre", "aucun avis opérationnel", "kill_discovery"):
+        assert claim in french
+    assert "automatically chooses the best strategy" not in english
+    assert "choisit automatiquement la meilleure stratégie" not in french
+    metadata = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "/README.fr.md" in metadata["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
+
+
+def test_readme_relative_links_resolve() -> None:
+    link_pattern = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+    for readme in ("README.md", "README.fr.md"):
+        text = (REPO / readme).read_text(encoding="utf-8")
+        targets = link_pattern.findall(text)
+        assert targets, f"{readme} contains no Markdown links"
+        for target in targets:
+            path = target.split("#", 1)[0]
+            if not path or re.match(r"^[a-z][a-z0-9+.-]*://", path, re.IGNORECASE):
+                continue
+            assert (REPO / path).exists(), f"{readme} links to missing path: {path}"
 
 
 def test_benchmark_docs_do_not_claim_a_seal_proves_registration_time() -> None:
