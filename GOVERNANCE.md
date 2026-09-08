@@ -27,8 +27,68 @@ A store is bound to all four identity fields at creation. Every append checks
 all four; a mismatch on any one is refused with the offending field named, no
 row is written, and the root seal is unchanged.
 
-**Codex and Claude stores never mix**, physically or logically. There is no
-import path, no merge, and no implicit migration.
+**Codex and Claude episode stores never mix**, physically or logically. The
+strategic decision memory follows the same physical separation. It adds no
+merge or implicit migration: its sole crossing is an explicit sealed transfer
+to one exact destination, imported as `FOREIGN_READ_ONLY` and never treated as
+native or authority-bearing. The post-action reconciliation journal follows the
+same separation and offers no crossing at all — there is none to make, so none
+is implemented.
+
+### Strategic decision memory
+
+Strategic memory is a separate opt-in store, not an extension of `Episode
+1.0.0`. A record must declare `STRATEGIC_HIGH_IMPACT` and `NON_SENSITIVE`, bind
+one decision authority and review/expiry dates, and embed a complete pre-action
+HOK-234 projection. It cannot carry a selected route, outcome, label, score,
+verdict, holdout metadata or execution authorisation.
+
+Revisions append and must name the exact sealed head they supersede.
+Revocation and tombstones append too; expiry filters the active view at an
+explicit instant. Reading or importing a record grants no capability. Full
+contract and operator guidance: `docs/decision-memory.md`.
+
+### Post-action reconciliation
+
+Observations about a decision live in a third separate store, not in the decision
+and not in an episode. A reconciliation names one exact pre-action revision by
+binding, id, revision, record seal and projection seal, and writes nothing back:
+no decision gains an outcome field and no pre-action seal moves.
+
+Authorization state and execution state are separate declared axes, and the
+journal issues neither — `AUTHORIZED_ELSEWHERE` records that some other named
+authority authorised the action. Observations are carried only for the candidate
+the record says was executed, so no outcome can be attributed to an alternative.
+Each of the five dimensions is either observed with a source, a digest, an
+instant, a producer and a stated confidence, or explicitly unknown for one of
+`ABSENT`, `LATE`, `AMBIGUOUS` or `DISPUTED` — and an unknown carries no value.
+
+Corrections and disagreements append, naming the exact head they extend and why;
+one pre-action revision has exactly one reconciliation identity. Nothing scores,
+ranks or draws a causal conclusion from what is recorded, and nothing reads the
+journal back into a policy. Retention and deletion follow the rules above: the
+journal is destroyed as a file, by an operator, with operator tools. Full
+contract and operator guidance: `docs/decision-reconciliation.md`.
+
+### Prospective shadow collection
+
+Prospective collection is a fourth local store with a sealed plan of its own.
+It binds the exact HOK-243 and HOK-244 source identity, population, pre-action
+strata, calendar, maximum enrollment, power result, independence identities and
+stop priority before collection starts. It refuses declared capture times before
+that start; it does not independently prove source-store membership or capture
+time. Operators must establish those facts for empirical acceptance.
+Cancellation, non-execution and loss to follow-up remain in the
+denominator, and unknown dimensions remain visible as missingness.
+
+Only the current verified reconciliation-journal tail may terminalize a case as
+eligible. Producer independence is a syntactic comparison of declared identity
+strings, not authentication. Manifests contain every case; reports expose only
+eligibility, non-execution, cancellation, loss, missingness and stratum
+inclusion diagnostics. Neither artifact carries authority, a routing decision,
+a causal conclusion or a training label. Status is **OFFLINE_VERIFIED** until a
+real elapsed collection completes. Full guidance:
+`docs/prospective-shadow-collection.md`.
 
 ### Benchmark corpora
 
@@ -57,6 +117,12 @@ Minimisation is a recording-time obligation, not a cleanup step.
   tombstone reason, a metric or task name — accept whatever the caller writes.
   Sanitising them is the caller's obligation. This package does not scan them
   and does not claim they are clean.
+- Strategic decision admission adds a bounded pre-write screen for named
+  credential shapes and forbidden semantic fields. This reduces accidental
+  capture but does not detect arbitrary secrets and does not sanitise prose.
+  The caller remains responsible for the explicit `NON_SENSITIVE`
+  classification; `latent-compass memory limits` publishes the exact bounds and
+  non-claim.
 - A field withheld at recording time is declared as a `RedactionMark` over one
   of the schema's optional fields, and the declaration is **verified against a
   real absence**. A marker over a value that is still present is refused, so a
@@ -66,6 +132,9 @@ Minimisation is a recording-time obligation, not a cleanup step.
 
 - A store is local, single-host and operator-owned. **Nothing is transmitted.**
   The package opens no socket.
+- A strategic decision crosses stores only when an operator explicitly exports
+  an addressed envelope and imports that file into the named destination. The
+  package performs no synchronisation or transport and opens no socket.
 - Abandoning an epoch bounds **acquisition**: no further episode is accepted. It
   does **not** bound storage duration, and it deletes nothing. How long an
   abandoned store is kept is an operator policy this package neither sets nor
@@ -132,7 +201,9 @@ would be governance theatre. This section describes what actually happens.
 - **Ordinary changes** — bug fixes, tests, documentation: a maintainer reviews
   and merges.
 - **Contract changes** — anything touching the authority boundary, the episode
-  contract, the evaluation protocol or the ledger format: requires an ADR in
+  contract, the decision-memory or transfer contract, the reconciliation or
+  replay contract, the evaluation protocol
+  or a ledger/store format: requires an ADR in
   `docs/adr/` recording context, decision, alternatives refused and
   consequences. A contract change is a version change, never an edit in place.
 - **New dependencies**: require a demonstrated need recorded in an ADR and a

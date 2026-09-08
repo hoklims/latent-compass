@@ -1,0 +1,65 @@
+{
+  "collection_not_before": "2026-09-01T00:00:00Z",
+  "contract_version": "1.0.0",
+  "declared_strata": [
+    "maintenance",
+    "feature"
+  ],
+  "hard_calendar_end": "2026-12-01T00:00:00Z",
+  "hard_exclusions": [
+    "PRE_PLAN_OR_BACKFILL",
+    "WRONG_BINDING",
+    "HOLDOUT",
+    "CANCELLED",
+    "INVALID_PREIMAGE",
+    "NON_INDEPENDENT_RECONCILIATION"
+  ],
+  "independence_policy": {
+    "decision_producer_identities": [
+      "replace-with-decision-producer"
+    ]
+  },
+  "max_enrollments": 100,
+  "minimum_calendar_end": "2026-10-01T00:00:00Z",
+  "outcome_dependent_interim_looks": 0,
+  "plan_created_at": "2026-08-31T00:00:00Z",
+  "plan_id": "replace-with-plan-id",
+  "population": "Every qualifying HOK-243 strategic decision captured in the sealed window.",
+  "power": {
+    "achieved_alpha": null,
+    "achieved_power": null,
+    "critical_eligible_count": null,
+    "independent_eligible_count": null,
+    "inputs": {
+      "alpha": 0.05,
+      "clustering_inflation": 1.2,
+      "max_enrollments": 100,
+      "method": "EXACT_ONE_SIDED_BINOMIAL_V1",
+      "p0": 0.5,
+      "p1": 0.55,
+      "target_power": 0.9
+    },
+    "method": "EXACT_ONE_SIDED_BINOMIAL_V1",
+    "required_enrollments": null,
+    "status": "POWER_NOT_ESTABLISHED"
+  },
+  "source_binding": {
+    "decision": {
+      "agent_family": "claude",
+      "epoch": "replace-with-epoch",
+      "host_id": "replace-with-host",
+      "store_id": "replace-with-store"
+    },
+    "reconciliation": {
+      "agent_family": "claude",
+      "epoch": "replace-with-epoch",
+      "host_id": "replace-with-host",
+      "store_id": "replace-with-store"
+    }
+  },
+  "stop_priority": [
+    "INTEGRITY_OR_SECURITY_FAILURE",
+    "SUFFICIENT_AFTER_MINIMUM_CALENDAR",
+    "INSUFFICIENT_AT_HARD_CALENDAR_END"
+  ]
+}

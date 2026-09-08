@@ -51,6 +51,8 @@ include = [
   "/src",
   "/tests",
   "/docs",
+  "/examples",
+  "/evidence",
   # The demonstration corpus travels with the sdist so `benchmark run` is
   # reproducible from the source distribution alone, and so the generator's
   # byte-identity test has something to compare against.
@@ -78,7 +80,7 @@ xfail_strict = true
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-src = ["src", "tests"]
+src = ["src", "tests", "examples"]
 
 [tool.ruff.lint]
 select = [
@@ -118,7 +120,7 @@ ban-relative-imports = "parents"
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["src", "tests"]
+files = ["src", "tests", "examples"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 disallow_any_unimported = true

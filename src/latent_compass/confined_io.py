@@ -11,6 +11,7 @@ import ctypes
 import errno
 import os
 import secrets
+import sys
 from contextlib import suppress
 from pathlib import Path
 from typing import Final
@@ -98,7 +99,7 @@ def write_new_file(root: Path, target: Path, data: bytes, *, what: str) -> Path:
     absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
     absolute_target = plan_confined_target(absolute_root, target, what=what)
     relative = Path(os.path.relpath(absolute_target, absolute_root))
-    if os.name == "nt":
+    if sys.platform == "win32":
         _write_windows(absolute_root, relative, data, what=what)
     else:
         _write_posix(absolute_root, relative, data, what=what)
@@ -212,7 +213,7 @@ def _write_posix(root: Path, relative: Path, data: bytes, *, what: str) -> None:
             os.close(descriptor)
 
 
-if os.name == "nt":
+if sys.platform == "win32":
     from ctypes import wintypes
 
     _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
@@ -333,120 +334,96 @@ if os.name == "nt":
     ]
     _ntdll.NtSetInformationFile.restype = ctypes.c_long
 
-
-def _raise_windows_error(status: int, path: Path) -> None:
-    error = int(_ntdll.RtlNtStatusToDosError(status))
-    if error in {2, 3}:
-        raise FileNotFoundError(error, ctypes.FormatError(error), str(path))
-    if error == 5:
-        raise PermissionError(error, ctypes.FormatError(error), str(path))
-    if error in {80, 183}:
-        raise FileExistsError(error, ctypes.FormatError(error), str(path))
-    raise OSError(error, ctypes.FormatError(error), str(path))
-
-
-def _reject_reparse(handle: int, path: Path, *, what: str) -> None:
-    info = _FileAttributeTagInfo()
-    if not _kernel32.GetFileInformationByHandleEx(
-        handle, 9, ctypes.byref(info), ctypes.sizeof(info)
-    ):
-        error = ctypes.get_last_error()
+    def _raise_windows_error(status: int, path: Path) -> None:
+        error = int(_ntdll.RtlNtStatusToDosError(status))
+        if error in {2, 3}:
+            raise FileNotFoundError(error, ctypes.FormatError(error), str(path))
+        if error == 5:
+            raise PermissionError(error, ctypes.FormatError(error), str(path))
+        if error in {80, 183}:
+            raise FileExistsError(error, ctypes.FormatError(error), str(path))
         raise OSError(error, ctypes.FormatError(error), str(path))
-    if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
-        raise ContractViolation(
-            f"{what} traverses a Windows reparse point; refusing the write",
-            detail={"what": what, "path": str(path)},
-        )
 
+    def _reject_reparse(handle: int, path: Path, *, what: str) -> None:
+        info = _FileAttributeTagInfo()
+        if not _kernel32.GetFileInformationByHandleEx(
+            handle, 9, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+            raise ContractViolation(
+                f"{what} traverses a Windows reparse point; refusing the write",
+                detail={"what": what, "path": str(path)},
+            )
 
-def _open_windows_anchor(anchor: Path, *, what: str) -> int:
-    handle = _kernel32.CreateFileW(
-        str(anchor),
-        _DIRECTORY_TRAVERSE_ACCESS,
-        _SHARE_READ_WRITE,
-        None,
-        _OPEN_EXISTING,
-        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
-        None,
-    )
-    if handle == _INVALID_HANDLE_VALUE:
-        error = ctypes.get_last_error()
-        raise OSError(error, ctypes.FormatError(error), str(anchor))
-    try:
-        _reject_reparse(handle, anchor, what=what)
-    except BaseException:
-        _kernel32.CloseHandle(handle)
-        raise
-    return int(handle)
-
-
-def _nt_create_relative(
-    parent: int,
-    name: str,
-    *,
-    access: int,
-    disposition: int,
-    options: int,
-    path: Path,
-) -> int:
-    name_buffer = ctypes.create_unicode_buffer(name)
-    encoded_length = len(name.encode("utf-16-le"))
-    unicode_name = _UnicodeString(
-        encoded_length, encoded_length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR)
-    )
-    attributes = _ObjectAttributes(
-        ctypes.sizeof(_ObjectAttributes),
-        parent,
-        ctypes.pointer(unicode_name),
-        _OBJ_CASE_INSENSITIVE,
-        None,
-        None,
-    )
-    io_status = _IoStatusBlock()
-    handle = wintypes.HANDLE()
-    status = int(
-        _ntdll.NtCreateFile(
-            ctypes.byref(handle),
-            access,
-            ctypes.byref(attributes),
-            ctypes.byref(io_status),
-            None,
-            _FILE_ATTRIBUTE_NORMAL,
+    def _open_windows_anchor(anchor: Path, *, what: str) -> int:
+        handle = _kernel32.CreateFileW(
+            str(anchor),
+            _DIRECTORY_TRAVERSE_ACCESS,
             _SHARE_READ_WRITE,
-            disposition,
-            options | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
             None,
-            0,
+            _OPEN_EXISTING,
+            _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
         )
-    )
-    if status < 0:
-        _raise_windows_error(status, path)
-    if handle.value is None:  # pragma: no cover - successful NT call invariant
-        raise OSError("NtCreateFile returned an empty handle")
-    return int(handle.value)
+        if handle == _INVALID_HANDLE_VALUE:
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(anchor))
+        try:
+            _reject_reparse(handle, anchor, what=what)
+        except BaseException:
+            _kernel32.CloseHandle(handle)
+            raise
+        return int(handle)
 
-
-def _open_or_create_directory_windows(parent: int, name: str, path: Path, *, what: str) -> int:
-    try:
-        handle = _nt_create_relative(
+    def _nt_create_relative(
+        parent: int,
+        name: str,
+        *,
+        access: int,
+        disposition: int,
+        options: int,
+        path: Path,
+    ) -> int:
+        name_buffer = ctypes.create_unicode_buffer(name)
+        encoded_length = len(name.encode("utf-16-le"))
+        unicode_name = _UnicodeString(
+            encoded_length, encoded_length + 2, ctypes.cast(name_buffer, wintypes.LPWSTR)
+        )
+        attributes = _ObjectAttributes(
+            ctypes.sizeof(_ObjectAttributes),
             parent,
-            name,
-            access=_DIRECTORY_ACCESS,
-            disposition=_FILE_OPEN,
-            options=_FILE_DIRECTORY_FILE,
-            path=path,
+            ctypes.pointer(unicode_name),
+            _OBJ_CASE_INSENSITIVE,
+            None,
+            None,
         )
-    except FileNotFoundError:
-        try:
-            handle = _nt_create_relative(
-                parent,
-                name,
-                access=_DIRECTORY_ACCESS,
-                disposition=_FILE_CREATE,
-                options=_FILE_DIRECTORY_FILE,
-                path=path,
+        io_status = _IoStatusBlock()
+        handle = wintypes.HANDLE()
+        status = int(
+            _ntdll.NtCreateFile(
+                ctypes.byref(handle),
+                access,
+                ctypes.byref(attributes),
+                ctypes.byref(io_status),
+                None,
+                _FILE_ATTRIBUTE_NORMAL,
+                _SHARE_READ_WRITE,
+                disposition,
+                options | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+                None,
+                0,
             )
-        except FileExistsError:
+        )
+        if status < 0:
+            _raise_windows_error(status, path)
+        if handle.value is None:  # pragma: no cover - successful NT call invariant
+            raise OSError("NtCreateFile returned an empty handle")
+        return int(handle.value)
+
+    def _open_or_create_directory_windows(parent: int, name: str, path: Path, *, what: str) -> int:
+        try:
             handle = _nt_create_relative(
                 parent,
                 name,
@@ -455,136 +432,155 @@ def _open_or_create_directory_windows(parent: int, name: str, path: Path, *, wha
                 options=_FILE_DIRECTORY_FILE,
                 path=path,
             )
-    except PermissionError:
-        try:
-            handle = _nt_create_relative(
-                parent,
-                name,
-                access=_DIRECTORY_TRAVERSE_ACCESS,
-                disposition=_FILE_OPEN,
-                options=_FILE_DIRECTORY_FILE,
-                path=path,
-            )
+        except FileNotFoundError:
+            try:
+                handle = _nt_create_relative(
+                    parent,
+                    name,
+                    access=_DIRECTORY_ACCESS,
+                    disposition=_FILE_CREATE,
+                    options=_FILE_DIRECTORY_FILE,
+                    path=path,
+                )
+            except FileExistsError:
+                handle = _nt_create_relative(
+                    parent,
+                    name,
+                    access=_DIRECTORY_ACCESS,
+                    disposition=_FILE_OPEN,
+                    options=_FILE_DIRECTORY_FILE,
+                    path=path,
+                )
+        except PermissionError:
+            try:
+                handle = _nt_create_relative(
+                    parent,
+                    name,
+                    access=_DIRECTORY_TRAVERSE_ACCESS,
+                    disposition=_FILE_OPEN,
+                    options=_FILE_DIRECTORY_FILE,
+                    path=path,
+                )
+            except OSError as exc:
+                raise ContractViolation(
+                    f"{what} contains a directory component that cannot be opened safely",
+                    detail={"what": what, "path": str(path)},
+                ) from exc
         except OSError as exc:
             raise ContractViolation(
                 f"{what} contains a directory component that cannot be opened safely",
                 detail={"what": what, "path": str(path)},
             ) from exc
-    except OSError as exc:
-        raise ContractViolation(
-            f"{what} contains a directory component that cannot be opened safely",
-            detail={"what": what, "path": str(path)},
-        ) from exc
-    try:
-        _reject_reparse(handle, path, what=what)
-    except BaseException:
-        _kernel32.CloseHandle(handle)
-        raise
-    return handle
+        try:
+            _reject_reparse(handle, path, what=what)
+        except BaseException:
+            _kernel32.CloseHandle(handle)
+            raise
+        return handle
 
-
-def _set_windows_disposition(handle: int, *, delete: bool) -> None:
-    disposition = _FileDispositionInformation(delete)
-    io_status = _IoStatusBlock()
-    status = int(
-        _ntdll.NtSetInformationFile(
-            handle,
-            ctypes.byref(io_status),
-            ctypes.byref(disposition),
-            ctypes.sizeof(disposition),
-            13,
+    def _set_windows_disposition(handle: int, *, delete: bool) -> None:
+        disposition = _FileDispositionInformation(delete)
+        io_status = _IoStatusBlock()
+        status = int(
+            _ntdll.NtSetInformationFile(
+                handle,
+                ctypes.byref(io_status),
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+                13,
+            )
         )
-    )
-    if status < 0:
-        _raise_windows_error(status, Path("<temporary-output-handle>"))
+        if status < 0:
+            _raise_windows_error(status, Path("<temporary-output-handle>"))
 
+    def _dispose_windows_file(handle: int) -> None:
+        _set_windows_disposition(handle, delete=True)
 
-def _dispose_windows_file(handle: int) -> None:
-    _set_windows_disposition(handle, delete=True)
+    def _link_windows_file(handle: int, parent: int, final_name: str, path: Path) -> None:
+        class _FileLinkInformation(ctypes.Structure):
+            _fields_ = [
+                ("ReplaceIfExists", wintypes.BOOLEAN),
+                ("RootDirectory", wintypes.HANDLE),
+                ("FileNameLength", wintypes.ULONG),
+                ("FileName", wintypes.WCHAR * len(final_name)),
+            ]
 
-
-def _link_windows_file(handle: int, parent: int, final_name: str, path: Path) -> None:
-    class _FileLinkInformation(ctypes.Structure):
-        _fields_ = [
-            ("ReplaceIfExists", wintypes.BOOLEAN),
-            ("RootDirectory", wintypes.HANDLE),
-            ("FileNameLength", wintypes.ULONG),
-            ("FileName", wintypes.WCHAR * len(final_name)),
-        ]
-
-    link = _FileLinkInformation(False, parent, len(final_name.encode("utf-16-le")), final_name)
-    io_status = _IoStatusBlock()
-    status = int(
-        _ntdll.NtSetInformationFile(
-            handle,
-            ctypes.byref(io_status),
-            ctypes.byref(link),
-            ctypes.sizeof(link),
-            11,
+        link = _FileLinkInformation(False, parent, len(final_name.encode("utf-16-le")), final_name)
+        io_status = _IoStatusBlock()
+        status = int(
+            _ntdll.NtSetInformationFile(
+                handle,
+                ctypes.byref(io_status),
+                ctypes.byref(link),
+                ctypes.sizeof(link),
+                11,
+            )
         )
-    )
-    if status < 0:
-        _raise_windows_error(status, path)
+        if status < 0:
+            _raise_windows_error(status, path)
 
-
-def _write_windows(root: Path, relative: Path, data: bytes, *, what: str) -> None:
-    handles: list[int] = []
-    temporary: int | None = None
-    final_path = root / relative
-    try:
-        anchor = Path(root.anchor)
-        current = _open_windows_anchor(anchor, what=what)
-        handles.append(current)
-        traversed = anchor
-        directory_components = (*root.parts[1:], *relative.parts[:-1])
-        for component in directory_components:
-            traversed /= component
-            current = _open_or_create_directory_windows(current, component, traversed, what=what)
+    def _write_windows(root: Path, relative: Path, data: bytes, *, what: str) -> None:
+        handles: list[int] = []
+        temporary: int | None = None
+        final_path = root / relative
+        try:
+            anchor = Path(root.anchor)
+            current = _open_windows_anchor(anchor, what=what)
             handles.append(current)
-        temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
-        temporary = _nt_create_relative(
-            current,
-            temporary_name,
-            access=_FILE_ACCESS,
-            disposition=_FILE_CREATE,
-            options=_FILE_NON_DIRECTORY_FILE | _FILE_DELETE_ON_CLOSE,
-            path=final_path.parent / temporary_name,
-        )
-        if data:
-            buffer = ctypes.create_string_buffer(data)
-            written = wintypes.DWORD()
-            if not _kernel32.WriteFile(temporary, buffer, len(data), ctypes.byref(written), None):
+            traversed = anchor
+            directory_components = (*root.parts[1:], *relative.parts[:-1])
+            for component in directory_components:
+                traversed /= component
+                current = _open_or_create_directory_windows(
+                    current, component, traversed, what=what
+                )
+                handles.append(current)
+            temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
+            temporary = _nt_create_relative(
+                current,
+                temporary_name,
+                access=_FILE_ACCESS,
+                disposition=_FILE_CREATE,
+                options=_FILE_NON_DIRECTORY_FILE | _FILE_DELETE_ON_CLOSE,
+                path=final_path.parent / temporary_name,
+            )
+            if data:
+                buffer = ctypes.create_string_buffer(data)
+                written = wintypes.DWORD()
+                if not _kernel32.WriteFile(
+                    temporary, buffer, len(data), ctypes.byref(written), None
+                ):
+                    error = ctypes.get_last_error()
+                    raise OSError(error, ctypes.FormatError(error), str(final_path))
+                if written.value != len(data):
+                    raise OSError("short filesystem write")
+            if not _kernel32.FlushFileBuffers(temporary):
                 error = ctypes.get_last_error()
                 raise OSError(error, ctypes.FormatError(error), str(final_path))
-            if written.value != len(data):
-                raise OSError("short filesystem write")
-        if not _kernel32.FlushFileBuffers(temporary):
-            error = ctypes.get_last_error()
-            raise OSError(error, ctypes.FormatError(error), str(final_path))
-        try:
-            _link_windows_file(temporary, current, relative.name, final_path)
-        except FileExistsError as exc:
-            raise ContractViolation(
-                f"{what} already exists; refusing to overwrite it",
-                detail={"what": what, "path": str(final_path)},
-            ) from exc
-        if not _kernel32.FlushFileBuffers(temporary):
-            error = ctypes.get_last_error()
-            raise OSError(error, ctypes.FormatError(error), str(final_path))
-        _kernel32.CloseHandle(temporary)
-        temporary = None
-    except BaseException as primary:
-        if temporary is not None:
             try:
-                _dispose_windows_file(temporary)
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "temporary cleanup could not be reaffirmed; "
-                    f"FILE_DELETE_ON_CLOSE remains active: {cleanup_error}"
-                )
-        raise
-    finally:
-        if temporary is not None:
+                _link_windows_file(temporary, current, relative.name, final_path)
+            except FileExistsError as exc:
+                raise ContractViolation(
+                    f"{what} already exists; refusing to overwrite it",
+                    detail={"what": what, "path": str(final_path)},
+                ) from exc
+            if not _kernel32.FlushFileBuffers(temporary):
+                error = ctypes.get_last_error()
+                raise OSError(error, ctypes.FormatError(error), str(final_path))
             _kernel32.CloseHandle(temporary)
-        for handle in reversed(handles):
-            _kernel32.CloseHandle(handle)
+            temporary = None
+        except BaseException as primary:
+            if temporary is not None:
+                try:
+                    _dispose_windows_file(temporary)
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "temporary cleanup could not be reaffirmed; "
+                        f"FILE_DELETE_ON_CLOSE remains active: {cleanup_error}"
+                    )
+            raise
+        finally:
+            if temporary is not None:
+                _kernel32.CloseHandle(temporary)
+            for handle in reversed(handles):
+                _kernel32.CloseHandle(handle)

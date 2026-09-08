@@ -41,7 +41,17 @@ REQUIRED_FILES = (
     "docs/adr/0004-independent-pairwise-supervision.md",
     "docs/adr/0005-judgeable-pre-action-sidecar.md",
     "docs/adr/0006-keyless-independent-pairwise-labeler.md",
+    "docs/adr/0007-correct-off-policy-tail-and-labeler-trust.md",
+    "docs/adr/0008-opt-in-strategic-decision-memory.md",
+    "docs/adr/0009-post-action-reconciliation-journal.md",
+    "docs/adr/0010-prospective-shadow-collection.md",
+    "docs/decision-memory.md",
+    "docs/decision-reconciliation.md",
+    "docs/prospective-shadow-collection.md",
     "docs/licenses/dependency-audit.md",
+    "examples/synthetic-episode.json",
+    "examples/synthetic-projection.json",
+    "examples/walkthrough.py",
     "corpus/synthetic-v1/PROVENANCE.md",
 )
 
@@ -195,7 +205,17 @@ def test_no_secret_material_is_committed(pattern: str) -> None:
     compiled = re.compile(pattern)
     for path in sorted(REPO.rglob("*")):
         parts = set(path.parts)
-        if not path.is_file() or {".git", ".venv", ".omx", "dist", "graphify-out"} & parts:
+        ignored = {
+            ".git",
+            ".mypy_cache",
+            ".omx",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "dist",
+            "graphify-out",
+        }
+        if not path.is_file() or ignored & parts:
             continue
         if path.suffix not in {
             ".py",
@@ -224,7 +244,15 @@ def test_no_private_host_path_leaks_into_the_repository() -> None:
     needles = ("c:" + "\\users\\", "c:" + "/users/", "mainten" + "ence", "appdata" + "\\local")
     scanned = 0
     for path in sorted(REPO.rglob("*.py")) + sorted(REPO.rglob("*.md")):
-        if {".git", ".venv", ".omx", "dist"} & set(path.parts):
+        if {
+            ".git",
+            ".mypy_cache",
+            ".omx",
+            ".pytest_cache",
+            ".ruff_cache",
+            ".venv",
+            "dist",
+        } & set(path.parts):
             continue
         text = path.read_text(encoding="utf-8").lower()
         scanned += 1
@@ -446,3 +474,10 @@ def test_the_package_declares_the_python_it_was_built_for() -> None:
     metadata = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert metadata["project"]["requires-python"] == ">=3.13,<3.14"
     assert metadata["project"]["scripts"] == {"latent-compass": "latent_compass.cli:main"}
+
+
+def test_typed_metadata_and_source_distribution_inputs_exist() -> None:
+    metadata = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
+    included = set(metadata["tool"]["hatch"]["build"]["targets"]["sdist"]["include"])
+    assert (REPO / "src" / "latent_compass" / "py.typed").is_file()
+    assert {"/examples", "/evidence"} <= included

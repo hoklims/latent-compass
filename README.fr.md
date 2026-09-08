@@ -118,6 +118,20 @@ benchmark en autorisation.
 - **Une capture pré-action jugeable.** Les preuves propres à chaque candidat
   sont enregistrées dans un fichier compagnon immuable, sans révéler l’action
   choisie ni le résultat ultérieur.
+- **Une mémoire stratégique à activation explicite.** Un registre séparé, lié à
+  l’hôte et à la famille d’agent, n’accepte que les décisions déclarées
+  `STRATEGIC_HIGH_IMPACT` et `NON_SENSITIVE`. Il gère les révisions, la
+  révocation, l’expiration, les tombstones et les transferts scellés en lecture
+  seule, sans choisir, noter, exécuter ni autoriser une piste.
+- **Un journal de réconciliation post-action.** Chaque observation vise la
+  révision pré-action exacte. L’autorisation et l’exécution restent deux axes
+  distincts ; les valeurs absentes restent des inconnues explicites ; le rejeu
+  ne produit ni score, ni classement, ni causalité, ni autorité.
+- **Une collecte prospective pré-enregistrée.** Le plan scellé fixe avant
+  l’inscription la source, la population, les strates, le calendrier, les règles
+  d’arrêt, la séparation des producteurs et les hypothèses binomiales exactes.
+  Son rapport terminal mesure l’inclusion et les données manquantes ; il
+  n’évalue aucune politique.
 - **Le confinement.** Les écritures durables restent sous une racine explicite,
   refusent l’écrasement silencieux et ne suivent pas les liens remplacés.
 
@@ -128,6 +142,8 @@ benchmark en autorisation.
   pondéré du coût de queue introduit par le contrat de benchmark 1.1.0.
 - Le corpus synthétique. Il prouve que le pipeline s’exécute et refuse les
   entrées invalides ; il ne prouve pas qu’une politique est bonne.
+- Le walkthrough synthétique. Il exerce les interfaces publiques de bout en
+  bout ; il ne constitue ni une collecte réelle, ni une preuve empirique.
 - Le caviardage par tombstone et l’ancrage local durable.
 - Un labeler sans clé prouvé par des éléments externes. Son workflow privé est
   lié par GitHub OIDC et Sigstore, mais sa rubrique conservatrice a produit une
@@ -149,6 +165,14 @@ signifie pas qu’un ranker a échoué : aucun ranker n’a été entraîné. Le
 disposait pas d’assez de supervision directionnelle éligible, de résultats
 calibrables ni d’un jeu holdout apte à étayer une affirmation pour autoriser l’étape
 suivante. Ce refus fait partie du résultat.
+
+HOK-253 reste une porte d’entrée vers les données réelles. Un responsable doit
+fournir la population, les sources, les strates, les taux nul et alternatif,
+alpha, la puissance cible, l’inflation de regroupement, le calendrier, les
+exclusions et les identités des producteurs. Le paquet ne définit aucune valeur
+statistique par défaut et ne planifie aucune collecte. Les valeurs synthétiques
+du dossier `examples/` ne peuvent débloquer ni entraînement, ni canary, ni
+activation, ni promotion.
 
 ## Un exemple concret
 
@@ -188,6 +212,19 @@ cd latent-compass
 uv sync --all-groups
 ```
 
+Exécutez le walkthrough synthétique autonome dans une nouvelle racine :
+
+```bash
+uv run python examples/walkthrough.py --root ./synthetic-run
+```
+
+Il valide l’[épisode](examples/synthetic-episode.json) et la
+[projection](examples/synthetic-projection.json) fournis, dérive une paire
+aveuglée, écrit la mémoire et la réconciliation, puis clôt une collecte
+prospective synthétique. Il refuse une racine existante. Tous ses résultats
+indiquent qu’ils sont synthétiques et n’ont aucune portée empirique ou
+d’autorité.
+
 Lancez le gate complet du dépôt :
 
 ```bash
@@ -202,8 +239,8 @@ comportementaux ; Ruff et mypy ne le font pas.
 ```bash
 uv run latent-compass init --root ./store --store-id store-alpha \
     --host-id host-alpha --agent-family claude --epoch LC-2026-E1
-uv run latent-compass validate --episode episode.json
-uv run latent-compass append   --root ./store --episode episode.json
+uv run latent-compass validate --episode examples/synthetic-episode.json
+uv run latent-compass append   --root ./store --episode examples/synthetic-episode.json
 uv run latent-compass verify   --root ./store
 uv run latent-compass replay   --root ./store
 uv run latent-compass export   --root ./store --out ./store/snapshot.json
@@ -212,8 +249,8 @@ uv run latent-compass export   --root ./store --out ./store/snapshot.json
 Capturez une projection pré-action jugeable :
 
 ```bash
-uv run latent-compass pairwise capture --projection ./projection.json \
-    --root ./run --out ./run/captures/decision-0001.json
+uv run latent-compass pairwise capture --projection examples/synthetic-projection.json \
+    --root ./run --out ./run/captures/synthetic-decision-0001.json
 ```
 
 `--out` doit rester sous `--root`. Omettez cette option pour écrire uniquement
@@ -254,6 +291,9 @@ vocabulary.py           acteurs, capacités, avis, états du cycle de vie
 authority.py            refus, transitions, preuves reproduites
 episode.py              contrat versionné des épisodes de décision
 pairwise_capture.py     projections pré-action et entrées pairwise aveuglées
+decision_memory/        décisions stratégiques pré-action durables
+decision_reconciliation/ observations post-action durables et rejeu
+prospective_collection/ journal d’inscription scellé et diagnostics
 governance.py           rétention, minimisation, caviardage, suppression
 protocol.py             pré-enregistrement, discipline holdout, continue/kill
 ledger.py               registre append-only, chaîne, ancre, rejeu, export
@@ -304,6 +344,10 @@ documentée et testée.
 | [Supervision pairwise](docs/pairwise-supervision.md) | labels, résultats, calibration et gate de données |
 | [Projection jugeable](docs/judgeable-projection.md) | fichiers compagnons pré-action et dérivation des paires aveuglées |
 | [Labeler indépendant](docs/independent-labeler.md) | identité du workflow externe, preuve, rotation et limites |
+| [État du corpus pairwise](docs/pairwise-corpus-readiness.md) | refus actuel et critères de sortie |
+| [Mémoire de décision](docs/decision-memory.md) | enregistrements pré-action, transferts et limites de confiance |
+| [Réconciliation](docs/decision-reconciliation.md) | observations post-action, inconnues et rejeu |
+| [Collecte prospective](docs/prospective-shadow-collection.md) | pré-enregistrement, inscription, diagnostics et portes vers les données réelles |
 | [Provenance du corpus](corpus/synthetic-v1/PROVENANCE.md) | production du corpus synthétique et limites de ce qu’il peut établir |
 | [Registre](docs/ledger.md) | chaîne, ancre, rejeu, caviardage et limites |
 | [Décisions d’architecture](docs/adr/) | raisons qui ont conduit aux frontières actuelles |

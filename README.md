@@ -22,11 +22,12 @@ Latent Compass was created to explore a harder question:
 declare those decisions correct?**
 
 The project starts with evidence, not intelligence. It captures decision
-episodes, validates their contracts, records them in a tamper-evident local
-ledger, and evaluates fixed policies offline. A deterministic external judge
+episodes, validates their contracts, records them in tamper-evident local
+stores, and evaluates fixed policies offline. A deterministic external judge
 remains authoritative. A human remains the only actor allowed to promote.
 
-Latent Compass **validates and records**. It does not steer the agent.
+Latent Compass **validates and records**. It does not steer the agent and emits
+no operational advisory.
 
 ## The problem it addresses
 
@@ -36,10 +37,10 @@ Imagine an agent facing three plausible directions:
 2. inspect the contract that produced it;
 3. stop and request a missing product decision.
 
-The agent chooses one. Hours later, the task is either green or broken. What is
-usually missing?
+The agent chooses one. Hours later, the task is green or broken. What is usually
+missing?
 
-- the alternatives that were available before the choice;
+- the alternatives available before the choice;
 - the evidence attached to each alternative;
 - the logging propensity of the selected direction;
 - the cost, violations, information gain, and reversibility observed later;
@@ -79,18 +80,17 @@ Agent reaches a decision point
 Latent Compass validates the episode and candidate evidence
             │
             ▼
-Host-bound ledger records an immutable, replayable observation
+Separate memory and reconciliation stores preserve pre- and post-action facts
             │
             ▼
-Offline benchmark compares fixed policies on sealed data
+Offline benchmark and prospective diagnostics inspect sealed recorded data
             │
             ▼
 External judge evaluates evidence ─── Human retains promotion authority
 ```
 
-The authority boundary is deliberate. Latent Compass never calls the external
-judge, never writes back to it, and never turns a benchmark result into an
-authorization.
+Latent Compass never calls the external judge, never writes back to it, and
+never turns a benchmark or collection result into an authorization.
 
 ## What exists today
 
@@ -99,19 +99,30 @@ authorization.
 - **Strict, versioned episode contracts.** Unknown fields, type coercions,
   non-finite values, non-canonical timestamps, invalid propensity distributions,
   and overstated observability are refused.
-- **A fail-closed authority boundary.** Latent Compass emits no operational
-  advisory. Even a locally consistent positive result is refused as
-  `untrusted_evidence` when no external trust root is configured.
-- **A host-bound append-only ledger.** It supports atomic append, replay,
-  structural redaction, integrity verification, and durable anchors.
+- **A fail-closed authority boundary.** Even a locally consistent positive
+  result is refused as `untrusted_evidence` without an external trust root.
+- **Host-bound append-only stores.** Atomic append, replay, structural
+  redaction, integrity verification, and durable anchors make silent mutations
+  detectable within the documented threat model.
 - **A reproducible offline benchmark.** Four pre-registered baseline policies
   run under the same budget on sealed validation data. Verification re-executes
   them instead of trusting a supplied checksum.
 - **Holdout discipline.** The validation runner and pre-holdout planner do not
   open the holdout split. Consumption is atomic and keyed to the holdout corpus.
-- **Judgeable pre-action capture.** Candidate-specific evidence can be captured
-  as a separate immutable sidecar without leaking the selected action or later
-  outcome.
+- **Judgeable pre-action capture.** Candidate-specific evidence is captured as
+  an immutable sidecar without leaking the selected action or outcome.
+- **Opt-in strategic decision memory.** A separate host-and-family-bound store
+  accepts only explicit `STRATEGIC_HIGH_IMPACT`, `NON_SENSITIVE` records. It
+  supports revisions, revocation, expiry, tombstones, and sealed read-only
+  transfer while never selecting, scoring, executing, or authorizing a route.
+- **Post-action reconciliation.** A separate journal binds observations to the
+  exact pre-action revision. Authorization and execution remain distinct;
+  missing values stay explicit unknowns; replay produces no score, ranking,
+  causal claim, or authority.
+- **Preregistered prospective shadow collection.** A sealed plan fixes source
+  identity, population, strata, calendar, stop rules, producer separation, and
+  exact-binomial assumptions before enrollment. Its terminal report is a
+  missingness and inclusion diagnostic, not a policy evaluation.
 - **Confinement.** Durable writes stay beneath an explicit root, refuse silent
   overwrite, and do not follow replacement links.
 
@@ -120,12 +131,12 @@ authorization.
 - The eight-family metric taxonomy and its thresholds.
 - IPS with a support floor, SNIPS diagnostics, and the weighted empirical tail
   cost quantile introduced in benchmark contract 1.1.0.
-- The synthetic corpus. It proves that the pipeline executes and refuses bad
-  inputs; it is not evidence that any policy is good.
-- Tombstone redaction and the local durable anchor.
+- The synthetic corpus and walkthrough. They prove that the pipeline executes
+  and refuses bad inputs; they are not evidence that any policy is good.
+- Tombstone redaction and local durable anchors.
 - An externally evidenced keyless labeler. Its private workflow is bound by
-  GitHub OIDC and Sigstore, but its conservative rubric produced abstention, not
-  useful directional supervision.
+  GitHub OIDC and Sigstore, but its conservative rubric produced abstention,
+  not useful directional supervision.
 
 ### Projected — not implemented and not claimed
 
@@ -136,38 +147,29 @@ authorization.
 - Automatic promotion or execution authority.
 - Any demonstrated improvement in agent outcomes. **No such claim is made.**
 
-The first research epoch ended in `KILL_DISCOVERY`. That does not mean a ranker
-failed: no ranker was trained. It means the project did not have enough eligible
-directional supervision, calibrated outcomes, or claim-bearing holdout evidence
-to authorize the next step. The refusal is part of the result.
+The first research epoch ended in `KILL_DISCOVERY`. No ranker was trained. The
+project lacked enough eligible directional supervision, calibrated outcomes,
+and claim-bearing holdout evidence to authorize the next step. The refusal is
+part of the result.
+
+HOK-253 remains a real-data gate. A responsible owner must supply the target
+population, source bindings, strata, null and alternative rates, alpha, target
+power, clustering inflation, calendar, exclusions, and producer identities.
+The package has no statistical defaults and schedules no collection. Synthetic
+values in `examples/` cannot unlock training, canary execution, activation, or
+promotion.
 
 ## A concrete example
 
 Suppose an agent is debugging an authorization failure. Before it acts, a
-producer records three candidates:
+producer records candidate evidence. The memory stores that exact pre-action
+projection. Later, reconciliation records the observed result for the one
+executed direction while leaving every unavailable dimension explicitly
+unknown. A prospective journal may include the case only when it matches a plan
+sealed before collection began.
 
-```text
-A — patch the failing condition locally
-B — inspect the authority contract and its evidence provenance
-C — stop because the required product authority is missing
-```
-
-Each candidate carries bounded pre-action evidence for success, violations,
-cost, information, and reversibility. Latent Compass validates and seals that
-projection. Later, an outcome may be attached to the episode.
-
-What does Latent Compass do with it?
-
-- It preserves what was known before the choice.
-- It makes silent mutation detectable.
-- It allows offline policies to be replayed against the recorded case.
-- It exposes uncertainty and lack of support.
-
-What does it not do?
-
-- It does not claim which candidate was truly best.
-- It does not convert an observed outcome into causal proof.
-- It does not let a model promote itself because it scored well.
+This preserves what was known, what happened, and what remains unknown. It does
+not identify the best counterfactual, establish causality, or authorize action.
 
 ## Quick start
 
@@ -179,13 +181,25 @@ cd latent-compass
 uv sync --all-groups
 ```
 
+Run the self-contained synthetic walkthrough in a new output root:
+
+```bash
+uv run python examples/walkthrough.py --root ./synthetic-run
+```
+
+The walkthrough validates the shipped [episode](examples/synthetic-episode.json)
+and [projection](examples/synthetic-projection.json), derives a blinded pair,
+writes decision memory and reconciliation stores, and closes one synthetic
+prospective collection. It refuses an existing root. Every result is labeled
+synthetic and carries no empirical or authority meaning.
+
 Validate the complete repository gate:
 
 ```bash
 uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pytest -q && uv build
 ```
 
-Each step is independently runnable. `pytest` proves the behavioral contracts;
+Each step is independently runnable. `pytest` proves behavioral contracts;
 Ruff and mypy do not.
 
 ## Record and replay an episode
@@ -193,8 +207,8 @@ Ruff and mypy do not.
 ```bash
 uv run latent-compass init --root ./store --store-id store-alpha \
     --host-id host-alpha --agent-family claude --epoch LC-2026-E1
-uv run latent-compass validate --episode episode.json
-uv run latent-compass append   --root ./store --episode episode.json
+uv run latent-compass validate --episode examples/synthetic-episode.json
+uv run latent-compass append   --root ./store --episode examples/synthetic-episode.json
 uv run latent-compass verify   --root ./store
 uv run latent-compass replay   --root ./store
 uv run latent-compass export   --root ./store --out ./store/snapshot.json
@@ -203,8 +217,8 @@ uv run latent-compass export   --root ./store --out ./store/snapshot.json
 Capture a judgeable pre-action projection:
 
 ```bash
-uv run latent-compass pairwise capture --projection ./projection.json \
-    --root ./run --out ./run/captures/decision-0001.json
+uv run latent-compass pairwise capture --projection examples/synthetic-projection.json \
+    --root ./run --out ./run/captures/synthetic-decision-0001.json
 ```
 
 `--out` must remain inside `--root`. Omit it to write only to stdout. Exit codes
@@ -239,30 +253,20 @@ to derive and check their seals.
 ## Architecture
 
 ```text
-vocabulary.py           actors, capabilities, advisories, lifecycle states
-authority.py            refusals, transitions, reproduced evidence
-episode.py              versioned decision episode contract
-pairwise_capture.py     bounded pre-action projections and blinded pair inputs
-governance.py           retention, minimization, redaction, deletion semantics
-protocol.py             pre-registration, holdout discipline, continue/kill
-ledger.py               append-only store, chain, anchor, replay, export
-benchmark/              sealed offline baseline benchmark
-cli.py                  the only entry point: read, validate, record, refuse
-canonical.py            canonical serialization and domain-separated seals
-contracts.py            versions, strict primitives, validation
-errors.py               typed refusal vocabulary
+episode.py                    versioned decision episode contract
+pairwise_capture.py           bounded pre-action projections and blinded pairs
+decision_memory/              durable pre-action strategic records
+decision_reconciliation/      durable post-action observations and replay
+prospective_collection/       sealed enrollment journal and diagnostics
+benchmark/                    sealed offline baseline benchmark
+authority.py                  refusals, transitions, reproduced evidence
+ledger.py                     append-only episode store, chain, anchor, replay
+cli.py                        bounded command-line validation and recording
+canonical.py / contracts.py   canonical serialization and strict primitives
 ```
 
-Dependencies flow one way:
-
-```text
-errors → canonical → contracts → vocabulary → {episode, protocol}
-       → authority → governance → ledger → cli
-                   → benchmark → cli
-```
-
-`benchmark` imports neither `authority` nor `ledger`. Neither imports the
-benchmark. A benchmark report is evidence, never authorization.
+Benchmark results, reconciliations, and prospective diagnostics are evidence.
+None is an authorization.
 
 ## What the evidence proves — and what it cannot
 
@@ -276,7 +280,7 @@ authority because they are different claims.
 - None of those facts proves that an outcome is true, that evidence predates a
   decision, or that an actor is authorized to promote.
 
-An administrator who can rewrite both a ledger and its local anchor can forge a
+An administrator who can rewrite both a store and its local anchor can forge a
 history that verifies. Detecting that attack requires an external anchor this
 package does not have. The limitation is documented and tested.
 
@@ -291,6 +295,10 @@ package does not have. The limitation is documented and tested.
 | [Pairwise supervision](docs/pairwise-supervision.md) | labels, outcomes, calibration, and the data gate |
 | [Judgeable projection](docs/judgeable-projection.md) | pre-action sidecars and blinded pair derivation |
 | [Independent labeler](docs/independent-labeler.md) | external workflow identity, proof, rotation, and limits |
+| [Pairwise corpus readiness](docs/pairwise-corpus-readiness.md) | current refusal and exit criteria |
+| [Decision memory](docs/decision-memory.md) | opt-in pre-action records, transfer, and trust limits |
+| [Decision reconciliation](docs/decision-reconciliation.md) | post-action observations, unknowns, and replay |
+| [Prospective shadow collection](docs/prospective-shadow-collection.md) | preregistration, enrollment, diagnostics, and real-data gates |
 | [Corpus provenance](corpus/synthetic-v1/PROVENANCE.md) | how the synthetic corpus was produced and what it cannot show |
 | [Ledger](docs/ledger.md) | chain, anchor, replay, redaction, and honest limits |
 | [Architecture decisions](docs/adr/) | why the project chose its current boundaries |

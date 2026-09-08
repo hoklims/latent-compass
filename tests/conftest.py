@@ -21,6 +21,12 @@ from latent_compass.benchmark import (
     load_benchmark_spec,
     load_corpus_manifest,
 )
+from latent_compass.decision_memory import (
+    DecisionMemoryStore,
+    StrategicDecisionRecord,
+    admit_strategic_decision,
+)
+from latent_compass.decision_reconciliation import ReconciliationJournal
 from latent_compass.episode import AgentFamily
 from latent_compass.ledger import LedgerStore
 from latent_compass.protocol import (
@@ -194,6 +200,297 @@ def pairwise_projection_payload() -> dict[str, Any]:
             },
         ],
     }
+
+
+#: The HOK-243 fixture decision. Deadlines sit far enough apart that a test can
+#: pick an ``as_of`` before the review, between review and expiry, or after
+#: expiry, without any of the three ever colliding.
+DECISION_ID = "decision-strategic-0001"
+DECISION_CAPTURED_AT = "2026-08-16T09:00:00Z"
+DECISION_REVIEW_DUE_AT = "2026-11-16T09:00:00Z"
+DECISION_EXPIRES_AT = "2027-08-16T09:00:00Z"
+DECISION_AUTHORITY = "operator-alpha"
+
+
+def strategic_decision_payload(
+    decision_id: str = DECISION_ID,
+    *,
+    revision: int = 1,
+    supersedes_revision_seal: str | None = None,
+    host_id: str = HOST_ID,
+    store_id: str = STORE_ID,
+    epoch: str = EPOCH,
+    agent_family: str = FAMILY,
+    captured_at: str = DECISION_CAPTURED_AT,
+    review_due_at: str = DECISION_REVIEW_DUE_AT,
+    expires_at: str = DECISION_EXPIRES_AT,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A complete, admissible strategic decision record.
+
+    The embedded projection is the HOK-234 fixture with its decision point
+    rebound to ``decision_id``, so the two identities agree the way the contract
+    requires. Overrides replace top-level keys outright.
+    """
+    projection = pairwise_projection_payload()
+    projection["decision_point_id"] = decision_id
+    payload: dict[str, Any] = {
+        "contract_version": "1.0.0",
+        "decision_id": decision_id,
+        "revision": revision,
+        "supersedes_revision_seal": supersedes_revision_seal,
+        "binding": {
+            "host_id": host_id,
+            "agent_family": agent_family,
+            "store_id": store_id,
+            "epoch": epoch,
+        },
+        "captured_at": captured_at,
+        "decision_authority": DECISION_AUTHORITY,
+        "review_due_at": review_due_at,
+        "expires_at": expires_at,
+        "impact_class": "STRATEGIC_HIGH_IMPACT",
+        "sensitivity": "NON_SENSITIVE",
+        "projection": projection,
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.fixture
+def decision_root(tmp_path: Path) -> Path:
+    return tmp_path / "decision-root"
+
+
+@pytest.fixture
+def decision_store(
+    decision_root: Path, fixed_clock: Callable[[], str]
+) -> Iterator[DecisionMemoryStore]:
+    """An open decision memory bound to the fixture host, family and epoch."""
+    opened = DecisionMemoryStore.create(
+        decision_root,
+        store_id=STORE_ID,
+        host_id=HOST_ID,
+        agent_family=AgentFamily.CLAUDE,
+        epoch=EPOCH,
+        clock=fixed_clock,
+    )
+    try:
+        yield opened
+    finally:
+        opened.close()
+
+
+#: The HOK-244 fixture reconciliation. ``RECONCILED_AT`` sits after every
+#: observation instant below, so the "an observation cannot postdate its record"
+#: rule is satisfied by the default and a test has to break it deliberately.
+RECONCILIATION_ID = "reconciliation-0001"
+OBSERVED_AT = "2026-08-20T09:00:00Z"
+RECONCILED_AT = "2026-08-20T10:00:00Z"
+RECONCILED_BY = "observer-alpha"
+EXECUTED_DIRECTION_ID = "direction-alpha"
+AUTHORITY_REFERENCE = "external-authority-ticket-77"
+
+DIMENSIONS = ("SUCCESS", "VIOLATION", "COST", "INFORMATION", "REVERSIBILITY")
+
+#: One typed value per dimension, so no test relies on every dimension carrying
+#: the same scalar kind — a contract that only ever saw booleans would not have
+#: been exercised.
+_DIMENSION_VALUES: dict[str, dict[str, Any]] = {
+    "SUCCESS": {"kind": "BOOLEAN", "boolean_value": True},
+    "VIOLATION": {"kind": "INTEGER", "integer_value": 0},
+    "COST": {"kind": "FLOAT", "float_value": 1.5},
+    "INFORMATION": {"kind": "FLOAT", "float_value": 0.25},
+    "REVERSIBILITY": {"kind": "STRING", "string_value": "revert-verified"},
+}
+
+
+def observed_dimension(
+    dimension: str,
+    *,
+    observed_at: str = OBSERVED_AT,
+    confidence: float = 0.9,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """One OBSERVED dimension with complete provenance."""
+    payload: dict[str, Any] = {
+        "dimension": dimension,
+        "status": "OBSERVED",
+        "statement": f"Post-action observation for {dimension.lower()}.",
+        "value": _DIMENSION_VALUES[dimension],
+        "provenance": {
+            "source_id": f"source-{dimension.lower()}",
+            "source_digest": "sha256:" + "c" * 64,
+            "observed_at": observed_at,
+            "producer": "observer-agent-v1",
+            "confidence": confidence,
+        },
+        "unknown_reason": None,
+        "unknown_detail": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def unknown_dimension(dimension: str, reason: str, **overrides: Any) -> dict[str, Any]:
+    """One UNKNOWN dimension carrying its named reason and no value."""
+    payload: dict[str, Any] = {
+        "dimension": dimension,
+        "status": "UNKNOWN",
+        "statement": None,
+        "value": None,
+        "provenance": None,
+        "unknown_reason": reason,
+        "unknown_detail": f"{dimension.lower()} is {reason.lower()} for a stated reason.",
+    }
+    payload.update(overrides)
+    return payload
+
+
+def observation_set(
+    unknowns: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """All five dimensions in canonical order; named ones become explicit unknowns."""
+    named = unknowns or {}
+    return [
+        unknown_dimension(dimension, named[dimension])
+        if dimension in named
+        else observed_dimension(dimension)
+        for dimension in DIMENSIONS
+    ]
+
+
+def preimage_payload(
+    *,
+    decision_id: str = DECISION_ID,
+    decision_revision: int = 1,
+    record_seal: str | None = None,
+    projection_seal: str | None = None,
+    host_id: str = HOST_ID,
+    store_id: str = STORE_ID,
+    epoch: str = EPOCH,
+    agent_family: str = FAMILY,
+) -> dict[str, Any]:
+    """A preimage reference that reproduces from a real decision record by default.
+
+    The seals are computed from an actual admitted record rather than stubbed, so
+    a test that pairs this preimage with that record proves the binding rather than
+    proving that two stubs agree. ``decision_revision`` above 1 links through the
+    real revision-1 seal, exactly as HOK-243 requires.
+    """
+    identity: dict[str, Any] = {
+        "host_id": host_id,
+        "store_id": store_id,
+        "epoch": epoch,
+        "agent_family": agent_family,
+    }
+    initial = admit_strategic_decision(
+        strategic_decision_payload(decision_id, revision=1, **identity)
+    )
+    record = initial
+    for revision in range(2, decision_revision + 1):
+        record = admit_strategic_decision(
+            strategic_decision_payload(
+                decision_id,
+                revision=revision,
+                supersedes_revision_seal=record.record_seal(),
+                **identity,
+            )
+        )
+    return {
+        "decision_binding": {
+            "host_id": host_id,
+            "agent_family": agent_family,
+            "store_id": store_id,
+            "epoch": epoch,
+        },
+        "decision_id": decision_id,
+        "decision_revision": decision_revision,
+        "record_seal": record_seal if record_seal is not None else record.record_seal(),
+        "projection_seal": projection_seal
+        if projection_seal is not None
+        else record.projection.projection_seal(),
+    }
+
+
+def reconciliation_payload(
+    reconciliation_id: str = RECONCILIATION_ID,
+    *,
+    revision: int = 1,
+    revision_kind: str = "INITIAL",
+    revision_reason: str | None = None,
+    supersedes_revision_seal: str | None = None,
+    host_id: str = HOST_ID,
+    store_id: str = STORE_ID,
+    epoch: str = EPOCH,
+    agent_family: str = FAMILY,
+    preimage: dict[str, Any] | None = None,
+    authorization_state: str = "AUTHORIZED_ELSEWHERE",
+    authorization_reference: str | None = AUTHORITY_REFERENCE,
+    execution_state: str = "EXECUTED",
+    executed_direction_id: str | None = EXECUTED_DIRECTION_ID,
+    observations: list[dict[str, Any]] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """A complete, admissible reconciliation of the fixture decision.
+
+    Defaults describe the ordinary case: an action authorised elsewhere, executed
+    as ``direction-alpha``, with all five dimensions observed. Overrides replace
+    top-level keys outright.
+    """
+    payload: dict[str, Any] = {
+        "contract_version": "1.0.0",
+        "reconciliation_id": reconciliation_id,
+        "revision": revision,
+        "revision_kind": revision_kind,
+        "revision_reason": revision_reason,
+        "supersedes_revision_seal": supersedes_revision_seal,
+        "binding": {
+            "host_id": host_id,
+            "agent_family": agent_family,
+            "store_id": store_id,
+            "epoch": epoch,
+        },
+        "preimage": preimage if preimage is not None else preimage_payload(),
+        "reconciled_at": RECONCILED_AT,
+        "reconciled_by": RECONCILED_BY,
+        "sensitivity": "NON_SENSITIVE",
+        "authorization_state": authorization_state,
+        "authorization_reference": authorization_reference,
+        "execution_state": execution_state,
+        "executed_direction_id": executed_direction_id,
+        "observations": observations if observations is not None else observation_set(),
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.fixture
+def journal_root(tmp_path: Path) -> Path:
+    return tmp_path / "reconciliation-root"
+
+
+@pytest.fixture
+def journal(journal_root: Path, fixed_clock: Callable[[], str]) -> Iterator[ReconciliationJournal]:
+    """An open reconciliation journal bound to the fixture host, family and epoch."""
+    opened = ReconciliationJournal.create(
+        journal_root,
+        store_id=STORE_ID,
+        host_id=HOST_ID,
+        agent_family=AgentFamily.CLAUDE,
+        epoch=EPOCH,
+        clock=fixed_clock,
+    )
+    try:
+        yield opened
+    finally:
+        opened.close()
+
+
+@pytest.fixture
+def fixture_decision() -> StrategicDecisionRecord:
+    """The pre-action record the fixture reconciliation names. Never mutated."""
+    return admit_strategic_decision(strategic_decision_payload())
 
 
 def protocol_payload(**overrides: Any) -> dict[str, Any]:
