@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0.0",
+  "episode_id": "synthetic-episode-0001",
+  "provenance": {
+    "host_id": "synthetic-host",
+    "agent_family": "claude",
+    "store_id": "synthetic-store",
+    "epoch": "SYNTHETIC-2026-E1",
+    "recorded_at": "2026-08-16T17:00:00Z",
+    "tool_version": "0.1.0"
+  },
+  "state": {
+    "levels": [
+      {
+        "depth": 0,
+        "name": "L6-strategy",
+        "summary_digest": "synthetic-strategy-digest"
+      },
+      {
+        "depth": 1,
+        "name": "L5-product-intent",
+        "summary_digest": "synthetic-product-digest"
+      },
+      {
+        "depth": 2,
+        "name": "L4-invariants",
+        "summary_digest": "synthetic-invariant-digest"
+      }
+    ],
+    "branch_point": {
+      "node_id": "synthetic-branch",
+      "depth": 2,
+      "parent_node_id": "synthetic-product"
+    }
+  },
+  "candidates": [
+    {
+      "direction_id": "direction-alpha",
+      "propensity": 0.6,
+      "prior_uncertainty": 0.2
+    },
+    {
+      "direction_id": "direction-beta",
+      "propensity": 0.4,
+      "prior_uncertainty": 0.3
+    }
+  ],
+  "decision": {
+    "advisory": {
+      "contract_version": "1.0.0",
+      "kind": "DIRECTION",
+      "direction_id": "direction-alpha",
+      "confidence": 0.7,
+      "uncertainty": 0.2,
+      "rationale": "Synthetic demonstration of a reversible direction.",
+      "issued_by": "latent_compass"
+    },
+    "selected_direction_id": "direction-alpha"
+  },
+  "external_verdict": {
+    "judge": "synthetic-external-judge",
+    "verdict": "PASS",
+    "observed_at": "2026-08-16T17:05:00Z",
+    "evidence_digest": "synthetic-verdict-digest"
+  },
+  "outcome": {
+    "observability": "FULL",
+    "observed": true,
+    "observed_at": "2026-08-20T09:00:00Z",
+    "success": true,
+    "violations": 0
+  },
+  "economics": {
+    "cost": 1.5,
+    "information_gain": 0.25,
+    "reversibility": 0.9,
+    "uncertainty": 0.2
+  },
+  "redactions": []
+}

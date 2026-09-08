@@ -1,0 +1,51 @@
+name: Verify
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Python 3.13 / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.12.5'
+          python-version: '3.13'
+          enable-cache: false
+      - name: Verify locked environment
+        run: uv sync --locked --all-groups
+      - name: Check formatting
+        run: uv run --frozen ruff format --check .
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Check types
+        run: uv run --frozen mypy
+      - name: Test complete source tree
+        run: uv run --frozen pytest -o addopts='' -q
+      - name: Build distributions
+        run: uv build --no-sources
+      - name: Verify installed wheel outside checkout
+        working-directory: ${{ runner.temp }}
+        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-0.1.0-py3-none-any.whl" latent-compass shadow --help

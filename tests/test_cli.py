@@ -7,6 +7,7 @@ import concurrent.futures
 import json
 import os
 import shutil
+from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -285,7 +286,10 @@ def test_confined_writer_blocks_parent_swap_while_handle_is_open(
     parent.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    original = confined_io._open_or_create_directory_windows  # noqa: SLF001
+    # This backend exists only on Windows; collection also runs on POSIX.
+    original: Callable[..., int] = getattr(  # noqa: B009
+        confined_io, "_open_or_create_directory_windows"
+    )
     swap_was_blocked = False
 
     def open_then_try_swap(parent_handle: int, name: str, path: Path, *, what: str) -> int:
@@ -866,9 +870,52 @@ def test_there_is_no_command_that_executes_or_promotes() -> None:
         "authority",
         "benchmark",
         "pairwise",
+        "memory",
+        "reconcile",
+        "shadow",
     }
     for forbidden in ("run", "execute", "apply", "promote", "deploy", "sync", "push", "fetch"):
         assert forbidden not in commands
+
+    reconcile = actions[0].choices["reconcile"]
+    reconcile_groups = [
+        action
+        for action in reconcile._actions  # noqa: SLF001 - argparse exposes no public reader
+        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    reconcile_commands = set(reconcile_groups[0].choices)
+    # HOK-244 records observations about decisions taken elsewhere. Every verb
+    # under it is an evidence verb; "learn" and "score" in particular stay absent
+    # by construction, because a journal that scored its own observations would
+    # have become the ranker this project does not have.
+    for forbidden in (
+        "run",
+        "execute",
+        "apply",
+        "promote",
+        "select",
+        "decide",
+        "authorize",
+        "score",
+        "rank",
+        "learn",
+        "train",
+        "sync",
+    ):
+        assert forbidden not in reconcile_commands
+
+    memory = actions[0].choices["memory"]
+    memory_groups = [
+        action
+        for action in memory._actions  # noqa: SLF001 - argparse exposes no public reader
+        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
+    ]
+    memory_commands = set(memory_groups[0].choices)
+    # HOK-243 remembers decisions. Nothing under it selects, executes, scores or
+    # synchronises, and "sync" in particular stays absent by construction: the
+    # only crossing between two stores is an explicit, addressed transfer.
+    for forbidden in ("run", "execute", "apply", "promote", "select", "sync", "score", "decide"):
+        assert forbidden not in memory_commands
 
 
 def test_the_only_run_verb_acts_on_a_corpus_and_not_on_a_system() -> None:

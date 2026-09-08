@@ -32,17 +32,33 @@ from latent_compass.errors import ContractViolation, UnsupportedContractVersion
 __all__ = [
     "AUTHORITY_CONTRACT_VERSION",
     "BENCHMARK_CONTRACT_VERSION",
+    "DECISION_MEMORY_CONTRACT_VERSION",
+    "DECISION_MEMORY_FORMAT_VERSION",
+    "DECISION_TRANSFER_CONTRACT_VERSION",
     "EPISODE_CONTRACT_VERSION",
     "JUDGEABLE_PROJECTION_CONTRACT_VERSION",
     "LEDGER_FORMAT_VERSION",
+    "PROSPECTIVE_COLLECTION_CONTRACT_VERSION",
+    "PROSPECTIVE_COLLECTION_FORMAT_VERSION",
     "PROTOCOL_CONTRACT_VERSION",
+    "RECONCILIATION_CONTRACT_VERSION",
+    "RECONCILIATION_FORMAT_VERSION",
+    "RECONCILIATION_REPLAY_CONTRACT_VERSION",
     "STRICT_CONFIG",
     "SUPPORTED_AUTHORITY_VERSIONS",
     "SUPPORTED_BENCHMARK_VERSIONS",
+    "SUPPORTED_DECISION_MEMORY_FORMATS",
+    "SUPPORTED_DECISION_MEMORY_VERSIONS",
+    "SUPPORTED_DECISION_TRANSFER_VERSIONS",
     "SUPPORTED_EPISODE_VERSIONS",
     "SUPPORTED_JUDGEABLE_PROJECTION_VERSIONS",
     "SUPPORTED_LEDGER_FORMATS",
+    "SUPPORTED_PROSPECTIVE_COLLECTION_FORMATS",
+    "SUPPORTED_PROSPECTIVE_COLLECTION_VERSIONS",
     "SUPPORTED_PROTOCOL_VERSIONS",
+    "SUPPORTED_RECONCILIATION_FORMATS",
+    "SUPPORTED_RECONCILIATION_REPLAY_VERSIONS",
+    "SUPPORTED_RECONCILIATION_VERSIONS",
     "FiniteFloat",
     "Identifier",
     "NonNegativeFloat",
@@ -68,12 +84,58 @@ LEDGER_FORMAT_VERSION: Final = "1.0.0"
 #: contract with it, and vice versa.
 BENCHMARK_CONTRACT_VERSION: Final = "1.1.0"
 
+#: The HOK-243 pre-action strategic decision memory contracts. Versioned on its
+#: own axis for the same reason the benchmark is: the memory *embeds* a HOK-234
+#: judgeable projection and *reuses* the HOK-185 agent family, but it is neither
+#: of them and must be able to move without dragging their persisted shapes.
+DECISION_MEMORY_CONTRACT_VERSION: Final = "1.0.0"
+
+#: The explicit cross-family transfer envelope. Separate from the record it
+#: carries: an envelope format may change without reissuing sealed records.
+DECISION_TRANSFER_CONTRACT_VERSION: Final = "1.0.0"
+
+#: The on-disk decision memory store format, distinct from the episode ledger's.
+DECISION_MEMORY_FORMAT_VERSION: Final = "1.0.0"
+
+#: The HOK-244 post-action decision reconciliation contracts. Versioned on its
+#: own axis for the third time and for the same reason: a reconciliation
+#: *references* a HOK-243 record by seal and *embeds nothing of it*, so the
+#: journal must be able to move without reissuing a single decision seal — and a
+#: decision memory change must not silently redefine what a reconciliation says.
+RECONCILIATION_CONTRACT_VERSION: Final = "1.0.0"
+
+#: The deterministic replay comparison. Separate from the record it replays: the
+#: comparison shape may change without invalidating a sealed reconciliation.
+RECONCILIATION_REPLAY_CONTRACT_VERSION: Final = "1.0.0"
+
+#: The on-disk reconciliation journal format, distinct from both the episode
+#: ledger's and the decision memory's.
+RECONCILIATION_FORMAT_VERSION: Final = "1.0.0"
+
+#: HOK-252 prospective shadow-collection plan, event and report contracts.
+PROSPECTIVE_COLLECTION_CONTRACT_VERSION: Final = "1.0.0"
+
+#: The adjacent HOK-252 journal format. It is not a HOK-243/HOK-244 format.
+PROSPECTIVE_COLLECTION_FORMAT_VERSION: Final = "1.0.0"
+
 SUPPORTED_EPISODE_VERSIONS: Final = frozenset({EPISODE_CONTRACT_VERSION})
 SUPPORTED_JUDGEABLE_PROJECTION_VERSIONS: Final = frozenset({JUDGEABLE_PROJECTION_CONTRACT_VERSION})
 SUPPORTED_PROTOCOL_VERSIONS: Final = frozenset({PROTOCOL_CONTRACT_VERSION})
 SUPPORTED_AUTHORITY_VERSIONS: Final = frozenset({"1.0.0", AUTHORITY_CONTRACT_VERSION})
 SUPPORTED_LEDGER_FORMATS: Final = frozenset({LEDGER_FORMAT_VERSION})
 SUPPORTED_BENCHMARK_VERSIONS: Final = frozenset({BENCHMARK_CONTRACT_VERSION})
+SUPPORTED_DECISION_MEMORY_VERSIONS: Final = frozenset({DECISION_MEMORY_CONTRACT_VERSION})
+SUPPORTED_DECISION_TRANSFER_VERSIONS: Final = frozenset({DECISION_TRANSFER_CONTRACT_VERSION})
+SUPPORTED_DECISION_MEMORY_FORMATS: Final = frozenset({DECISION_MEMORY_FORMAT_VERSION})
+SUPPORTED_RECONCILIATION_VERSIONS: Final = frozenset({RECONCILIATION_CONTRACT_VERSION})
+SUPPORTED_RECONCILIATION_REPLAY_VERSIONS: Final = frozenset(
+    {RECONCILIATION_REPLAY_CONTRACT_VERSION}
+)
+SUPPORTED_RECONCILIATION_FORMATS: Final = frozenset({RECONCILIATION_FORMAT_VERSION})
+SUPPORTED_PROSPECTIVE_COLLECTION_VERSIONS: Final = frozenset(
+    {PROSPECTIVE_COLLECTION_CONTRACT_VERSION}
+)
+SUPPORTED_PROSPECTIVE_COLLECTION_FORMATS: Final = frozenset({PROSPECTIVE_COLLECTION_FORMAT_VERSION})
 
 #: Shared configuration for every contract model.
 #:

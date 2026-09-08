@@ -37,6 +37,25 @@ reasonable and will not be treated as hostile.
 - Corrupting a ledger without `verify` reporting it, **within the threat model
   below**.
 - Leaving a partially accepted episode after an interrupted append.
+- Getting a strategic decision accepted without the explicit
+  `STRATEGIC_HIGH_IMPACT` and `NON_SENSITIVE` opt-ins; moving the decision
+  store after a refused or interrupted append; accepting a stale/forked
+  revision; or letting native and imported identities shadow one another.
+- Importing a decision transfer after tampering, replay, source-record reuse or
+  destination-binding mismatch, or treating `FOREIGN_READ_ONLY` content as
+  native, revisable, re-exportable or authority-bearing.
+- Getting a reconciliation to alter, re-seal or extend the pre-action decision
+  record it names; getting an observation accepted for a candidate the record
+  does not say was executed; getting an `ABSENT`, `LATE`, `AMBIGUOUS` or
+  `DISPUTED` dimension to carry a value; getting an `OBSERVED` dimension accepted
+  without its full provenance; moving the journal after a refused or interrupted
+  append; accepting a stale, forked or preimage-re-pointed revision; or opening a
+  second reconciliation identity over one pre-action revision.
+- Starting a prospective collection without established power; enrolling a
+  backfilled, duplicate, wrong-binding or undeclared-stratum case; losing a case
+  from the denominator; linking anything except the verified current HOK-244
+  tail; accepting a dependent producer; closing outside the sealed calendar and
+  denominator rules; or publishing from a collecting, aborted or corrupt journal.
 - Spending a holdout **corpus** more than once — including by revising the
   protocol, and including under concurrency — or scoring measurements against a
   protocol seal or corpus seal they were not collected under.
@@ -62,12 +81,29 @@ These are documented properties, not vulnerabilities.
 - **An operator deleting or editing the holdout usage record.** The same limit:
   it is a local file, and this guards against a mistake and a second run, not
   against the operator.
-- **Secrets written into a free-text field.** No structured field exists for a
-  credential and unknown fields are refused, but a rationale, a redaction reason
-  or a tombstone reason accepts whatever the caller writes. Sanitising those is
-  the caller's obligation; this package does not scan them.
+- **Secrets that do not match a named detector.** Episode free text is not
+  scanned. Strategic decision admission additionally refuses a published,
+  bounded list of credential shapes before opening a transaction, but it is not
+  universal secret detection or a sanitiser. Ordinary prose can still contain a
+  secret. Classification and sanitisation remain the caller's obligation; run
+  `latent-compass memory limits` for the exact claimed coverage.
+- **An observation that is simply false.** The reconciliation journal proves that
+  an observation was recorded and has not been altered since. Its `observed_at`,
+  `source_digest`, `producer` and `confidence` are asserted by whoever wrote them
+  and witnessed by nothing here, so a truthful-looking wrong observation is a
+  data-quality problem, not a vulnerability. Distinguishing the two needs an
+  external witness this package does not have.
+- **A false producer identity or chronology assertion.** Prospective collection
+  compares declared producer strings and canonical timestamps. Its local seals
+  prove local consistency only; they do not authenticate a person, process or
+  clock, and they do not turn observations into causal evidence.
 - **Code running in the same process with the same privileges.** It can bypass
   every check here.
+- **Concurrent adversarial renaming of a SQLite store namespace.** Store open
+  and creation refuse pre-existing symlinks/reparse points, but Python's SQLite
+  API reopens a pathname and cannot consume the repository's confined file
+  handle. Keep SQLite roots in an operator-controlled local directory. The
+  handle-relative publication commands have the stronger race-safe guarantee.
 - **An operator deleting the store file.** That is the documented
   `STORE_DESTRUCTION` deletion mode.
 - **Denial of service by supplying an enormous input file.** Bound your inputs.
@@ -89,8 +125,29 @@ These are documented properties, not vulnerabilities.
   or file contents. No *structured* field exists for a credential, and unknown
   fields are refused, so one cannot be added — see the free-text caveat above
   and `GOVERNANCE.md`.
-- Confinement: every durable write resolves canonically and must land strictly
-  inside a root named on the command line.
+- Strategic memory minimisation: only explicit high-impact, non-sensitive
+  pre-action projections are admitted. Selected routes, outcomes, labels,
+  scores, verdicts, holdout metadata and execution authority are structurally
+  refused. Named credential detectors reduce accidental capture but make no
+  completeness claim.
+- Memory authenticity limit: the decision event chain, durable anchor and
+  transfer seals prove local consistency, not issuer identity or chronology. An
+  administrator who can rewrite the database and anchor can forge a verifying
+  history; closing that gap requires an external witness or co-signature.
+- Reconciliation minimisation and separation: the post-action journal is a third
+  physically separate store that references decisions by seal and writes nothing
+  back. Scores, rankings, rewards, preferences, verdicts, promotions, causal
+  effects and counterfactuals are structurally refused, observations exist only
+  for the executed candidate, and unknowns are recorded as named unknowns rather
+  than defaulted values. Its seals carry the memory authenticity limit above and
+  one more: they attest that an observation was recorded, never that it is true.
+- Prospective minimisation: the sealed plan permits zero outcome-dependent
+  interim looks, all enrolled cases remain in the denominator, and terminal
+  publication exposes only an all-case manifest and narrow diagnostic rates.
+  The surface has no option for operational authority, routing or model training.
+- Confinement: file-publication commands are handle-relative and race-safe.
+  SQLite stores refuse existing symlink/reparse roots and rely on the documented
+  trusted local-namespace boundary above.
 - Evidence provenance: local seals and rescoring can prove consistency rather
   than origin. Evidence-based lifecycle transitions therefore refuse before
   evidence or ledger access without external attestation.

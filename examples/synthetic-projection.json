@@ -1,0 +1,51 @@
+{
+  "contract_version": "1.0.0",
+  "canonicalization_version": "1.0.0",
+  "decision_point_id": "synthetic-decision-0001",
+  "captured_at": "2026-08-16T17:00:00Z",
+  "producer_id": "synthetic-capture-agent",
+  "objective_summary": "Demonstrate a bounded, reversible strategic decision record.",
+  "context_facts": [
+    {
+      "fact_id": "context-01",
+      "statement": "This input is synthetic and establishes no empirical result.",
+      "source_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "constraints": [
+    {
+      "constraint_id": "constraint-01",
+      "kind": "INVARIANT",
+      "statement": "The demonstration must not grant execution or promotion authority.",
+      "source_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "candidates": [
+    {
+      "direction_id": "direction-alpha",
+      "sanitized_summary": "Record the decision in a separate bounded memory.",
+      "parameters": [],
+      "applicable_constraint_ids": ["constraint-01"],
+      "evidence": [
+        {"dimension": "SUCCESS", "availability": "PRESENT", "facts": [{"fact_id": "alpha-00", "statement": "Synthetic success evidence.", "source_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}], "reason": null},
+        {"dimension": "VIOLATION", "availability": "PRESENT", "facts": [{"fact_id": "alpha-01", "statement": "Synthetic violation evidence.", "source_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"}], "reason": null},
+        {"dimension": "COST", "availability": "PRESENT", "facts": [{"fact_id": "alpha-02", "statement": "Synthetic cost evidence.", "source_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"}], "reason": null},
+        {"dimension": "INFORMATION", "availability": "PRESENT", "facts": [{"fact_id": "alpha-03", "statement": "Synthetic information evidence.", "source_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}], "reason": null},
+        {"dimension": "REVERSIBILITY", "availability": "PRESENT", "facts": [{"fact_id": "alpha-04", "statement": "Synthetic reversibility evidence.", "source_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"}], "reason": null}
+      ]
+    },
+    {
+      "direction_id": "direction-beta",
+      "sanitized_summary": "Keep the decision outside durable memory.",
+      "parameters": [],
+      "applicable_constraint_ids": ["constraint-01"],
+      "evidence": [
+        {"dimension": "SUCCESS", "availability": "PRESENT", "facts": [{"fact_id": "beta-00", "statement": "Synthetic success evidence.", "source_digest": "sha256:6666666666666666666666666666666666666666666666666666666666666666"}], "reason": null},
+        {"dimension": "VIOLATION", "availability": "PRESENT", "facts": [{"fact_id": "beta-01", "statement": "Synthetic violation evidence.", "source_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777"}], "reason": null},
+        {"dimension": "COST", "availability": "PRESENT", "facts": [{"fact_id": "beta-02", "statement": "Synthetic cost evidence.", "source_digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888"}], "reason": null},
+        {"dimension": "INFORMATION", "availability": "PRESENT", "facts": [{"fact_id": "beta-03", "statement": "Synthetic information evidence.", "source_digest": "sha256:9999999999999999999999999999999999999999999999999999999999999999"}], "reason": null},
+        {"dimension": "REVERSIBILITY", "availability": "PRESENT", "facts": [{"fact_id": "beta-04", "statement": "Synthetic reversibility evidence.", "source_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}], "reason": null}
+      ]
+    }
+  ]
+}

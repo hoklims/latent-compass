@@ -66,6 +66,18 @@ from latent_compass.benchmark.spec import (
     require_spec_matches_protocol,
 )
 from latent_compass.confined_io import plan_confined_target, write_new_file
+from latent_compass.decision_memory import (
+    DecisionBinding,
+    DecisionMemoryStore,
+    DecisionOriginKind,
+    StrategicDecisionRecord,
+    admission_limits,
+    admit_strategic_decision,
+)
+from latent_compass.decision_reconciliation import (
+    ReconciliationJournal,
+    reconciliation_limits,
+)
 from latent_compass.episode import AgentFamily, load_episode
 from latent_compass.errors import (
     AuthorityRefusal,
@@ -79,6 +91,13 @@ from latent_compass.errors import (
 from latent_compass.governance import deletion_semantics
 from latent_compass.ledger import LedgerStore, utc_now
 from latent_compass.pairwise_capture import load_judgeable_projection
+from latent_compass.prospective_collection import (
+    AbortReason,
+    ProspectiveCollectionJournal,
+    admit_prospective_plan,
+    plan_exact_one_sided_binomial,
+    prospective_collection_limits,
+)
 from latent_compass.protocol import (
     HoldoutLedger,
     Split,
@@ -168,11 +187,291 @@ def _read_json(path: Path) -> object:
         ) from exc
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, RecursionError) as exc:
+        detail: dict[str, object] = {"path": str(path), "reason": type(exc).__name__}
+        if isinstance(exc, json.JSONDecodeError):
+            detail.update({"line": exc.lineno, "column": exc.colno})
         raise ContractViolation(
             f"{path} is not valid JSON",
-            detail={"path": str(path), "line": exc.lineno, "column": exc.colno},
+            detail=detail,
         ) from exc
+
+
+def _add_memory_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """The HOK-243 pre-action strategic decision memory surface.
+
+    There is deliberately no command that selects a route, records an outcome,
+    scores a candidate or authorises anything. Every subcommand either creates a
+    store, appends a durable event, reads state back, or refuses.
+    """
+    memory = sub.add_parser(
+        "memory",
+        help="opt-in strategic decision memory: remembers decisions, never takes them",
+    )
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+
+    initialise = memory_sub.add_parser(
+        "init", help="create a decision memory bound to one host, family and epoch"
+    )
+    initialise.add_argument("--root", required=True, type=Path)
+    initialise.add_argument("--store-id", required=True)
+    initialise.add_argument("--host-id", required=True)
+    initialise.add_argument(
+        "--agent-family", required=True, choices=[family.value for family in AgentFamily]
+    )
+    initialise.add_argument("--epoch", required=True)
+
+    for name, help_text in (
+        ("append", "admit and append the initial revision of one strategic decision"),
+        ("revise", "admit and append a revision that extends the exact current head"),
+    ):
+        command = memory_sub.add_parser(name, help=help_text)
+        command.add_argument("--root", required=True, type=Path)
+        command.add_argument("--record", required=True, type=Path)
+        command.add_argument(
+            "--expected-generation",
+            type=int,
+            help="refuse unless the store is at exactly this generation",
+        )
+
+    status = memory_sub.add_parser("status", help="binding, generation, record count, root seal")
+    status.add_argument("--root", required=True, type=Path)
+
+    verify = memory_sub.add_parser("verify", help="walk the whole event chain")
+    verify.add_argument("--root", required=True, type=Path)
+
+    listing = memory_sub.add_parser("list", help="bounded active state as of an explicit instant")
+    listing.add_argument("--root", required=True, type=Path)
+    listing.add_argument("--as-of", help="UTC instant, YYYY-MM-DDTHH:MM:SSZ; now if omitted")
+    listing.add_argument(
+        "--origin",
+        default=DecisionOriginKind.NATIVE.value,
+        choices=[kind.value for kind in DecisionOriginKind],
+        help="native and imported decisions are listed separately and never merged",
+    )
+    listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--offset", type=int, default=0)
+
+    show = memory_sub.add_parser("show", help="the active head revision of one decision")
+    show.add_argument("--root", required=True, type=Path)
+    show.add_argument("--decision-id", required=True)
+    show.add_argument("--as-of", help="UTC instant, YYYY-MM-DDTHH:MM:SSZ; now if omitted")
+
+    revoke = memory_sub.add_parser(
+        "revoke", help="append the durable statement that a decision no longer holds"
+    )
+    revoke.add_argument("--root", required=True, type=Path)
+    revoke.add_argument("--decision-id", required=True)
+    revoke.add_argument("--reason", required=True)
+    revoke.add_argument("--revoked-by", required=True)
+    revoke.add_argument("--expected-generation", type=int)
+
+    tombstone = memory_sub.add_parser(
+        "tombstone", help="drop one revision's payload, preserving the row and the chain"
+    )
+    tombstone.add_argument("--root", required=True, type=Path)
+    tombstone.add_argument("--decision-id", required=True)
+    tombstone.add_argument("--revision", required=True, type=int)
+    tombstone.add_argument("--reason", required=True)
+    tombstone.add_argument("--expected-generation", type=int)
+
+    export = memory_sub.add_parser(
+        "export-transfer", help="seal one decision for one explicitly named destination"
+    )
+    export.add_argument("--root", required=True, type=Path)
+    export.add_argument("--decision-id", required=True)
+    export.add_argument("--to-host-id", required=True)
+    export.add_argument(
+        "--to-agent-family", required=True, choices=[family.value for family in AgentFamily]
+    )
+    export.add_argument("--to-store-id", required=True)
+    export.add_argument("--to-epoch", required=True)
+    export.add_argument("--exported-by", required=True)
+    export.add_argument(
+        "--out", type=Path, help="destination, resolved strictly inside --root; stdout if omitted"
+    )
+
+    import_transfer = memory_sub.add_parser(
+        "import-transfer", help="admit one sealed envelope as FOREIGN_READ_ONLY content"
+    )
+    import_transfer.add_argument("--root", required=True, type=Path)
+    import_transfer.add_argument("--envelope", required=True, type=Path)
+    import_transfer.add_argument("--expected-generation", type=int)
+
+    memory_sub.add_parser("limits", help="print what admission bounds and what it refuses")
+
+    abandon = memory_sub.add_parser(
+        "abandon-epoch", help="close the epoch; preserve everything recorded"
+    )
+    abandon.add_argument("--root", required=True, type=Path)
+    abandon.add_argument("--reason", required=True)
+
+
+def _add_reconcile_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """The HOK-244 post-action reconciliation surface.
+
+    Every verb is an *evidence* verb: create a journal, append an observation,
+    read state back, replay a comparison, close an epoch, or refuse. There is
+    deliberately no ``select``, ``decide``, ``authorize``, ``promote`` or ``learn``
+    subcommand, and no flag that would express one. ``revise`` appends a
+    correction or a disagreement; it never edits what is already recorded, and it
+    never touches the decision memory.
+    """
+    reconcile = sub.add_parser(
+        "reconcile",
+        help="post-action evidence journal: records observations, never judges or authorises",
+    )
+    reconcile_sub = reconcile.add_subparsers(dest="reconcile_command", required=True)
+
+    initialise = reconcile_sub.add_parser(
+        "init", help="create a reconciliation journal bound to one host, family and epoch"
+    )
+    initialise.add_argument("--root", required=True, type=Path)
+    initialise.add_argument("--store-id", required=True)
+    initialise.add_argument("--host-id", required=True)
+    initialise.add_argument(
+        "--agent-family", required=True, choices=[family.value for family in AgentFamily]
+    )
+    initialise.add_argument("--epoch", required=True)
+
+    for name, help_text in (
+        ("append", "admit and append the initial reconciliation of one pre-action revision"),
+        ("revise", "append a correction or a disagreement extending the exact current head"),
+    ):
+        command = reconcile_sub.add_parser(name, help=help_text)
+        command.add_argument("--root", required=True, type=Path)
+        command.add_argument("--reconciliation", required=True, type=Path)
+        command.add_argument(
+            "--decision-record",
+            required=True,
+            type=Path,
+            help=("exact pre-action record required to verify the declared preimage before append"),
+        )
+        command.add_argument(
+            "--expected-generation",
+            type=int,
+            help="refuse unless the journal is at exactly this generation",
+        )
+
+    status = reconcile_sub.add_parser(
+        "status", help="binding, generation, entry count, reconciliation count, root seal"
+    )
+    status.add_argument("--root", required=True, type=Path)
+
+    verify = reconcile_sub.add_parser("verify", help="walk the whole entry chain")
+    verify.add_argument("--root", required=True, type=Path)
+
+    listing = reconcile_sub.add_parser("list", help="bounded listing of head revisions")
+    listing.add_argument("--root", required=True, type=Path)
+    listing.add_argument("--limit", type=int, default=50)
+    listing.add_argument("--offset", type=int, default=0)
+
+    show = reconcile_sub.add_parser(
+        "show", help="one reconciliation revision, with its whole revision history"
+    )
+    show.add_argument("--root", required=True, type=Path)
+    show.add_argument("--reconciliation-id", required=True)
+    show.add_argument("--revision", type=int, help="the head revision if omitted")
+
+    replay = reconcile_sub.add_parser(
+        "replay",
+        help="pre-action evidence beside the observation, per dimension; no score, no verdict",
+    )
+    replay.add_argument("--root", required=True, type=Path)
+    replay.add_argument("--reconciliation-id", required=True)
+    replay.add_argument(
+        "--decision-record",
+        required=True,
+        type=Path,
+        help="the exact pre-action record this reconciliation names",
+    )
+    replay.add_argument("--revision", type=int, help="the head revision if omitted")
+
+    reconcile_sub.add_parser("limits", help="print what admission bounds, refuses and disclaims")
+
+    abandon = reconcile_sub.add_parser(
+        "abandon-epoch", help="close the epoch; preserve everything recorded"
+    )
+    abandon.add_argument("--root", required=True, type=Path)
+    abandon.add_argument("--reason", required=True)
+
+
+def _add_shadow_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """The preregistered prospective collection operator surface."""
+    shadow = sub.add_parser(
+        "shadow",
+        help="preregister and collect diagnostic cases without operational influence",
+    )
+    commands = shadow.add_subparsers(dest="shadow_command", required=True)
+
+    power = commands.add_parser("power", help="compute the exact preregistered sample target")
+    power.add_argument("--p0", required=True, type=float)
+    power.add_argument("--p1", required=True, type=float)
+    power.add_argument("--alpha", required=True, type=float)
+    power.add_argument("--target-power", required=True, type=float)
+    power.add_argument("--max-enrollments", required=True, type=int)
+    power.add_argument("--clustering-inflation", required=True, type=float)
+
+    validate = commands.add_parser("validate-plan", help="admit and seal a plan without writing")
+    validate.add_argument("--plan", required=True, type=Path)
+
+    initialise = commands.add_parser("init", help="create a journal from one admitted sealed plan")
+    initialise.add_argument("--root", required=True, type=Path)
+    initialise.add_argument("--plan", required=True, type=Path)
+
+    start = commands.add_parser("start", help="move a sealed plan into collection")
+    start.add_argument("--root", required=True, type=Path)
+    start.add_argument("--expected-generation", type=int)
+
+    enroll = commands.add_parser("enroll", help="append one exact qualifying HOK-243 decision")
+    enroll.add_argument("--root", required=True, type=Path)
+    enroll.add_argument("--decision-record", required=True, type=Path)
+    enroll.add_argument("--stratum", required=True)
+    enroll.add_argument("--expected-generation", type=int)
+
+    reconcile = commands.add_parser(
+        "reconcile", help="terminalize from the current verified HOK-244 journal tail"
+    )
+    reconcile.add_argument("--root", required=True, type=Path)
+    reconcile.add_argument("--case-id", required=True)
+    reconcile.add_argument("--decision-record", required=True, type=Path)
+    reconcile.add_argument("--source-root", required=True, type=Path)
+    reconcile.add_argument("--reconciliation-id", required=True)
+    reconcile.add_argument("--revision", type=int)
+    reconcile.add_argument("--expected-generation", type=int)
+
+    terminal = commands.add_parser(
+        "terminal", help="record cancellation or loss to follow-up in the denominator"
+    )
+    terminal.add_argument("--root", required=True, type=Path)
+    terminal.add_argument("--case-id", required=True)
+    terminal.add_argument("--state", required=True, choices=("cancelled", "lost-to-followup"))
+    terminal.add_argument("--reason", required=True)
+    terminal.add_argument("--expected-generation", type=int)
+
+    for name, help_text in (
+        ("status", "show lifecycle state and denominator counts"),
+        ("close", "apply only the preregistered calendar and denominator stop rules"),
+        ("verify", "replay the complete journal and semantic state machine"),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--root", required=True, type=Path)
+        if name == "close":
+            command.add_argument("--expected-generation", type=int)
+
+    abort = commands.add_parser(
+        "abort", help="terminalize only for an integrity or security failure"
+    )
+    abort.add_argument("--root", required=True, type=Path)
+    abort.add_argument("--reason", required=True, choices=("integrity-failure", "security-failure"))
+    abort.add_argument("--expected-generation", type=int)
+
+    for name in ("manifest", "report"):
+        command = commands.add_parser(name, help=f"publish the terminal diagnostic {name}")
+        command.add_argument("--root", required=True, type=Path)
+        command.add_argument("--out", type=Path)
+
+    commands.add_parser("limits", help="print admission bounds and explicit non-capabilities")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -263,6 +562,10 @@ def build_parser() -> argparse.ArgumentParser:
     pairwise_capture.add_argument("--projection", required=True, type=Path)
     pairwise_capture.add_argument("--root", required=True, type=Path)
     pairwise_capture.add_argument("--out", required=True, type=Path)
+
+    _add_memory_parser(sub)
+    _add_reconcile_parser(sub)
+    _add_shadow_parser(sub)
 
     benchmark = sub.add_parser("benchmark", help="the HOK-188 offline baseline benchmark")
     benchmark_sub = benchmark.add_subparsers(dest="benchmark_command", required=True)
@@ -497,6 +800,15 @@ def _dispatch(args: argparse.Namespace, stdout: TextIO) -> int:
     if command == "pairwise":
         return _dispatch_pairwise(args, stdout)
 
+    if command == "memory":
+        return _dispatch_memory(args, stdout)
+
+    if command == "reconcile":
+        return _dispatch_reconcile(args, stdout)
+
+    if command == "shadow":
+        return _dispatch_shadow(args, stdout)
+
     if command == "benchmark":
         return _dispatch_benchmark(args, stdout)
 
@@ -504,6 +816,171 @@ def _dispatch(args: argparse.Namespace, stdout: TextIO) -> int:
         return _dispatch_authority(args, stdout)
 
     raise AssertionError(f"unhandled command {command!r}")  # pragma: no cover
+
+
+def _publish_shadow_document(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    *,
+    name: str,
+    document: dict[str, object],
+) -> int:
+    if args.out is None:
+        _emit(stdout, {name: document})
+        return EXIT_OK
+    destination = _resolve_under(args.root, args.out, what=f"shadow {name} destination")
+    encoded = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    _write_atomically(
+        args.root,
+        destination,
+        encoded,
+        what=f"shadow {name} destination",
+    )
+    _emit(stdout, {"published_to": str(destination), f"{name}_seal": document[f"{name}_seal"]})
+    return EXIT_OK
+
+
+def _dispatch_shadow(args: argparse.Namespace, stdout: TextIO) -> int:
+    command: str = args.shadow_command
+    if command == "power":
+        result = plan_exact_one_sided_binomial(
+            p0=args.p0,
+            p1=args.p1,
+            alpha=args.alpha,
+            target_power=args.target_power,
+            max_enrollments=args.max_enrollments,
+            clustering_inflation=args.clustering_inflation,
+        )
+        _emit(stdout, {"power": result.canonical_payload()})
+        return EXIT_OK
+
+    if command == "validate-plan":
+        plan = admit_prospective_plan(_read_json(args.plan))
+        _emit(
+            stdout,
+            {
+                "valid": True,
+                "plan_id": plan.plan_id,
+                "plan_seal": plan.plan_seal(),
+                "power_status": plan.power.status.value,
+            },
+        )
+        return EXIT_OK
+
+    if command == "init":
+        plan = admit_prospective_plan(_read_json(args.plan))
+        with ProspectiveCollectionJournal.create(args.root, plan=plan, clock=utc_now) as journal:
+            _emit(stdout, {"created": journal.status().canonical_payload()})
+        return EXIT_OK
+
+    if command == "limits":
+        _emit(stdout, {"limits": prospective_collection_limits()})
+        return EXIT_OK
+
+    if command == "start":
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            status = journal.start(
+                clock=utc_now,
+                expected_generation=args.expected_generation,
+            )
+            _emit(stdout, {"status": status.canonical_payload()})
+        return EXIT_OK
+
+    if command == "enroll":
+        decision = admit_strategic_decision(_read_json(args.decision_record))
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            receipt = journal.enroll(
+                decision,
+                stratum=args.stratum,
+                expected_generation=args.expected_generation,
+                clock=utc_now,
+            )
+            _emit(stdout, {"enrolled": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "reconcile":
+        decision = admit_strategic_decision(_read_json(args.decision_record))
+        with (
+            ReconciliationJournal.open(args.source_root) as source,
+            ProspectiveCollectionJournal.open(args.root) as journal,
+        ):
+            receipt = journal.reconcile(
+                args.case_id,
+                decision_record=decision,
+                source_journal=source,
+                reconciliation_id=args.reconciliation_id,
+                reconciliation_revision=args.revision,
+                expected_generation=args.expected_generation,
+                clock=utc_now,
+            )
+            _emit(stdout, {"terminal": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "terminal":
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            if args.state == "cancelled":
+                receipt = journal.mark_cancelled(
+                    args.case_id,
+                    reason=args.reason,
+                    expected_generation=args.expected_generation,
+                    clock=utc_now,
+                )
+            else:
+                receipt = journal.mark_lost_to_followup(
+                    args.case_id,
+                    reason=args.reason,
+                    expected_generation=args.expected_generation,
+                    clock=utc_now,
+                )
+            _emit(stdout, {"terminal": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "status":
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            _emit(stdout, {"status": journal.status().canonical_payload()})
+        return EXIT_OK
+
+    if command == "close":
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            status = journal.close_collection(
+                expected_generation=args.expected_generation,
+                clock=utc_now,
+            )
+            _emit(stdout, {"status": status.canonical_payload()})
+        return EXIT_OK
+
+    if command == "abort":
+        reason = (
+            AbortReason.INTEGRITY_FAILURE
+            if args.reason == "integrity-failure"
+            else AbortReason.SECURITY_FAILURE
+        )
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            status = journal.abort(
+                reason=reason,
+                expected_generation=args.expected_generation,
+                clock=utc_now,
+            )
+            _emit(stdout, {"status": status.canonical_payload()})
+        return EXIT_OK
+
+    if command == "verify":
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            report = journal.verify()
+            _emit(stdout, {"integrity": report.canonical_payload()})
+        return EXIT_OK if report.ok else EXIT_INTEGRITY
+
+    if command in {"manifest", "report"}:
+        with ProspectiveCollectionJournal.open(args.root) as journal:
+            artifact = journal.manifest() if command == "manifest" else journal.report()
+            return _publish_shadow_document(
+                args,
+                stdout,
+                name=command,
+                document=artifact.canonical_payload(),
+            )
+
+    raise AssertionError(f"unhandled shadow command {command!r}")  # pragma: no cover
 
 
 def _dispatch_pairwise(args: argparse.Namespace, stdout: TextIO) -> int:
@@ -533,6 +1010,302 @@ def _dispatch_pairwise(args: argparse.Namespace, stdout: TextIO) -> int:
         },
     )
     return EXIT_OK
+
+
+def _require_declared_revision(payload: object, *, initial: bool) -> object:
+    """Keep ``append`` and ``revise`` meaning exactly what their names say.
+
+    The store would accept either payload through the same path. Splitting the
+    command means an operator who meant "start a decision" cannot silently
+    extend one, and an operator who meant "revise" cannot silently start one.
+    """
+    revision = payload.get("revision") if isinstance(payload, dict) else None
+    if initial and revision != 1:
+        raise ContractViolation(
+            "append records the initial revision; use revise to extend an existing decision",
+            detail={"expected_revision": 1, "declared": revision},
+        )
+    if not initial and revision == 1:
+        raise ContractViolation(
+            "revise extends an existing decision; use append for the initial revision",
+            detail={"forbidden_revision": 1, "declared": revision},
+        )
+    return payload
+
+
+def _dispatch_memory(args: argparse.Namespace, stdout: TextIO) -> int:
+    """The HOK-243 surface. Nothing here selects, executes or authorises."""
+    command: str = args.memory_command
+
+    if command == "limits":
+        _emit(stdout, {"admission": admission_limits()})
+        return EXIT_OK
+
+    if command == "init":
+        store = DecisionMemoryStore.create(
+            args.root,
+            store_id=args.store_id,
+            host_id=args.host_id,
+            agent_family=AgentFamily(args.agent_family),
+            epoch=args.epoch,
+        )
+        with store:
+            _emit(stdout, {"created": store.binding().canonical_payload()})
+        return EXIT_OK
+
+    if command in {"append", "revise"}:
+        payload = _require_declared_revision(_read_json(args.record), initial=command == "append")
+        with DecisionMemoryStore.open(args.root) as store:
+            receipt = store.append_decision(payload, expected_generation=args.expected_generation)
+            _emit(stdout, {"appended": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "status":
+        with DecisionMemoryStore.open(args.root) as store:
+            _emit(stdout, {"status": store.status().canonical_payload()})
+        return EXIT_OK
+
+    if command == "verify":
+        with DecisionMemoryStore.open(args.root) as store:
+            report = store.verify()
+            _emit(stdout, {"integrity": report.canonical_payload()})
+        return EXIT_OK if report.ok else EXIT_INTEGRITY
+
+    if command == "list":
+        with DecisionMemoryStore.open(args.root) as store:
+            active = store.list_active(
+                as_of=args.as_of,
+                origin_kind=DecisionOriginKind(args.origin),
+                limit=args.limit,
+                offset=args.offset,
+            )
+            _emit(
+                stdout,
+                {
+                    "origin_kind": args.origin,
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "active": [entry.canonical_payload() for entry in active],
+                },
+            )
+        return EXIT_OK
+
+    if command == "show":
+        with DecisionMemoryStore.open(args.root) as store:
+            _emit(
+                stdout,
+                {
+                    "active": store.get_active(
+                        args.decision_id, as_of=args.as_of
+                    ).canonical_payload()
+                },
+            )
+        return EXIT_OK
+
+    if command == "revoke":
+        with DecisionMemoryStore.open(args.root) as store:
+            receipt = store.revoke(
+                args.decision_id,
+                reason=args.reason,
+                revoked_by=args.revoked_by,
+                expected_generation=args.expected_generation,
+            )
+            _emit(stdout, {"revoked": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "tombstone":
+        with DecisionMemoryStore.open(args.root) as store:
+            receipt = store.tombstone(
+                args.decision_id,
+                args.revision,
+                reason=args.reason,
+                expected_generation=args.expected_generation,
+            )
+            _emit(stdout, {"tombstoned": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "abandon-epoch":
+        with DecisionMemoryStore.open(args.root) as store:
+            _emit(stdout, {"binding": store.abandon_epoch(reason=args.reason).canonical_payload()})
+        return EXIT_OK
+
+    if command == "export-transfer":
+        return _dispatch_memory_export(args, stdout)
+
+    if command == "import-transfer":
+        with DecisionMemoryStore.open(args.root) as store:
+            imported = store.import_transfer(
+                _read_json(args.envelope), expected_generation=args.expected_generation
+            )
+            _emit(stdout, {"imported": imported.canonical_payload()})
+        return EXIT_OK
+
+    raise AssertionError(f"unhandled memory command {command!r}")  # pragma: no cover
+
+
+def _dispatch_memory_export(args: argparse.Namespace, stdout: TextIO) -> int:
+    destination = (
+        _resolve_under(args.root, args.out, what="decision transfer destination")
+        if args.out is not None
+        else None
+    )
+    with DecisionMemoryStore.open(args.root) as store:
+        envelope = store.export_transfer(
+            args.decision_id,
+            destination=DecisionBinding(
+                host_id=args.to_host_id,
+                agent_family=AgentFamily(args.to_agent_family),
+                store_id=args.to_store_id,
+                epoch=args.to_epoch,
+            ),
+            exported_by=args.exported_by,
+        )
+    document = envelope.canonical_payload()
+    if destination is None:
+        _emit(stdout, {"transfer": document})
+        return EXIT_OK
+    _write_atomically(
+        args.root,
+        destination,
+        json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        what="decision transfer destination",
+    )
+    _emit(
+        stdout,
+        {
+            "transfer_written_to": str(destination),
+            "transfer_seal": envelope.transfer_seal,
+            "source_record_seal": envelope.source_record_seal,
+            "destination_binding": envelope.destination_binding.canonical_payload(),
+        },
+    )
+    return EXIT_OK
+
+
+def _require_declared_reconciliation_revision(payload: object, *, initial: bool) -> object:
+    """Keep ``append`` and ``revise`` meaning exactly what their names say.
+
+    The journal would accept either payload through the same path. Splitting the
+    command means an operator who meant "record the first observation" cannot
+    silently append a correction, and an operator who meant "correct" cannot
+    silently start a new reconciliation.
+    """
+    revision = payload.get("revision") if isinstance(payload, dict) else None
+    if initial and revision != 1:
+        raise ContractViolation(
+            "append records the initial reconciliation; use revise to correct or disagree",
+            detail={"expected_revision": 1, "declared": revision},
+        )
+    if not initial and revision == 1:
+        raise ContractViolation(
+            "revise appends a correction or a disagreement; use append for the initial "
+            "reconciliation",
+            detail={"forbidden_revision": 1, "declared": revision},
+        )
+    return payload
+
+
+def _supplied_decision_record(path: Path) -> StrategicDecisionRecord:
+    """Load the required pre-action record through HOK-243's own admission.
+
+    Reading it here never writes to the decision memory and never revises it. A
+    record that would not be admissible as a decision is not usable as a preimage
+    either, so it goes through the same door.
+    """
+    return admit_strategic_decision(_read_json(path))
+
+
+def _dispatch_reconcile(args: argparse.Namespace, stdout: TextIO) -> int:
+    """The HOK-244 surface. Nothing here selects, scores, authorises or promotes."""
+    command: str = args.reconcile_command
+
+    if command == "limits":
+        _emit(stdout, {"admission": reconciliation_limits()})
+        return EXIT_OK
+
+    if command == "init":
+        journal = ReconciliationJournal.create(
+            args.root,
+            store_id=args.store_id,
+            host_id=args.host_id,
+            agent_family=AgentFamily(args.agent_family),
+            epoch=args.epoch,
+        )
+        with journal:
+            _emit(stdout, {"created": journal.binding().canonical_payload()})
+        return EXIT_OK
+
+    if command in {"append", "revise"}:
+        payload = _require_declared_reconciliation_revision(
+            _read_json(args.reconciliation), initial=command == "append"
+        )
+        decision_record = _supplied_decision_record(args.decision_record)
+        with ReconciliationJournal.open(args.root) as journal:
+            receipt = journal.append_reconciliation(
+                payload,
+                decision_record=decision_record,
+                expected_generation=args.expected_generation,
+            )
+            _emit(stdout, {"appended": receipt.canonical_payload()})
+        return EXIT_OK
+
+    if command == "status":
+        with ReconciliationJournal.open(args.root) as journal:
+            _emit(stdout, {"status": journal.status().canonical_payload()})
+        return EXIT_OK
+
+    if command == "verify":
+        with ReconciliationJournal.open(args.root) as journal:
+            report = journal.verify()
+            _emit(stdout, {"integrity": report.canonical_payload()})
+        return EXIT_OK if report.ok else EXIT_INTEGRITY
+
+    if command == "list":
+        with ReconciliationJournal.open(args.root) as journal:
+            heads = journal.list_heads(limit=args.limit, offset=args.offset)
+            _emit(
+                stdout,
+                {
+                    "limit": args.limit,
+                    "offset": args.offset,
+                    "heads": [head.canonical_payload() for head in heads],
+                },
+            )
+        return EXIT_OK
+
+    if command == "show":
+        with ReconciliationJournal.open(args.root) as journal:
+            entry = journal.get(args.reconciliation_id, revision=args.revision)
+            history = journal.revisions(args.reconciliation_id)
+            _emit(
+                stdout,
+                {
+                    "reconciliation": entry.canonical_payload(),
+                    "revision_seals": [
+                        {"revision": item.revision, "content_seal": item.content_seal}
+                        for item in history
+                    ],
+                },
+            )
+        return EXIT_OK
+
+    if command == "replay":
+        # ``--decision-record`` is required for replay: a comparison against a
+        # preimage nobody supplied would have nothing to put on the pre-action side.
+        preimage = admit_strategic_decision(_read_json(args.decision_record))
+        with ReconciliationJournal.open(args.root) as journal:
+            comparison = journal.replay(args.reconciliation_id, preimage, revision=args.revision)
+            _emit(stdout, {"replay": comparison.canonical_payload()})
+        return EXIT_OK
+
+    if command == "abandon-epoch":
+        with ReconciliationJournal.open(args.root) as journal:
+            _emit(
+                stdout, {"binding": journal.abandon_epoch(reason=args.reason).canonical_payload()}
+            )
+        return EXIT_OK
+
+    raise AssertionError(f"unhandled reconcile command {command!r}")  # pragma: no cover
 
 
 def _dispatch_protocol(args: argparse.Namespace, stdout: TextIO) -> int:
