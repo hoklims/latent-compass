@@ -13,7 +13,7 @@ Reprends l’implémentation de Latent Compass jusqu’au résultat demandé : c
 1. Les instructions applicables au worktree, puis `HANDOFF.md`, `GOVERNANCE.md` et `CONTRIBUTING.md`.
 2. `docs/adr/0011-experimental-active-diagnosis.md`, `docs/active-diagnosis.md`, `docs/source-session.md`, `docs/source-observations.md`, `docs/lab-operations.md`.
 3. La PR #4 et les issues Linear HOK-798 à HOK-806, descriptions et dépendances comprises.
-4. Sur cette machine, les preuves de la session précédente sont dans `C:\Users\Hokli\Documents\Codex\2026-09-18\fai\work\` : `audit-terminal.md`, `lc-final-epoch.json`, `lc-mutant-final-receipts.json`, `lc-mutants.json`, `run_lab_mutants.py`, `lc-ci-final.json` et `lc-ci-final.log`. Ces preuves portent sur le commit indiqué, pas automatiquement sur tes futures modifications.
+4. Sur cette machine, les preuves de la session précédente sont hors dépôt, dans le dossier de travail de la session Codex du 2026-09-18 (`Documents/Codex/2026-09-18/fai/work/` sous le profil de l’opérateur) : `audit-terminal.md`, `lc-final-epoch.json`, `lc-mutant-final-receipts.json`, `lc-mutants.json`, `run_lab_mutants.py`, `lc-ci-final.json` et `lc-ci-final.log`. Ces preuves portent sur le commit indiqué, pas automatiquement sur tes futures modifications.
 
 ## État réel
 
