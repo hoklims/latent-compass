@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Annotated, Final, Self
 
 from pydantic import AfterValidator, Field, model_validator
@@ -72,6 +72,7 @@ from latent_compass.lab.observations import (
     DriftStatus,
     HostBinding,
     LiteralMatchReport,
+    RelativeSourcePath,
     SourceEncoding,
     SourceSnapshot,
     SourceSnapshotRevalidation,
@@ -138,21 +139,6 @@ def _no_control_characters(value: str) -> str:
     return value
 
 
-def _require_relative_posix_like(value: str) -> str:
-    _no_control_characters(value)
-    posix_path = PurePosixPath(value)
-    if posix_path.is_absolute():
-        raise ValueError("relative path must not be absolute")
-    if any(part in {"", ".", ".."} for part in posix_path.parts):
-        raise ValueError("relative path must not contain '.', '..' or an empty segment")
-    return value
-
-
-_CatalogRelativePath = Annotated[
-    str,
-    Field(min_length=1, max_length=4096),
-    AfterValidator(_require_relative_posix_like),
-]
 _QueryText = Annotated[
     str,
     Field(min_length=1, max_length=_MAX_QUERY_TEXT_LENGTH),
@@ -171,7 +157,7 @@ class SourceProbeSpec(StrictModel):
     """
 
     probe_id: Identifier
-    relative_paths: tuple[_CatalogRelativePath, ...] = Field(
+    relative_paths: tuple[RelativeSourcePath, ...] = Field(
         min_length=1, max_length=MAX_RELATIVE_PATHS_PER_PROBE
     )
     query: _QueryText

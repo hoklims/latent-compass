@@ -15,9 +15,9 @@ search.
 
 The search is bounded by an explicit, caller-visible ``max_expansions``
 ceiling on top of the declared ``horizon``. Once the ceiling is reached, every
-further node is scored as its stopping value only — a sound, conservative
-lower bound on how much probing could help, never a fabricated exact value —
-and the report's ``search_exhausted`` flag is set. ``exact_for_declared_bounds``
+further node is scored as its stopping value only. This is an upper bound on
+the minimum remaining loss, so the estimated benefit of probing is conservative,
+not an exact optimum. The report's ``search_exhausted`` flag is set. ``exact_for_declared_bounds``
 is true only when the ceiling was never reached; even then it is exact only
 *relative to the supplied finite model, budget and horizon*, never a claim
 about the real world.

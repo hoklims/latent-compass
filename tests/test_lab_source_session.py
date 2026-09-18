@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from latent_compass.episode import AgentFamily
 from latent_compass.lab.errors import (
@@ -26,10 +27,13 @@ from latent_compass.lab.observations import (
     FileRevalidationResult,
     FileRevalidationStatus,
     HostBinding,
+    LiteralMatchReport,
+    SourceFileIdentity,
     SourceObservationViolation,
     SourceSnapshot,
     SourceSnapshotRevalidation,
     capture_source_snapshot,
+    observe_literal_matches,
 )
 from latent_compass.lab.source_session import (
     LabSourceSessionViolationError,
@@ -42,6 +46,111 @@ from latent_compass.lab.state import initial_state
 OBSERVED_AT = "2026-09-18T00:00:00Z"
 HOST_ID = "host-alpha"
 ROOT_ID = "root-alpha"
+
+
+@pytest.mark.parametrize(
+    "alias", ["a/./b", "a//b", "a\\b", "C:\\outside", "C:outside", "a/", "./a", "a/../b"]
+)
+def test_source_and_catalog_refuse_noncanonical_path_labels(alias: str) -> None:
+    with pytest.raises(ValidationError):
+        SourceFileIdentity(relative_path=alias, byte_digest="sha256:" + "a" * 64, size_bytes=0)
+    payload = catalog_payload()
+    payload["probes"][0]["relative_paths"] = [alias]
+    with pytest.raises(LabSourceSessionViolationError):
+        load_source_probe_catalog(payload)
+
+
+def test_bridge_revalidates_noncanonical_manifest_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, "file-a.txt", "TARGET-A\n")
+    _write(tmp_path, "file-b.txt", "TARGET-B\n")
+    snapshot = _capture(tmp_path)
+    catalog = load_source_probe_catalog(catalog_payload())
+    m = model()
+    prior = initial_state(
+        m, state_id="episode-alias", binding=derive_lab_binding(m, snapshot, catalog)
+    )
+    alias = "./file-a.txt"
+    bad_snapshot = snapshot.model_copy(
+        update={
+            "manifest": (
+                snapshot.manifest[0].model_copy(update={"relative_path": alias}),
+                snapshot.manifest[1],
+            )
+        }
+    )
+    bad_catalog = catalog.model_copy(
+        update={
+            "probes": (
+                catalog.probes[0].model_copy(update={"relative_paths": (alias,)}),
+                catalog.probes[1],
+            )
+        }
+    )
+
+    def unexpected_read(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("noncanonical manifest reached filesystem revalidation")
+
+    monkeypatch.setattr(
+        "latent_compass.lab.source_session.revalidate_source_snapshot", unexpected_read
+    )
+    with pytest.raises(LabSourceSessionViolationError):
+        _observe(
+            m,
+            prior,
+            root=tmp_path,
+            snapshot=bad_snapshot,
+            catalog=bad_catalog,
+            probe_id="check-a",
+            observation_id="obs-alias",
+        )
+
+
+def test_drift_after_real_literal_read_is_refused_and_prior_remains_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = "TARGET-A\n"
+    _write(tmp_path, "file-a.txt", original)
+    _write(tmp_path, "file-b.txt", "TARGET-B\n")
+    snapshot = _capture(tmp_path)
+    catalog = load_source_probe_catalog(catalog_payload())
+    m = model()
+    prior = initial_state(
+        m, state_id="episode-post-drift", binding=derive_lab_binding(m, snapshot, catalog)
+    )
+
+    def read_then_change(*args: Any, **kwargs: Any) -> LiteralMatchReport:
+        report = observe_literal_matches(*args, **kwargs)
+        _write(tmp_path, "file-a.txt", "changed after the real read\n")
+        return report
+
+    with monkeypatch.context() as patch:
+        patch.setattr("latent_compass.lab.source_session.observe_literal_matches", read_then_change)
+        with pytest.raises(LabSourceSessionViolationError) as excinfo:
+            _observe(
+                m,
+                prior,
+                root=tmp_path,
+                snapshot=snapshot,
+                catalog=catalog,
+                probe_id="check-a",
+                observation_id="obs-post-drift",
+            )
+        assert isinstance(excinfo.value.detail, dict)
+        assert excinfo.value.detail["reason"] == "post_read_drift"
+    _write(tmp_path, "file-a.txt", original)
+    recovered = _observe(
+        m,
+        prior,
+        root=tmp_path,
+        snapshot=snapshot,
+        catalog=catalog,
+        probe_id="check-a",
+        observation_id="obs-recovered",
+    )
+    assert recovered.state.revision == 1
+    assert recovered.outcome_id == "a-hi"
 
 
 def two_probe_model_payload(**overrides: Any) -> dict[str, Any]:

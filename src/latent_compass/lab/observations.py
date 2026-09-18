@@ -113,10 +113,12 @@ def _no_control_characters(value: str) -> str:
 
 def _require_relative_posix(value: str) -> str:
     _no_control_characters(value)
+    if "\\" in value or ":" in value:
+        raise ValueError("relative path must use portable POSIX spelling without a drive or stream")
     posix_path = PurePosixPath(value)
     if posix_path.is_absolute():
         raise ValueError("relative path must not be absolute")
-    if any(part in {"", ".", ".."} for part in posix_path.parts):
+    if any(part in {"", ".", ".."} for part in value.split("/")):
         raise ValueError("relative path must not contain '.', '..' or an empty segment")
     return value
 
