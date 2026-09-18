@@ -106,6 +106,57 @@ episode**, as is a changed question, a widened coverage or a relaxed policy.
 A result in paths that answer differently is a world the model does not
 declare. It is refused, never resolved by picking one.
 
+## The isolated bench (HOK-803)
+
+`examples/lab_host_bench.py` runs the whole loop — advice, routing, host
+decision, execution, observation — in a throwaway Git repository, with real
+tools rather than mocks: `git diff` on a dirty working tree, a Python `ast`
+symbol lookup, and a check process whose exit code is the verdict.
+
+```bash
+uv run python examples/lab_host_bench.py --family claude
+```
+
+The executor lives in `examples/` on purpose: `tests/test_lab_boundary.py`
+refuses any process launch inside `latent_compass.lab`. Each executed step
+keeps five separate records — `advice`, `routing`, `host_decision`,
+`execution`, `result` — and the bench's router is the only party that accepts,
+ignores or escalates advice. Tool identities are observed (`git --version`, the
+running interpreter), never hard-coded.
+
+`tests/test_lab_host_bench.py` drives it through the paths that do not end in
+an outcome:
+
+| Situation | What the loop does |
+| --- | --- |
+| binary missing, or tool declared absent | `TOOL_ABSENT`; state untouched |
+| process overruns its timeout | interrupted; `TIMEOUT`; state untouched |
+| language the symbol tool cannot parse | `UNSUPPORTED_LANGUAGE`, never guessed |
+| advisor absent, kill switch, capability withheld | `ABSTAIN`; nothing executes |
+| advice expired, computed on another source, or for another scope | `ABSTAIN`; nothing executes |
+| review, authority or Semctx proof missing | `ESCALATE`; nothing executes |
+| host ignores the advice | nothing executes; the native decision stands |
+| recommended probe cannot be obtained | not retried, no other provider stands in; the loop stops |
+| provider retired by the session policy | the session is refused before its first step |
+| observation made for the other agent family | refused, `scope_mismatch` |
+
+Every attempt, a failed one included, is charged at its reserved ceiling: the
+bench measures durations and invents no token or money cost.
+
+**Known limit.** `propose()` has no way to be told that a probe cannot be
+obtained, so it names the same probe again and the loop stops on the best
+admissible decision. On the bench model that stop is not free: with 4 points
+left, the check probe would still be worth 7/2 against 15/4 for stopping. The
+report's other values cannot simply be reused either: `diff-pricing`'s 3/1
+assumes the unobtainable probe comes next. Planning around an unobtainable
+probe needs a planner input that the `1.0.0` contract does not have; it is an
+open design decision, not a bench defect.
+
+A `CLAUDE` or `CODEX` family on the bench is a declared lab identity. Running
+the same loop under both shows that two episodes never mix — **not** that two
+live hosts behave alike. Wiring the loop into real Codex and Claude Code
+sessions remains open.
+
 ## Non-claims
 
 The lab cannot authenticate the host. A tool identity, a Git identity, a check
