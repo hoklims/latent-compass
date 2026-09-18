@@ -140,3 +140,18 @@ Implementation and local proof may finish before HOK-804's real comparison,
 HOK-805's live pilot and HOK-806's removal. Those outcomes remain open until their
 observations exist. Do not transform the absence of empirical evidence into a
 software gate success or an unearned Done status.
+
+## Amendment 2026-09-19 — operational scope (HOK-799)
+
+The decision above is unchanged. The scope it left open is now fixed in
+[`docs/active-diagnosis-scope.md`](../active-diagnosis-scope.md): one personal
+workstation, this repository and its worktrees as the only `PERSONAL_LAB`
+perimeter, and the professional environment, the vault and every other
+personal repository excluded. The read-only inventory it rests on is sealed
+under `evidence/hok799-scope-inventory/`, and its unknowns each carry an owner.
+
+Two consequences bind the later tranches. The pilot can produce evidence about
+the Graphify code graph only, because CCC and Semctx are not configured for
+it; a CCC verdict needs a second named pilot repository. And the `1.0.0` lab
+binding does not bind tool versions, so every HOK-800 adapter must record the
+identity of the tool that produced its observation.

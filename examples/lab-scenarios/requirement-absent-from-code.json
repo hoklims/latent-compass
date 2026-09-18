@@ -1,0 +1,49 @@
+{
+  "contract_version": "1.0.0",
+  "model_id": "scenario-requirement-absent-from-code",
+  "worlds": [
+    { "id": "requirement-allows", "weight": 9 },
+    { "id": "requirement-forbids", "weight": 1 }
+  ],
+  "probes": [
+    {
+      "id": "read-implementation",
+      "cost": 1,
+      "outcome_space": ["code-consistent"],
+      "outcomes": {
+        "requirement-allows": "code-consistent",
+        "requirement-forbids": "code-consistent"
+      }
+    },
+    {
+      "id": "authored-requirement-lookup",
+      "cost": 2,
+      "outcome_space": ["rule-allows", "rule-forbids"],
+      "outcomes": {
+        "requirement-allows": "rule-allows",
+        "requirement-forbids": "rule-forbids"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "apply-change",
+      "losses": {
+        "requirement-allows": 0,
+        "requirement-forbids": 10
+      },
+      "required_evidence": [
+        { "probe_id": "authored-requirement-lookup", "outcome_id": "rule-allows" }
+      ]
+    },
+    {
+      "id": "abstain-and-request-ruling",
+      "losses": {
+        "requirement-allows": 3,
+        "requirement-forbids": 3
+      },
+      "required_evidence": []
+    }
+  ],
+  "abstain_decision_id": "abstain-and-request-ruling"
+}

@@ -1,0 +1,61 @@
+{
+  "contract_version": "1.0.0",
+  "model_id": "scenario-concept-without-shared-terms",
+  "worlds": [
+    { "id": "concept-in-scheduler", "weight": 1 },
+    { "id": "concept-in-client", "weight": 1 },
+    { "id": "none-of-the-above", "weight": 1 }
+  ],
+  "probes": [
+    {
+      "id": "literal-search-user-terms",
+      "cost": 1,
+      "outcome_space": ["no-hit"],
+      "outcomes": {
+        "concept-in-scheduler": "no-hit",
+        "concept-in-client": "no-hit",
+        "none-of-the-above": "no-hit"
+      }
+    },
+    {
+      "id": "symbol-walk-from-entrypoint",
+      "cost": 3,
+      "outcome_space": ["reaches-scheduler", "reaches-client", "reaches-neither"],
+      "outcomes": {
+        "concept-in-scheduler": "reaches-scheduler",
+        "concept-in-client": "reaches-client",
+        "none-of-the-above": "reaches-neither"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "change-scheduler",
+      "losses": {
+        "concept-in-scheduler": 0,
+        "concept-in-client": 10,
+        "none-of-the-above": 10
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "change-client",
+      "losses": {
+        "concept-in-scheduler": 10,
+        "concept-in-client": 0,
+        "none-of-the-above": 10
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "abstain",
+      "losses": {
+        "concept-in-scheduler": 5,
+        "concept-in-client": 5,
+        "none-of-the-above": 5
+      },
+      "required_evidence": []
+    }
+  ],
+  "abstain_decision_id": "abstain"
+}

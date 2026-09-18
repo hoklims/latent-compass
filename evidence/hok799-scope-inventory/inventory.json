@@ -1,0 +1,503 @@
+[
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "graphify-code-graph.pilot-worktrees",
+    "provider_id": "graphify",
+    "role": "derived-structural-index",
+    "scope": "pilot-latent-compass",
+    "scope_kind": "PERSONAL_LAB",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:35bc9a6f65a39cc6113a47320aacb1302e60a09f4d5629bac39022ab9e692865",
+    "consumers": [
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "claude.hook.index-routing"
+      },
+      {
+        "consumer_id": "codex.hook.index-routing"
+      },
+      {
+        "consumer_id": "claude.skill.graphify"
+      },
+      {
+        "consumer_id": "shared.skill.index-control-plane"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "graphify-worktree-cache.pilot-worktrees",
+    "provider_id": "graphify",
+    "role": "worktree-local-cache",
+    "scope": "pilot-latent-compass",
+    "scope_kind": "PERSONAL_LAB",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:35bc9a6f65a39cc6113a47320aacb1302e60a09f4d5629bac39022ab9e692865",
+    "consumers": [
+      {
+        "consumer_id": "shared.worker.reconcile"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "claude.hook.index-refresh",
+    "provider_id": "index-control-plane",
+    "role": "refresh-hook",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:b6af12531fd2ef3a2152105e56c596cc773bac486205cf5cb5ac9989c7a832c4",
+    "consumers": [
+      {
+        "consumer_id": "shared.worker.reconcile"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "claude.hook.index-mark-dirty",
+    "provider_id": "index-control-plane",
+    "role": "invalidation-hook",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:b1dfe5e9368d6d34b495fe976cb4220a4eebf902b658751d9fd37dd9714c3dc7",
+    "consumers": [
+      {
+        "consumer_id": "shared.worker.reconcile"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "claude.hook.index-routing",
+    "provider_id": "index-control-plane",
+    "role": "routing-hook",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:beb91257a38c690cafb022b97548dcec94b63f26c5798dcab0ac63b76ca73f1e",
+    "consumers": [
+      {
+        "consumer_id": "claude.agent-sessions"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "codex.hook.index-routing",
+    "provider_id": "index-control-plane",
+    "role": "routing-hook",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:beb91257a38c690cafb022b97548dcec94b63f26c5798dcab0ac63b76ca73f1e",
+    "consumers": [
+      {
+        "consumer_id": "codex.agent-sessions"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "codex.hook.harness-adapter",
+    "provider_id": "index-control-plane",
+    "role": "multi-purpose-hook",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:3c7b885722b043fb4b5e5f994534a05e24c09ff114c64891bb30293c61eb3940",
+    "consumers": [
+      {
+        "consumer_id": "shared.worker.reconcile"
+      }
+    ],
+    "classification": "UNKNOWN",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "shared.worker.reconcile",
+    "provider_id": "index-control-plane",
+    "role": "reconcile-worker",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:9b73ceb2828d622b0fab64e73029341dd15154b88267f185294d6fba4758a6f6",
+    "consumers": [
+      {
+        "consumer_id": "claude.hook.index-refresh"
+      },
+      {
+        "consumer_id": "claude.hook.index-mark-dirty"
+      },
+      {
+        "consumer_id": "claude.hook.index-routing"
+      },
+      {
+        "consumer_id": "codex.hook.index-routing"
+      },
+      {
+        "consumer_id": "codex.hook.harness-adapter"
+      },
+      {
+        "consumer_id": "shared.task.index-control-sweep"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "shared.task.index-control-sweep",
+    "provider_id": "index-control-plane",
+    "role": "scheduled-sweep",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:8321ac73346cfe58f8c8f23a03cede3a7baa6001b19b5dd809533dc083616092",
+    "consumers": [
+      {
+        "consumer_id": "shared.store.control-plane"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "shared.task.control-plane-autocommit",
+    "provider_id": "index-control-plane",
+    "role": "scheduled-task",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c10a4b28c7cf22f3bd2bde10b9b6aea95ea9ad389934f6192d0efad0cb652ffc",
+    "consumers": [],
+    "classification": "UNKNOWN",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "shared.store.control-plane",
+    "provider_id": "index-control-plane",
+    "role": "artefact-store",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c10a4b28c7cf22f3bd2bde10b9b6aea95ea9ad389934f6192d0efad0cb652ffc",
+    "consumers": [
+      {
+        "consumer_id": "shared.worker.reconcile"
+      },
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "claude.store.host-receipts",
+    "provider_id": "index-control-plane",
+    "role": "host-receipt-store",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:35bc9a6f65a39cc6113a47320aacb1302e60a09f4d5629bac39022ab9e692865",
+    "consumers": [
+      {
+        "consumer_id": "claude.hook.index-routing"
+      },
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "codex.store.host-receipts",
+    "provider_id": "index-control-plane",
+    "role": "host-receipt-store",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:35bc9a6f65a39cc6113a47320aacb1302e60a09f4d5629bac39022ab9e692865",
+    "consumers": [
+      {
+        "consumer_id": "codex.hook.index-routing"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "claude.mcp.code-intelligence",
+    "provider_id": "index-control-plane",
+    "role": "mcp-gateway",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:a3fc78e42c557b5cb812fdbba2777a77d8f45349a27f16b27d4d49ed5fee6287",
+    "consumers": [
+      {
+        "consumer_id": "claude.agent-sessions"
+      }
+    ],
+    "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "codex.mcp.code-intelligence",
+    "provider_id": "index-control-plane",
+    "role": "mcp-gateway",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:a3fc78e42c557b5cb812fdbba2777a77d8f45349a27f16b27d4d49ed5fee6287",
+    "consumers": [
+      {
+        "consumer_id": "codex.agent-sessions"
+      }
+    ],
+    "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "ccc-semantic-index.workstation",
+    "provider_id": "cocoindex-code",
+    "role": "semantic-code-index",
+    "scope": "personal-unassessed",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c10a4b28c7cf22f3bd2bde10b9b6aea95ea9ad389934f6192d0efad0cb652ffc",
+    "consumers": [
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "claude.skill.ccc"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "semctx-semantic-layer.workstation",
+    "provider_id": "semctx",
+    "role": "authored-semantic-layer",
+    "scope": "personal-unassessed",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c02593c88dfb7aa300d6968f91b6b79ea8b50001b5c19c99e4bcdaf99650b9f2",
+    "consumers": [
+      {
+        "consumer_id": "claude.plugin.semctx"
+      },
+      {
+        "consumer_id": "codex.plugin.semctx-control"
+      },
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      }
+    ],
+    "classification": "REQUIRED_EVIDENCE",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "serena-symbolic-server.workstation",
+    "provider_id": "serena",
+    "role": "symbolic-edit-server",
+    "scope": "personal-unassessed",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:71dff2abb40270d980831beb8e5e4deb7cbc1e73ed2c5af76ab60bd170bdbe97",
+    "consumers": [
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      }
+    ],
+    "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "native-lsp.claude-plugin",
+    "provider_id": "native-lsp",
+    "role": "language-server-bridge",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c02593c88dfb7aa300d6968f91b6b79ea8b50001b5c19c99e4bcdaf99650b9f2",
+    "consumers": [
+      {
+        "consumer_id": "claude.agent-sessions"
+      }
+    ],
+    "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "vault-graphify.graph",
+    "provider_id": "graphify",
+    "role": "vault-knowledge-graph",
+    "scope": "personal-vault",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:bebf9ec81784c94b1c09dcc7ee92015e30f77154f227baf01f4b520b595e8e48",
+    "consumers": [
+      {
+        "consumer_id": "claude.mcp.vault-graphify"
+      },
+      {
+        "consumer_id": "codex.mcp.graphify"
+      },
+      {
+        "consumer_id": "claude.agent.explorer"
+      },
+      {
+        "consumer_id": "claude.agent.skeptic"
+      },
+      {
+        "consumer_id": "claude.skill.vault-search-cascade"
+      }
+    ],
+    "classification": "VAULT",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "vault-semantic.dense-index",
+    "provider_id": "vault-semantic",
+    "role": "vault-dense-index",
+    "scope": "personal-vault",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:9e014c6439772662827a15e7b85fac497ff2e7926c64cbbffc333e5688dc0cda",
+    "consumers": [
+      {
+        "consumer_id": "claude.mcp.vault-semantic"
+      },
+      {
+        "consumer_id": "claude.hook.vault-semantic-refresh"
+      },
+      {
+        "consumer_id": "claude.agent.explorer"
+      },
+      {
+        "consumer_id": "claude.agent.skeptic"
+      }
+    ],
+    "classification": "VAULT",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "professional.code-index-servers",
+    "provider_id": "mixed-index-providers",
+    "role": "project-mcp-servers",
+    "scope": "professional-excluded",
+    "scope_kind": "PROFESSIONAL",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:71dff2abb40270d980831beb8e5e4deb7cbc1e73ed2c5af76ab60bd170bdbe97",
+    "consumers": [
+      {
+        "consumer_id": "professional.agent-sessions"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "professional.worktree-artefacts",
+    "provider_id": "mixed-index-providers",
+    "role": "artefact-store",
+    "scope": "professional-excluded",
+    "scope_kind": "PROFESSIONAL",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c10a4b28c7cf22f3bd2bde10b9b6aea95ea9ad389934f6192d0efad0cb652ffc",
+    "consumers": [
+      {
+        "consumer_id": "professional.agent-sessions"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "personal-unassessed.worktree-artefacts",
+    "provider_id": "mixed-index-providers",
+    "role": "artefact-store",
+    "scope": "personal-unassessed",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c10a4b28c7cf22f3bd2bde10b9b6aea95ea9ad389934f6192d0efad0cb652ffc",
+    "consumers": [
+      {
+        "consumer_id": "claude.mcp.code-intelligence"
+      },
+      {
+        "consumer_id": "codex.mcp.code-intelligence"
+      }
+    ],
+    "classification": "CANDIDATE_INDEX",
+    "evidence_references": []
+  },
+  {
+    "contract_version": "1.0.0",
+    "asset_id": "claude.hook.unregistered-routing-advisor",
+    "provider_id": "cocoindex-code",
+    "role": "unregistered-hook-script",
+    "scope": "workstation-shared",
+    "scope_kind": "UNSCOPED",
+    "host_id": "personal-workstation",
+    "configuration_digest": "sha256:c2e0b20367e0765f59267f1d1963885fe2beaa257d941a6bc69107d8f9c588f8",
+    "consumers": [],
+    "classification": "UNKNOWN",
+    "evidence_references": []
+  }
+]

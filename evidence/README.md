@@ -67,3 +67,41 @@ attestation. Its domain-separated seal is:
 ```text
 sha256:da17854eee708e6ec0e6c647475c222db6829e7a076d3a0219ace8c92c75c51e
 ```
+
+## HOK-799 scope inventory
+
+`hok799-scope-inventory/inventory.json` is a read-only observation, dated
+2026-09-19, of the index providers, hooks, gateways, stores, scheduled tasks and
+consumers on one personal workstation, as 25 assets in the
+`latent_compass.lab.migration` `1.0.0` contract. No provider was started,
+refreshed or reconfigured to take it. `dry-run-report.json` is the sealed
+dry-run built from it:
+
+```text
+inventory_digest  sha256:e139cfb224264d341c6206a21d9b444d804aeb17deb955e3acb97adf575a0fea
+report_seal       sha256:853172528179fafafba2616a7ca128c79d0405c43c7e8fb443ff8b71211f3249
+```
+
+Reproduce it with:
+
+```python
+import json
+from pathlib import Path
+
+from latent_compass.lab.migration import admit_inventory_asset, build_retirement_dry_run
+
+base = Path("evidence/hok799-scope-inventory")
+assets = tuple(
+    admit_inventory_asset(item)
+    for item in json.loads((base / "inventory.json").read_text(encoding="utf-8"))
+)
+print(build_retirement_dry_run(assets, generated_at="2026-09-19T00:00:00Z").report_seal)
+```
+
+Each `configuration_digest` is the SHA-256 of one named configuration source
+as read at observation time. The label-to-path mapping is operator-held: this
+repository refuses private host paths, and the professional environment is
+recorded as an excluded class, never by name. The files prove deterministic
+replay of a declared inventory. They do not prove that the inventory is
+complete, that an index is unused, or that anything may be removed. Scope and
+unknowns: [`docs/active-diagnosis-scope.md`](../docs/active-diagnosis-scope.md).

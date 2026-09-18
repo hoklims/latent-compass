@@ -36,7 +36,9 @@ and [routing, evaluation and retirement dry-runs](docs/lab-operations.md).
 Run `uv run python examples/lab_source_demo.py` for a synthetic end-to-end example.
 This experimental API has no execution authority or live host integration.
 Removing an index still requires a real comparison, pilot and verified migration;
-local correctness tests do not establish those outcomes. See [ADR 0011](docs/adr/0011-experimental-active-diagnosis.md).
+local correctness tests do not establish those outcomes. See [ADR 0011](docs/adr/0011-experimental-active-diagnosis.md)
+and the [operational scope](docs/active-diagnosis-scope.md), which names the one
+pilot perimeter, the read-only inventory and every open unknown.
 
 ## The problem it addresses
 
