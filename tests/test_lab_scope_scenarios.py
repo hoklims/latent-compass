@@ -1,8 +1,8 @@
 """HOK-799 — the six acceptance scenarios, checked against hand-derived exact values.
 
-Each expectation below was derived on paper from the scenario model's own
-weights, losses and costs (see ``docs/active-diagnosis-scope.md``), never
-copied from a planner run. The scenario numbers are illustrative model
+Each expectation below is an exact value that can be recomputed by hand from
+the scenario model's own weights, losses and costs (see
+``docs/active-diagnosis-scope.md``). The scenario numbers are illustrative model
 hypotheses; these tests prove the decision contract can express each
 scenario, not that any observation is useful in a real repository.
 """
@@ -120,7 +120,15 @@ def probe_values(report: PlanReport) -> dict[str, tuple[bool, str | None]]:
 
 
 def test_the_manifest_covers_exactly_the_six_required_scenario_kinds() -> None:
-    scenarios = manifest()["scenarios"]
+    document = manifest()
+    # The manifest's own honesty fields: deleting one must not go unnoticed.
+    assert document["manifest_version"] == "1.0.0"
+    assert document["policy_unit"] == "cost-point"
+    assert isinstance(document["non_claim"], str)
+    assert "illustrative model hypothesis" in document["non_claim"]
+    assert "None is a measurement" in document["non_claim"]
+
+    scenarios = document["scenarios"]
     assert isinstance(scenarios, list)
     kinds = [item["kind"] for item in scenarios]
     assert len(kinds) == len(set(kinds)), "a scenario kind is declared twice"

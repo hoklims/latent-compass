@@ -1,6 +1,10 @@
 # Active-diagnosis operational scope (HOK-799)
 
-Status: **experimental framing**. A read-only inventory, a contract mapping and
+- Status: **experimental framing**
+- Revision: 2, 2026-09-18 (UTC) — corrected after an independent read-only
+  review of revision 1, written the same day
+
+A read-only inventory, a contract mapping and
 six acceptance scenarios. Nothing here activates, disables, deletes, trains or
 measures anything; see [ADR 0011](adr/0011-experimental-active-diagnosis.md)
 for the boundary and [`docs/active-diagnosis.md`](active-diagnosis.md) for the
@@ -20,29 +24,49 @@ considered for retirement, and which constraints stay mandatory.**
 | Professional environment | Excluded **as a class** and never named here | No professional asset is ever eligible |
 | Obsidian vault | Excluded: authored memory and its two indexes are protected | No vault artefact is a candidate |
 
-The observation was taken on 2026-09-19 with control-plane controller `2.5.0`,
-Git `2.50.1` and uv `0.12.5`. It is a dated read, not a standing fact.
+The observation was read on 2026-09-18, ending at 22:38 UTC (2026-09-19 local
+time), with control-plane controller `2.5.0`, Git `2.50.1` and uv `0.12.5`. It
+is a dated read, not a standing fact; every size below is as of that read.
 
 ## 2. Inventory
 
-The machine-readable inventory is
-[`evidence/hok799-scope-inventory/inventory.json`](../evidence/hok799-scope-inventory/inventory.json):
-25 assets in the `latent_compass.lab.migration` `1.0.0` contract. Its sealed
-dry-run is `dry-run-report.json` beside it.
+The machine-readable inventory is 25 assets in the
+`latent_compass.lab.migration` `1.0.0` contract, committed in two revisions.
+Each directory holds `inventory.json` and its sealed `dry-run-report.json`.
+
+| Revision | Directory | Report `generated_at` |
+| --- | --- | --- |
+| 1.0.0 — superseded, kept exactly as committed | `evidence/hok799-scope-inventory/` | `2026-09-19T00:00:00Z` |
+| 1.1.0 — **current** | `evidence/hok799-scope-inventory-v1.1.0/` | `2026-09-18T23:47:51Z` |
 
 ```text
-inventory_digest  sha256:e139cfb224264d341c6206a21d9b444d804aeb17deb955e3acb97adf575a0fea
-report_seal       sha256:853172528179fafafba2616a7ca128c79d0405c43c7e8fb443ff8b71211f3249
+1.0.0  inventory_digest  sha256:e139cfb224264d341c6206a21d9b444d804aeb17deb955e3acb97adf575a0fea
+1.0.0  report_seal       sha256:853172528179fafafba2616a7ca128c79d0405c43c7e8fb443ff8b71211f3249
+1.1.0  inventory_digest  sha256:b7d494805b10ad1b2f08151de84bdd8ecd36371bb06bb95f2f16982cb6e38887
+1.1.0  report_seal       sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e95fb7fcb31
 ```
 
+Revision 1.1.0 is the same read: the same 25 assets and the same configuration
+digests. It corrects two defects an independent review found in 1.0.0. Three
+assets that were recorded but never assessed — the two professional ones and
+`personal-unassessed.worktree-artefacts` — were declared `CANDIDATE_INDEX`, the
+only class that can ever leave `KEEP`; they are now `UNKNOWN`. And 1.0.0's
+`generated_at` is a placeholder later than the commit that carries it, where
+1.1.0 states the instant its report was really built. Corrections append: 1.0.0
+is never edited, and a test pins both revisions' seals.
+
 Each asset falls in exactly one of three classes. **Candidate** means
-`DISABLE_LATER` with every gate still missing — never a permission.
+`DISABLE_LATER` with every gate still missing — never a permission. The
+contract's third action, `RETAIN_FOR_ROLLBACK`, appears nowhere in this
+inventory: it needs backup, restore and stability references, and those three
+gates close **by declaration** — a digest the operator supplies, never one the
+lab dereferences.
 
 ### Candidates — the pilot perimeter only
 
 | Asset | What it is |
 | --- | --- |
-| `graphify-code-graph.pilot-worktrees` | Derived structural graph artefacts kept for the pilot worktrees in the shared store (eight entries, about 109 MiB) |
+| `graphify-code-graph.pilot-worktrees` | Derived structural graph artefacts kept for the pilot worktrees in the shared store (eight entries, about 109 MiB at the read) |
 | `graphify-worktree-cache.pilot-worktrees` | The git-ignored `graphify-out/` cache directory inside each pilot worktree |
 
 For the pilot worktree the control plane reports Graphify configured and
@@ -64,7 +88,7 @@ professional alike, so none can be retired from inside the pilot perimeter.
 | `shared.worker.reconcile` | Controller and detached reconcile worker |
 | `shared.task.index-control-sweep` | Scheduled out-of-session sweep of enrolled repositories |
 | `shared.task.control-plane-autocommit` | Scheduled task whose purpose and consumers were not examined (ambiguous, kept) |
-| `shared.store.control-plane` | Shared artefact store, about 9 GiB, **mixed scope** |
+| `shared.store.control-plane` | Shared artefact store, about 9 GiB at the read, **mixed scope** |
 | `claude.store.host-receipts` | Claude route caches and receipts |
 | `codex.store.host-receipts` | Codex route caches and receipts |
 | `claude.mcp.code-intelligence` | The single code-intelligence gateway exposed to Claude Code |
@@ -79,22 +103,29 @@ professional alike, so none can be retired from inside the pilot perimeter.
 | Asset | Why |
 | --- | --- |
 | `ccc-semantic-index.workstation` | Not provisioned for the pilot repository; present only in unassessed or excluded scopes |
-| `personal-unassessed.worktree-artefacts` | Artefacts of personal repositories no pilot names |
-| `professional.code-index-servers` | Professional scope |
-| `professional.worktree-artefacts` | Professional scope |
+| `personal-unassessed.worktree-artefacts` | Artefacts of personal repositories no pilot names; recorded, never assessed |
+| `professional.code-index-servers` | Professional scope; recorded as a class, never assessed |
+| `professional.worktree-artefacts` | Professional scope; recorded as a class, never assessed |
 | `vault-graphify.graph` | Vault |
 | `vault-semantic.dense-index` | Vault |
 
 ### What the inventory establishes, and what it does not
 
+- **Excluded assets hold by two locks, index machinery by one.** Professional,
+  vault, unassessed and ambiguous assets are protected by their classification
+  *and* by their scope. The ten identified workstation-wide index assets — hooks,
+  worker, sweep, stores and CCC — are `CANDIDATE_INDEX` and hold by their
+  `UNSCOPED` scope alone. Re-scoping one of them into the pilot is exactly U1's
+  owner decision: it turns a pinned exact-set test red, and it yields
+  `DISABLE_LATER` with all seven gates missing, never a permission.
 - **The shared store has no personal/professional separation.** Its admission
   gate denies the vault, agent memory and session folders, temporary and
   dependency directories; no rule separates personal from professional roots.
   Any retirement must therefore be decided per *(provider, worktree)* couple
   and never for the store as a whole.
 - **CCC cannot be judged on the pilot.** The admission policy provisions CCC
-  only from 150 code files in at least two languages; this repository tracks
-  about 90, all Python, and carries no CCC settings. A CCC verdict needs a
+  only from 150 code files in at least two languages; this repository tracked
+  about 90 at the read, all Python, and carries no CCC settings. A CCC verdict needs a
   second named pilot repository — an owner decision (U1).
 - **Hidden indexes are declared, not denied.** Language servers keep their own
   index, and the lab's justification memory is itself a specialised lookup
@@ -117,14 +148,16 @@ professional alike, so none can be retired from inside the pilot perimeter.
 | Final actions | `decisions`, one of which is the mandatory unconditional abstention |
 | Stop conditions | `STOP` when no affordable probe beats `R(E)`; budget, horizon and the controller's own `max_expansions`; a truncated search is labelled inexact |
 | Budget | `budget` in policy units; shared pools in `latent_compass.lab.routing` |
-| Authority | None. Every report carries the non-authority notice; the host keeps router and executor |
+| Authority | None. Each lab output says so in its own form, and the forms differ: `PlanReport.non_authority_notice`, `RouteDecision.experimental`, the four literal booleans of `RetirementDryRunReport`, and `empirical_claim` / `causal_claim` on `LabEvaluationReport`. A missing notice therefore never means authority; the host keeps router and executor |
 
 Applicability is bounded by the episode's `LabBinding`: host, agent family and
 a source-scope digest sealing the model, the snapshot manifest, its root
 identity and the full probe catalog. Dirty and untracked content is covered
 exactly when the file is in the manifest, by the digest of the bytes read;
-anything outside the manifest is outside the claim. A declared Git `HEAD` is a
-declaration. The `1.0.0` core binding does not bind tool versions by itself;
+anything outside the manifest is outside the claim. A declared Git `HEAD`,
+`root_id`, `host_id` and `agent_family` are all declarations: the lab checks
+that what the caller declares matches what the snapshot declares, never an
+authenticated fact. The `1.0.0` core binding does not bind tool versions by itself;
 a [host session](host-observations.md) does, by sealing each probe's expected
 tool identity and version into the episode, so a tool upgrade is a new episode
 (U6).

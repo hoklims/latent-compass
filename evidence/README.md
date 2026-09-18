@@ -70,8 +70,8 @@ sha256:da17854eee708e6ec0e6c647475c222db6829e7a076d3a0219ace8c92c75c51e
 
 ## HOK-799 scope inventory
 
-`hok799-scope-inventory/inventory.json` is a read-only observation, dated
-2026-09-19, of the index providers, hooks, gateways, stores, scheduled tasks and
+`hok799-scope-inventory/inventory.json` is a read-only observation, read on
+2026-09-18 and ending at 22:38 UTC, of the index providers, hooks, gateways, stores, scheduled tasks and
 consumers on one personal workstation, as 25 assets in the
 `latent_compass.lab.migration` `1.0.0` contract. No provider was started,
 refreshed or reconfigured to take it. `dry-run-report.json` is the sealed
@@ -97,6 +97,21 @@ assets = tuple(
 )
 print(build_retirement_dry_run(assets, generated_at="2026-09-19T00:00:00Z").report_seal)
 ```
+
+That first revision stays exactly as committed, including two defects found
+by an independent review: three never-assessed assets are declared
+`CANDIDATE_INDEX`, and its `generated_at` is a placeholder later than the
+commit that carries it. `hok799-scope-inventory-v1.1.0/` is the corrected
+revision of the same read — same 25 assets, same configuration digests, those
+three assets now `UNKNOWN`, and the real instant its report was built:
+
+```text
+inventory_digest  sha256:b7d494805b10ad1b2f08151de84bdd8ecd36371bb06bb95f2f16982cb6e38887
+report_seal       sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e95fb7fcb31
+```
+
+It reproduces the same way, from its own directory and with
+`generated_at="2026-09-18T23:47:51Z"`.
 
 Each `configuration_digest` is the SHA-256 of one named configuration source
 as read at observation time. The label-to-path mapping is operator-held: this

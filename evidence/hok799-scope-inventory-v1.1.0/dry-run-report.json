@@ -1,0 +1,289 @@
+{
+  "contract_version": "1.0.0",
+  "inventory_digest": "sha256:b7d494805b10ad1b2f08151de84bdd8ecd36371bb06bb95f2f16982cb6e38887",
+  "generated_at": "2026-09-18T23:47:51Z",
+  "dispositions": [
+    {
+      "asset_id": "graphify-code-graph.pilot-worktrees",
+      "classification": "CANDIDATE_INDEX",
+      "action": "DISABLE_LATER",
+      "protected": false,
+      "protection_reasons": [],
+      "missing_gates": [
+        "INDEPENDENT_COMPARISON_ABSENT",
+        "LIVE_PILOT_ABSENT",
+        "EXTERNAL_VERIFICATION_ABSENT",
+        "OWNER_DELETION_AUTHORITY_ABSENT",
+        "BACKUP_EVIDENCE_ABSENT",
+        "RESTORE_EVIDENCE_ABSENT",
+        "STABILITY_EVIDENCE_ABSENT"
+      ]
+    },
+    {
+      "asset_id": "graphify-worktree-cache.pilot-worktrees",
+      "classification": "CANDIDATE_INDEX",
+      "action": "DISABLE_LATER",
+      "protected": false,
+      "protection_reasons": [],
+      "missing_gates": [
+        "INDEPENDENT_COMPARISON_ABSENT",
+        "LIVE_PILOT_ABSENT",
+        "EXTERNAL_VERIFICATION_ABSENT",
+        "OWNER_DELETION_AUTHORITY_ABSENT",
+        "BACKUP_EVIDENCE_ABSENT",
+        "RESTORE_EVIDENCE_ABSENT",
+        "STABILITY_EVIDENCE_ABSENT"
+      ]
+    },
+    {
+      "asset_id": "claude.hook.index-refresh",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "claude.hook.index-mark-dirty",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "claude.hook.index-routing",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "codex.hook.index-routing",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "codex.hook.harness-adapter",
+      "classification": "UNKNOWN",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "shared.worker.reconcile",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "shared.task.index-control-sweep",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "shared.task.control-plane-autocommit",
+      "classification": "UNKNOWN",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED",
+        "CONSUMERS_UNKNOWN"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "shared.store.control-plane",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "claude.store.host-receipts",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "codex.store.host-receipts",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "claude.mcp.code-intelligence",
+      "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "codex.mcp.code-intelligence",
+      "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "ccc-semantic-index.workstation",
+      "classification": "CANDIDATE_INDEX",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "semctx-semantic-layer.workstation",
+      "classification": "REQUIRED_EVIDENCE",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "serena-symbolic-server.workstation",
+      "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "native-lsp.claude-plugin",
+      "classification": "SOURCE_OR_SYMBOLIC_TOOL",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "vault-graphify.graph",
+      "classification": "VAULT",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "vault-semantic.dense-index",
+      "classification": "VAULT",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "professional.code-index-servers",
+      "classification": "UNKNOWN",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "professional.worktree-artefacts",
+      "classification": "UNKNOWN",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "personal-unassessed.worktree-artefacts",
+      "classification": "UNKNOWN",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED"
+      ],
+      "missing_gates": []
+    },
+    {
+      "asset_id": "claude.hook.unregistered-routing-advisor",
+      "classification": "UNKNOWN",
+      "action": "KEEP",
+      "protected": true,
+      "protection_reasons": [
+        "CLASSIFICATION_PROTECTED",
+        "SCOPE_PROFESSIONAL_OR_UNSCOPED",
+        "CONSUMERS_UNKNOWN"
+      ],
+      "missing_gates": []
+    }
+  ],
+  "dry_run": true,
+  "requires_external_verification": true,
+  "requires_external_authorization": true,
+  "activation_token": false,
+  "report_seal": "sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e95fb7fcb31"
+}

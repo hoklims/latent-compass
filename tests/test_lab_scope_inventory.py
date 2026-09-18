@@ -1,15 +1,21 @@
 """HOK-799 — the committed scope inventory is bound to the dry-run contract.
 
-The inventory under ``evidence/hok799-scope-inventory`` is a read-only
-observation of one personal workstation. These tests prove that it still
-admits through the ``1.0.0`` migration contract, that the committed dry-run
-reproduces from it seal for seal, that only the named pilot perimeter is ever
-eligible for anything other than ``KEEP``, and that no private host detail
-travels with it. They prove nothing about whether any index is useful.
+Two revisions are committed. ``evidence/hok799-scope-inventory`` is the first
+read and stays exactly as committed, defects included: it declared three
+never-assessed assets as index candidates, and its report carries a placeholder
+instant later than its own commit. ``evidence/hok799-scope-inventory-v1.1.0``
+corrects both and is the revision every other test here reads.
+
+These tests prove that each revision still reproduces seal for seal and is never
+edited in place, that only the named pilot perimeter is ever eligible for
+anything other than ``KEEP``, which assets hold by one lock and which by two,
+and that the vocabulary travelling with the evidence is exactly the declared
+one. They prove nothing about whether any index is useful.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -30,36 +36,125 @@ from latent_compass.lab.migration import (
 )
 
 REPO = Path(__file__).resolve().parent.parent
-EVIDENCE = REPO / "evidence" / "hok799-scope-inventory"
+ORIGINAL = "hok799-scope-inventory"
+CURRENT = "hok799-scope-inventory-v1.1.0"
+SCENARIOS = REPO / "examples" / "lab-scenarios"
 SCOPE_DOCUMENT = REPO / "docs" / "active-diagnosis-scope.md"
+ADR = REPO / "docs" / "adr" / "0011-experimental-active-diagnosis.md"
+#: The ADR's decision as first committed, before any amendment was appended.
+ADR_DECISION_DIGEST = "sha256:a4aabe9d8928f4b577b3fb4d251aa506a52bae5f22c6800e811b2718b07478c9"
+
+#: (generated_at, inventory_digest, report_seal) of every committed revision.
+PINNED = {
+    ORIGINAL: (
+        "2026-09-19T00:00:00Z",
+        "sha256:e139cfb224264d341c6206a21d9b444d804aeb17deb955e3acb97adf575a0fea",
+        "sha256:853172528179fafafba2616a7ca128c79d0405c43c7e8fb443ff8b71211f3249",
+    ),
+    CURRENT: (
+        "2026-09-18T23:47:51Z",
+        "sha256:b7d494805b10ad1b2f08151de84bdd8ecd36371bb06bb95f2f16982cb6e38887",
+        "sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e95fb7fcb31",
+    ),
+}
 
 PILOT_SCOPE = "pilot-latent-compass"
 PILOT_ASSETS = {
     "graphify-code-graph.pilot-worktrees",
     "graphify-worktree-cache.pilot-worktrees",
 }
+#: Recorded but never assessed, so never declared to be index candidates.
+NOT_ASSESSED = {
+    "personal-unassessed.worktree-artefacts",
+    "professional.code-index-servers",
+    "professional.worktree-artefacts",
+}
+#: Identified workstation-wide index machinery: its scope is its only lock.
+SINGLY_LOCKED = {
+    "ccc-semantic-index.workstation",
+    "claude.hook.index-mark-dirty",
+    "claude.hook.index-refresh",
+    "claude.hook.index-routing",
+    "claude.store.host-receipts",
+    "codex.hook.index-routing",
+    "codex.store.host-receipts",
+    "shared.store.control-plane",
+    "shared.task.index-control-sweep",
+    "shared.worker.reconcile",
+}
+DECLARED_SCOPES = {
+    "personal-unassessed",
+    "personal-vault",
+    "pilot-latent-compass",
+    "professional-excluded",
+    "workstation-shared",
+}
+DECLARED_PROVIDERS = {
+    "cocoindex-code",
+    "graphify",
+    "index-control-plane",
+    "mixed-index-providers",
+    "native-lsp",
+    "semctx",
+    "serena",
+    "vault-semantic",
+}
+DECLARED_CONSUMERS = {
+    "claude.agent-sessions",
+    "claude.agent.explorer",
+    "claude.agent.skeptic",
+    "claude.hook.index-mark-dirty",
+    "claude.hook.index-refresh",
+    "claude.hook.index-routing",
+    "claude.hook.vault-semantic-refresh",
+    "claude.mcp.code-intelligence",
+    "claude.mcp.vault-graphify",
+    "claude.mcp.vault-semantic",
+    "claude.plugin.semctx",
+    "claude.skill.ccc",
+    "claude.skill.graphify",
+    "claude.skill.vault-search-cascade",
+    "codex.agent-sessions",
+    "codex.hook.harness-adapter",
+    "codex.hook.index-routing",
+    "codex.mcp.code-intelligence",
+    "codex.mcp.graphify",
+    "codex.plugin.semctx-control",
+    "professional.agent-sessions",
+    "shared.skill.index-control-plane",
+    "shared.store.control-plane",
+    "shared.task.index-control-sweep",
+    "shared.worker.reconcile",
+}
 ALL_GATES = set(MissingGate)
+INSTANT = "2026-09-18T23:47:51Z"
 
 
-def raw_inventory() -> list[dict[str, object]]:
-    loaded = json.loads((EVIDENCE / "inventory.json").read_text(encoding="utf-8"))
+def raw_inventory(directory: str = CURRENT) -> list[dict[str, object]]:
+    path = REPO / "evidence" / directory / "inventory.json"
+    loaded = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(loaded, list)
     return loaded
 
 
-def inventory() -> tuple[InventoryAsset, ...]:
-    return tuple(admit_inventory_asset(item) for item in raw_inventory())
+def inventory(directory: str = CURRENT) -> tuple[InventoryAsset, ...]:
+    return tuple(admit_inventory_asset(item) for item in raw_inventory(directory))
 
 
-def committed_report() -> RetirementDryRunReport:
-    payload = json.loads((EVIDENCE / "dry-run-report.json").read_text(encoding="utf-8"))
+def committed_report(directory: str = CURRENT) -> RetirementDryRunReport:
+    path = REPO / "evidence" / directory / "dry-run-report.json"
     # Strict JSON validation also recomputes the report seal from its own body.
     return validate_contract(
         RetirementDryRunReport,
-        payload,
+        json.loads(path.read_text(encoding="utf-8")),
         error=LabMigrationViolation,
         context="committed retirement dry-run report",
     )
+
+
+def action_of(payload: dict[str, object]) -> RetirementAction:
+    report = build_retirement_dry_run((admit_inventory_asset(payload),), generated_at=INSTANT)
+    return report.dispositions[0].action
 
 
 def test_the_inventory_is_not_vacuous_and_every_asset_admits() -> None:
@@ -70,13 +165,34 @@ def test_the_inventory_is_not_vacuous_and_every_asset_admits() -> None:
     assert {asset.host_id for asset in assets} == {"personal-workstation"}
 
 
-def test_the_committed_dry_run_reproduces_from_the_committed_inventory() -> None:
-    committed = committed_report()
-    rebuilt = build_retirement_dry_run(inventory(), generated_at=committed.generated_at)
+@pytest.mark.parametrize("directory", sorted(PINNED))
+def test_a_committed_revision_reproduces_and_is_never_edited_in_place(directory: str) -> None:
+    committed = committed_report(directory)
+    rebuilt = build_retirement_dry_run(inventory(directory), generated_at=committed.generated_at)
 
     assert rebuilt.canonical_payload() == committed.canonical_payload()
-    assert rebuilt.report_seal == committed.report_seal
-    assert rebuilt.inventory_digest == committed.inventory_digest
+    # A correction is a new revision beside the old one; these three values are
+    # what an in-place edit of either file would have to change.
+    assert (
+        committed.generated_at,
+        committed.inventory_digest,
+        committed.report_seal,
+    ) == PINNED[directory]
+
+
+def test_the_revision_changes_three_unassessed_classifications_and_nothing_else() -> None:
+    original, current = raw_inventory(ORIGINAL), raw_inventory(CURRENT)
+    assert [item["asset_id"] for item in original] == [item["asset_id"] for item in current]
+
+    differences = {
+        (before["asset_id"], key): (before[key], after[key])
+        for before, after in zip(original, current, strict=True)
+        for key in sorted(set(before) | set(after))
+        if before.get(key) != after.get(key)
+    }
+    assert differences == {
+        (asset_id, "classification"): ("CANDIDATE_INDEX", "UNKNOWN") for asset_id in NOT_ASSESSED
+    }
 
 
 def test_only_the_named_pilot_perimeter_is_ever_eligible_for_more_than_keep() -> None:
@@ -122,72 +238,128 @@ def test_every_asset_outside_the_pilot_perimeter_is_protected_for_a_stated_reaso
         assert not item.missing_gates, asset_id
 
 
-def test_professional_vault_and_ambiguous_assets_are_each_present_and_kept() -> None:
+def test_professional_vault_and_unassessed_assets_are_each_kept_by_two_locks() -> None:
     assets = inventory()
     dispositions = {item.asset_id: item for item in committed_report().dispositions}
 
-    professional = [asset for asset in assets if asset.scope_kind is ScopeKind.PROFESSIONAL]
-    vault = [asset for asset in assets if asset.classification is AssetClassification.VAULT]
-    ambiguous = [asset for asset in assets if asset.classification is AssetClassification.UNKNOWN]
-    unknown_consumers = [asset for asset in assets if not asset.consumers]
-    assert len(professional) == 2
-    assert len(vault) == 2
-    assert len(ambiguous) == 3
-    assert len(unknown_consumers) == 2
+    professional = {a.asset_id for a in assets if a.scope_kind is ScopeKind.PROFESSIONAL}
+    vault = {a.asset_id for a in assets if a.classification is AssetClassification.VAULT}
+    ambiguous = {a.asset_id for a in assets if a.classification is AssetClassification.UNKNOWN}
+    unknown_consumers = {a.asset_id for a in assets if not a.consumers}
+    assert (len(professional), len(vault), len(ambiguous), len(unknown_consumers)) == (2, 2, 6, 2)
+    assert professional < NOT_ASSESSED <= ambiguous
 
-    for asset in (*vault, *ambiguous):
-        reasons = dispositions[asset.asset_id].protection_reasons
-        assert ProtectionReason.CLASSIFICATION_PROTECTED in reasons, asset.asset_id
-    for asset in unknown_consumers:
-        reasons = dispositions[asset.asset_id].protection_reasons
-        assert ProtectionReason.CONSUMERS_UNKNOWN in reasons, asset.asset_id
+    for asset_id in professional | vault | ambiguous:
+        reasons = set(dispositions[asset_id].protection_reasons)
+        assert {
+            ProtectionReason.CLASSIFICATION_PROTECTED,
+            ProtectionReason.SCOPE_PROFESSIONAL_OR_UNSCOPED,
+        } <= reasons, asset_id
+    for asset_id in unknown_consumers:
+        assert ProtectionReason.CONSUMERS_UNKNOWN in dispositions[asset_id].protection_reasons
 
 
-@pytest.mark.parametrize("asset_id", ["professional.worktree-artefacts", "vault-graphify.graph"])
-def test_the_scope_field_is_what_protects_an_excluded_asset(asset_id: str) -> None:
-    """Negative witness: relabel one excluded asset into the pilot scope kind.
+def test_the_assets_held_by_their_scope_alone_are_exactly_the_identified_index_machinery() -> None:
+    assets = {asset.asset_id: asset for asset in inventory()}
+    singly_locked = {
+        item.asset_id
+        for item in committed_report().dispositions
+        if item.protection_reasons == (ProtectionReason.SCOPE_PROFESSIONAL_OR_UNSCOPED,)
+    }
 
-    The committed professional asset is kept; the same payload declared as
-    ``PERSONAL_LAB`` with a candidate classification is not. The protection is
-    therefore carried by what the inventory declares, which is exactly why
-    the two tests above pin those declarations to exact sets.
-    """
+    assert singly_locked == SINGLY_LOCKED
+    for asset_id in singly_locked:
+        assert assets[asset_id].scope_kind is ScopeKind.UNSCOPED, asset_id
+        assert assets[asset_id].classification is AssetClassification.CANDIDATE_INDEX, asset_id
+
+
+@pytest.mark.parametrize(
+    ("asset_id", "after_rescoping"),
+    [
+        # Two locks: the classification still protects once the scope is forged.
+        ("professional.code-index-servers", RetirementAction.KEEP),
+        ("professional.worktree-artefacts", RetirementAction.KEEP),
+        ("personal-unassessed.worktree-artefacts", RetirementAction.KEEP),
+        ("vault-graphify.graph", RetirementAction.KEEP),
+        # One lock: an identified index that only its declared scope protects.
+        ("ccc-semantic-index.workstation", RetirementAction.DISABLE_LATER),
+        ("shared.store.control-plane", RetirementAction.DISABLE_LATER),
+    ],
+)
+def test_forging_the_scope_alone_moves_only_an_asset_held_by_one_lock(
+    asset_id: str, after_rescoping: RetirementAction
+) -> None:
+    """Negative witness, one variable at a time: only ``scope_kind`` changes."""
     payload = next(item for item in raw_inventory() if item["asset_id"] == asset_id)
-    committed = build_retirement_dry_run(
-        (admit_inventory_asset(payload),), generated_at="2026-09-19T00:00:00Z"
-    )
-    assert committed.dispositions[0].action is RetirementAction.KEEP
-
-    relabelled = dict(payload, scope_kind="PERSONAL_LAB", classification="CANDIDATE_INDEX")
-    forged = build_retirement_dry_run(
-        (admit_inventory_asset(relabelled),), generated_at="2026-09-19T00:00:00Z"
-    )
-    assert forged.dispositions[0].action is RetirementAction.DISABLE_LATER
+    assert action_of(payload) is RetirementAction.KEEP
+    assert action_of(dict(payload, scope_kind="PERSONAL_LAB")) is after_rescoping
 
 
-def test_no_private_host_detail_travels_with_the_committed_evidence() -> None:
+@pytest.mark.parametrize(
+    "asset_id",
+    ["professional.worktree-artefacts", "vault-graphify.graph", "codex.hook.harness-adapter"],
+)
+def test_forging_the_classification_alone_never_moves_an_excluded_asset(asset_id: str) -> None:
+    """The other variable alone: the declared scope still protects."""
+    payload = next(item for item in raw_inventory() if item["asset_id"] == asset_id)
+    assert payload["classification"] != "CANDIDATE_INDEX"
+    assert action_of(dict(payload, classification="CANDIDATE_INDEX")) is RetirementAction.KEEP
+
+
+def test_the_vocabulary_travelling_with_the_evidence_is_exactly_the_declared_one() -> None:
+    # Every text field is an identifier, which cannot hold a path separator: a
+    # needle scan is inert here. What an identifier can hold is a hostname, an
+    # account, an employer or a private repository name, so each vocabulary is
+    # pinned to an exact set that a newcomer has to be added to by hand.
+    for directory in PINNED:
+        assets = inventory(directory)
+        assert assets, directory
+        assert {asset.scope for asset in assets} == DECLARED_SCOPES
+        assert {asset.provider_id for asset in assets} == DECLARED_PROVIDERS
+        assert {
+            consumer.consumer_id for asset in assets for consumer in asset.consumers
+        } == DECLARED_CONSUMERS
+
+
+def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
+    # The scenario fixtures carry free text, where these needles can really fire.
     # Assembled at runtime so this module does not contain what it forbids.
     needles = (
         ":" + "\\",
         ":" + "/",
         "\\" + "users",
         "/" + "users/",
+        "/" + "home/",
         "app" + "data",
         "@",
     )
-    scanned = 0
-    for path in sorted(EVIDENCE.glob("*.json")):
+    paths = sorted(SCENARIOS.glob("*.json")) + sorted(REPO.glob("evidence/hok799-*/*.json"))
+    assert len(paths) == 9
+    for path in paths:
         text = path.read_text(encoding="utf-8").lower()
-        scanned += 1
         for needle in needles:
             assert needle not in text, f"{path.name} leaks {needle!r}"
-    assert scanned == 2
 
 
-def test_the_scope_document_names_every_inventoried_asset() -> None:
+def test_the_adr_amendment_appends_and_leaves_the_decision_text_untouched() -> None:
+    text = ADR.read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
+    decision, heading, amendment = text.partition("\n## Amendment 2026-09-19")
+    assert heading, "the amendment heading is missing"
+
+    digest = "sha256:" + hashlib.sha256(decision.encode("utf-8")).hexdigest()
+    assert digest == ADR_DECISION_DIGEST, "the original decision text was edited"
+    for directory in PINNED:
+        assert f"evidence/{directory}/" in amendment
+
+
+def test_the_scope_document_names_every_asset_and_both_revisions() -> None:
     text = SCOPE_DOCUMENT.read_text(encoding="utf-8")
-    missing = [asset.asset_id for asset in inventory() if f"`{asset.asset_id}`" not in text]
+    assets = inventory()
+    assert assets
+    missing = [asset.asset_id for asset in assets if f"`{asset.asset_id}`" not in text]
     assert not missing, f"assets absent from the scope document: {missing}"
-    committed = committed_report()
-    assert committed.inventory_digest in text
-    assert committed.report_seal in text
+    for directory, (generated_at, inventory_digest, report_seal) in PINNED.items():
+        assert f"evidence/{directory}/" in text
+        assert generated_at in text
+        assert inventory_digest in text
+        assert report_seal in text

@@ -143,12 +143,17 @@ software gate success or an unearned Done status.
 
 ## Amendment 2026-09-19 — operational scope (HOK-799)
 
-The decision above is unchanged. The scope it left open is now fixed in
+The decision above is unchanged, and a test pins its text. The scope it left
+open is now fixed in
 [`docs/active-diagnosis-scope.md`](../active-diagnosis-scope.md): one personal
 workstation, this repository and its worktrees as the only `PERSONAL_LAB`
 perimeter, and the professional environment, the vault and every other
-personal repository excluded. The read-only inventory it rests on is sealed
-under `evidence/hok799-scope-inventory/`, and its unknowns each carry an owner.
+personal repository excluded. Where the decision spoke of one isolated
+worktree, the perimeter is named here as the repository's own worktrees,
+plural; no other repository joins it. The read-only inventory it rests on is
+sealed under `evidence/hok799-scope-inventory/`, superseded without being
+edited by the corrected `evidence/hok799-scope-inventory-v1.1.0/`, and its
+unknowns each carry an owner.
 
 Two consequences bind the later tranches. The pilot can produce evidence about
 the Graphify code graph only, because CCC and Semctx are not configured for
