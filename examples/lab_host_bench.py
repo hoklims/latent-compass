@@ -20,7 +20,9 @@ refuses any process launch inside the lab package. Tool identities are
 observed (``git --version``, the running interpreter), never hard-coded. A
 CODEX or CLAUDE family here is a declared lab identity, not evidence of parity
 between two live hosts. Costs are settled at each reservation's own ceiling:
-the bench measures durations and fabricates no token or money cost.
+the bench measures durations and fabricates no token or money cost. Every
+timestamp in a trace comes from a fixed bench clock, so that seals reproduce;
+only ``duration_ms`` is wall-clock.
 """
 
 from __future__ import annotations
