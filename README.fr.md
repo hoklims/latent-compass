@@ -27,7 +27,19 @@ détectant les altérations et évalue des politiques figées hors ligne. Un jug
 déterministe externe reste l’autorité. Seul un humain peut décider d’une
 promotion.
 
-Latent Compass **valide et enregistre**. Il ne tient pas la barre.
+L’interface stable **valide et enregistre**. Elle ne tient pas la barre.
+
+Un [laboratoire de diagnostic actif](docs/active-diagnosis.md), isolé de cette
+interface, calcule désormais quelle observation acquérir à partir d’un modèle
+fini explicite, d’un budget et d’un horizon. Il comprend la
+[lecture bornée des sources](docs/source-session.md), une mémoire des
+justifications et des outils de [routage, d’évaluation et de préparation du retrait
+des index](docs/lab-operations.md).
+La commande `uv run python examples/lab_source_demo.py` montre la boucle complète
+sur des fichiers synthétiques. Cette API expérimentale n’a aucune autorité
+d’exécution et n’est pas branchée sur les hôtes réels. Retirer un index demande
+encore une comparaison réelle, un pilote et une migration vérifiée ; les tests
+locaux ne prouvent pas ces résultats. Voir [l’ADR 0011](docs/adr/0011-experimental-active-diagnosis.md).
 
 ## Le problème auquel il répond
 
