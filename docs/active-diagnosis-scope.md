@@ -124,8 +124,10 @@ a source-scope digest sealing the model, the snapshot manifest, its root
 identity and the full probe catalog. Dirty and untracked content is covered
 exactly when the file is in the manifest, by the digest of the bytes read;
 anything outside the manifest is outside the claim. A declared Git `HEAD` is a
-declaration. **Tool versions are not bound by the `1.0.0` binding** — every
-HOK-800 adapter must carry its tool identity (U6).
+declaration. The `1.0.0` core binding does not bind tool versions by itself;
+a [host session](host-observations.md) does, by sealing each probe's expected
+tool identity and version into the episode, so a tool upgrade is a new episode
+(U6).
 
 ## 4. Loss and budget policy
 
@@ -185,9 +187,11 @@ are checked against hand-derived exact values by
 | `CONTRADICTION` | The contradicting observation is refused outside the model; the prior state is untouched | Which of the two observations was wrong |
 | `BUDGET_EXHAUSTED` | Stops on the best admissible decision, invents no probe value, labels a truncated search inexact | Whether the declared budget was the right one |
 
-Literal search and file reads have adapters today. Git diff, symbol navigation
-and targeted checks are HOK-800 work; an authored requirement is external to
-source by nature.
+The lab itself only ever runs a literal search. File interpretation, Git diff,
+symbol navigation and targeted checks are run by the host executor and admitted
+through [`docs/host-observations.md`](host-observations.md); an authored
+requirement is external to source by nature. The fixture manifest records that
+split, and its test binds it to the real observation kinds.
 
 Criteria and owners: the repository owner freezes the HOK-804 protocol
 (population, budgets, primary metric, non-inferiority margin, useful cost
@@ -205,7 +209,7 @@ HOK-806.
 | U3 | Owners and command lines of the resident index processes (observed by image name only) | Operator — HOK-806 dry-run |
 | U4 | Purpose and consumers of the autocommit task and of the unregistered advisor script | Operator — HOK-806 dry-run |
 | U5 | Which part of the Codex harness adapter is index-related | HOK-803 bench |
-| U6 | Tool identity (Git, language servers, test runners) bound to each observation | HOK-800 adapter contracts |
+| U6 | Tool identity (Git, language servers, test runners) bound to each observation — **closed in the contract** by the host session; the identity stays a host declaration | HOK-803 bench, on observed tool versions |
 | U7 | Cost of language-server indexes and caches | HOK-804 cost accounting |
 | U8 | Every numeric budget, margin and threshold of the real experiment | Repository owner — HOK-804 preregistration |
 | U9 | Whether the pilot repository must be enrolled in Semctx before HOK-805 | Repository owner — HOK-805 entry conditions |

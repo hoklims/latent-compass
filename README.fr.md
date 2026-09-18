@@ -32,9 +32,10 @@ L’interface stable **valide et enregistre**. Elle ne tient pas la barre.
 Un [laboratoire de diagnostic actif](docs/active-diagnosis.md), isolé de cette
 interface, calcule désormais quelle observation acquérir à partir d’un modèle
 fini explicite, d’un budget et d’un horizon. Il comprend la
-[lecture bornée des sources](docs/source-session.md), une mémoire des
-justifications et des outils de [routage, d’évaluation et de préparation du retrait
-des index](docs/lab-operations.md).
+[lecture bornée des sources](docs/source-session.md), des
+[observations exécutées par l’hôte, qu’il admet puis recoupe](docs/host-observations.md),
+une mémoire des justifications et des outils de [routage, d’évaluation et de
+préparation du retrait des index](docs/lab-operations.md).
 La commande `uv run python examples/lab_source_demo.py` montre la boucle complète
 sur des fichiers synthétiques. Cette API expérimentale n’a aucune autorité
 d’exécution et n’est pas branchée sur les hôtes réels. Retirer un index demande

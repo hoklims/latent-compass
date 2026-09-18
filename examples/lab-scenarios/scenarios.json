@@ -42,19 +42,19 @@
   ],
   "probe_capabilities": {
     "known-identifier.json": {
-      "literal-search-identifier": { "capability": "LITERAL_SEARCH", "adapter": "AVAILABLE" },
-      "symbol-definition-lookup": { "capability": "SYMBOL_NAVIGATION", "adapter": "PLANNED_HOK_800" }
+      "literal-search-identifier": { "capability": "LITERAL_SEARCH", "adapter": "LAB_EXECUTED" },
+      "symbol-definition-lookup": { "capability": "SYMBOL_NAVIGATION", "adapter": "HOST_EXECUTED" }
     },
     "concept-without-shared-terms.json": {
-      "literal-search-user-terms": { "capability": "LITERAL_SEARCH", "adapter": "AVAILABLE" },
-      "symbol-walk-from-entrypoint": { "capability": "SYMBOL_NAVIGATION", "adapter": "PLANNED_HOK_800" }
+      "literal-search-user-terms": { "capability": "LITERAL_SEARCH", "adapter": "LAB_EXECUTED" },
+      "symbol-walk-from-entrypoint": { "capability": "SYMBOL_NAVIGATION", "adapter": "HOST_EXECUTED" }
     },
     "indirect-dependency.json": {
-      "find-direct-references": { "capability": "SYMBOL_NAVIGATION", "adapter": "PLANNED_HOK_800" },
-      "literal-search-registry-key": { "capability": "LITERAL_SEARCH", "adapter": "AVAILABLE" }
+      "find-direct-references": { "capability": "SYMBOL_NAVIGATION", "adapter": "HOST_EXECUTED" },
+      "literal-search-registry-key": { "capability": "LITERAL_SEARCH", "adapter": "LAB_EXECUTED" }
     },
     "requirement-absent-from-code.json": {
-      "read-implementation": { "capability": "FILE_READ", "adapter": "AVAILABLE" },
+      "read-implementation": { "capability": "FILE_READ", "adapter": "HOST_EXECUTED" },
       "authored-requirement-lookup": { "capability": "AUTHORED_REQUIREMENT", "adapter": "EXTERNAL_TO_SOURCE" }
     }
   }

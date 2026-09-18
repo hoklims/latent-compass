@@ -16,6 +16,7 @@ import pytest
 
 from latent_compass.episode import AgentFamily
 from latent_compass.lab.errors import LabImpossibleObservationError
+from latent_compass.lab.host_observations import ObservationKind
 from latent_compass.lab.model import DiagnosisModel, load_model
 from latent_compass.lab.planner import PlanReport, propose
 from latent_compass.lab.state import (
@@ -41,15 +42,20 @@ REQUIRED_KINDS = {
     "CONTRADICTION",
     "BUDGET_EXHAUSTED",
 }
-CAPABILITIES = {
-    "LITERAL_SEARCH",
-    "FILE_READ",
-    "GIT_DIFF",
-    "SYMBOL_NAVIGATION",
-    "TARGETED_CHECK",
-    "AUTHORED_REQUIREMENT",
+#: A requirement written nowhere in source has no observation kind, by nature.
+EXTERNAL_CAPABILITY = "AUTHORED_REQUIREMENT"
+CAPABILITIES = {kind.value for kind in ObservationKind} | {EXTERNAL_CAPABILITY}
+#: Who runs the observation: the lab's confined reader, the host executor, or nobody in source.
+EXECUTION = {
+    "LAB_EXECUTED": {ObservationKind.LITERAL_SEARCH.value},
+    "HOST_EXECUTED": {
+        ObservationKind.FILE_READ.value,
+        ObservationKind.GIT_DIFF.value,
+        ObservationKind.SYMBOL_NAVIGATION.value,
+        ObservationKind.TARGETED_CHECK.value,
+    },
+    "EXTERNAL_TO_SOURCE": {EXTERNAL_CAPABILITY},
 }
-ADAPTER_STATES = {"AVAILABLE", "PLANNED_HOK_800", "EXTERNAL_TO_SOURCE"}
 
 
 def manifest() -> dict[str, object]:
@@ -137,12 +143,9 @@ def test_every_model_probe_is_mapped_to_one_declared_capability_and_nothing_else
         assert set(mapping) == {probe.id for probe in model.probes}, model_name
         for probe_id, entry in mapping.items():
             assert entry["capability"] in CAPABILITIES, probe_id
-            assert entry["adapter"] in ADAPTER_STATES, probe_id
-            # Only bounded literal reads of named files exist as adapters today.
-            if entry["adapter"] == "AVAILABLE":
-                assert entry["capability"] in {"LITERAL_SEARCH", "FILE_READ"}, probe_id
-            if entry["capability"] == "AUTHORED_REQUIREMENT":
-                assert entry["adapter"] == "EXTERNAL_TO_SOURCE", probe_id
+            assert entry["adapter"] in EXECUTION, probe_id
+            # The lab itself only ever reads; everything else is the host's to run.
+            assert entry["capability"] in EXECUTION[entry["adapter"]], probe_id
 
 
 def test_a_known_identifier_is_searched_exactly_before_any_edit_is_chosen() -> None:
