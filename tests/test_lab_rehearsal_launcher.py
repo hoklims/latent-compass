@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import shutil
 import signal
@@ -286,7 +287,10 @@ def test_a_key_file_that_is_not_exactly_one_key_starts_nothing(
 
 def test_a_key_file_saved_by_a_text_editor_is_read_as_the_key(rig: Rig) -> None:
     rig.key_file.write_bytes(b"\xef\xbb\xbf" + KEY.encode() + b"\r\n")
-    rig.run(["look around"])
+    try:
+        rig.run(["look around"])
+    except launcher.RehearsalRefusedError:
+        pytest.fail("a key file saved by a text editor was refused instead of being read")
     assert rig.calls("login")[0]["key_on_stdin"] is True
 
 
@@ -358,11 +362,53 @@ def test_a_run_holds_the_lock_while_it_lasts_and_a_refused_run_leaves_its_key_co
             rig.run(["look around"], out=rig.out.with_name("another-out"))
         # The running run's isolated home is not a dead run's leftover: it was not swept.
         assert rig.isolated_home().exists()
+        # The lock tells the operator which process to look for before removing it.
+        held = launcher.lock_path(rig.key_file).read_text(encoding="utf-8")
+        assert f"pid {os.getpid()} " in held
     finally:
         thread.join(timeout=60)
     assert outcome["report"]["records"][0]["status"] == "COMPLETED"
     assert len(rig.calls("exec")) == 1
     assert not launcher.lock_path(rig.key_file).exists()
+
+
+def _link(name: Path, target: Path) -> None:
+    """A junction on Windows, which needs no privilege; a symbolic link elsewhere."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(name))
+    else:
+        name.symlink_to(target, target_is_directory=True)
+
+
+def test_a_link_under_the_name_of_a_home_is_named_and_never_followed(
+    rig: Rig, tmp_path: Path
+) -> None:
+    # What an agent that can write beside the key could plant there: the name of a rehearsal
+    # home, leading to the owner's own agent home.
+    owners = tmp_path / "the-owners-own-agent-home"
+    (owners / "sessions").mkdir(parents=True)
+    login = owners / "auth.json"
+    login.write_text("the owner's own login", encoding="utf-8")
+    planted = rig.vault / "lc-rehearsal-home-planted"
+    _link(planted, owners)
+    with pytest.raises(launcher.RehearsalRefusedError, match="did not make and will not touch"):
+        rig.run(["look around"])
+    assert login.is_file(), "the sweep went through the link and deleted the owner's login"
+    assert (owners / "sessions").is_dir()
+    assert planted.exists()
+    assert rig.calls() == []
+    # The removal itself refuses a link it is handed, and reports a failure, not a removal.
+    assert vars(launcher)["_discard"](planted) is False
+    assert login.is_file()
+    # A stray file under that name is not this script's either.
+    planted.unlink() if sys.platform != "win32" else planted.rmdir()
+    stray = rig.vault / "lc-rehearsal-home-a-file"
+    stray.write_text("not a home", encoding="utf-8")
+    with pytest.raises(launcher.RehearsalRefusedError, match="did not make and will not touch"):
+        rig.run(["look around"])
+    assert stray.read_text(encoding="utf-8") == "not a home"
 
 
 def test_a_key_copy_left_by_a_run_that_died_is_deleted_and_said_before_anything_starts(
@@ -430,7 +476,7 @@ def test_a_run_stops_at_the_first_failed_session_and_leaves_the_rest_of_the_allo
 ) -> None:
     report = rig.run(["please FAIL", "look around", "look again"])
     assert [record["status"] for record in report["records"]] == ["TURN_FAILED"]
-    assert report["stopped_after_failure"] is True
+    assert report["stopped_early"] is True
     assert len(rig.calls("exec")) == 1
     assert rig.launched() == 1
     # A session whose process exits with an error is a failed one, whatever its events said.
@@ -438,12 +484,12 @@ def test_a_run_stops_at_the_first_failed_session_and_leaves_the_rest_of_the_allo
     assert [record["status"] for record in second["records"]] == ["TURN_FAILED"]
     assert rig.launched() == 2
     # A run that did not fail says so too.
-    assert rig.run(["look around"], out=rig.out.with_name("fine"))["stopped_after_failure"] is False
+    assert rig.run(["look around"], out=rig.out.with_name("fine"))["stopped_early"] is False
     # The command line says it to the operator.
     capsys.readouterr()
     arguments = rig.command_line(["please FAIL", "look around"], out=rig.out.with_name("cli"))
     assert launcher.main(arguments) == launcher.EXIT_OK
-    assert "stopped after a failed session" in capsys.readouterr().out
+    assert "stopped early" in capsys.readouterr().out
     assert rig.launched() == 4
 
 
@@ -600,13 +646,13 @@ def test_a_second_interruption_does_not_stop_the_deletion_of_the_key_copy(
         return bool(real(directory))
 
     monkeypatch.setattr(launcher, "_discard", impatient)
-    try:
-        report = rig.run(["look around"])
-    except KeyboardInterrupt:
-        pytest.fail("the interruption stopped the deletion of the key copy")
+    # The interruption is held back while the key copy is deleted, then given to the operator.
+    with pytest.raises(KeyboardInterrupt):
+        rig.run(["look around"])
     assert interrupted
-    assert not interrupted[0].exists()
-    assert report["key_copy_removed"] is True
+    assert not interrupted[0].exists(), "the interruption stopped the deletion of the key copy"
+    assert rig.key_copies() == []
+    assert not launcher.lock_path(rig.key_file).exists()
 
 
 def test_a_directory_is_reported_removed_only_when_it_is_gone(
@@ -642,13 +688,7 @@ def test_a_removal_never_follows_a_link_out_of_the_directory(
     precious.write_text("the owner's own login", encoding="utf-8")
     copy = tmp_path / "copy"
     copy.mkdir()
-    way_out = copy / "way-out"
-    if sys.platform == "win32":
-        import _winapi
-
-        _winapi.CreateJunction(str(outside), str(way_out))
-    else:
-        way_out.symlink_to(outside, target_is_directory=True)
+    _link(copy / "way-out", outside)
     # The first pass fails, as it does on a locked entry: the launcher walks the tree itself.
     monkeypatch.setattr(shutil, "rmtree", lambda *_arguments, **_keywords: None)
     assert discard(copy) is True
@@ -678,7 +718,7 @@ def test_the_cli_is_never_resolved_from_the_current_directory(
         planted.write_text("echo hostile\n", encoding="utf-8")
         planted.chmod(0o755)
     monkeypatch.chdir(hostile)
-    monkeypatch.setenv("PATH", f"{rig.source}{launcher.os.pathsep}.{launcher.os.pathsep}")
+    monkeypatch.setenv("PATH", f"{rig.source}{os.pathsep}.{os.pathsep}")
     assert launcher.resolve_command("codex") is None
     assert launcher.resolve_command(str(Path("sub") / "codex")) is None
     with pytest.raises(launcher.RehearsalRefusedError, match="not on PATH"):
@@ -697,11 +737,19 @@ def test_a_batch_shim_is_refused_when_the_shell_could_read_the_copy_path_as_a_co
 ) -> None:
     shim = tmp_path / "codex.cmd"
     shim.write_text("@echo off\n", encoding="utf-8")
+    shim.chmod(0o755)
+    # An extra argument of the operator's is re-read by the shell just the same.
+    with pytest.raises(launcher.RehearsalRefusedError, match="batch shim"):
+        rig.run(["look around"], codex=[str(shim), "--profile", "a&b"])
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path / "a&b"))
     with pytest.raises(launcher.RehearsalRefusedError, match="batch shim"):
         rig.run(["look around"], codex=[str(shim)])
     assert rig.calls() == []
     assert rig.key_copies() == []
+    if sys.platform != "win32":
+        # An absolute path is taken as given only if it can be run at all.
+        shim.chmod(0o644)
+        assert launcher.resolve_command(str(shim)) is None
 
 
 def test_the_agent_gets_an_isolated_home_and_none_of_the_parent_environment(
@@ -709,8 +757,8 @@ def test_the_agent_gets_an_isolated_home_and_none_of_the_parent_environment(
 ) -> None:
     parent_only = tmp_path / "parent-only-tools"
     parent_only.mkdir()
-    separator = launcher.os.pathsep
-    monkeypatch.setenv("PATH", launcher.os.environ["PATH"] + separator + str(parent_only))
+    separator = os.pathsep
+    monkeypatch.setenv("PATH", os.environ["PATH"] + separator + str(parent_only))
     monkeypatch.setenv("OPENAI_API_KEY", "parent-secret")
     monkeypatch.setenv("CODEX_HOME", str(rig.source))
     rig.run(["look around"])
@@ -798,15 +846,21 @@ def test_an_overrun_behind_a_batch_shim_is_killed_with_its_children(
     assert rig.heart_has_stopped()
 
 
-def test_an_orphan_holding_the_pipes_cannot_stretch_a_session(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
+def test_what_outlives_the_kill_is_not_awaited_and_not_passed_over_in_silence(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(launcher, "DRAIN_SECONDS", 1)
     started = time.monotonic()
-    report = rig.run(["please leave an ORPHAN"], session_seconds=3)
+    report = rig.run(["please leave an ORPHAN", "look around"], session_seconds=3)
     # The orphan lives for 25 s and keeps the pipes open: the run must not wait for it.
     assert time.monotonic() - started < 15
-    assert report["records"][0]["status"] == "TIMED_OUT"
+    (record,) = report["records"]
+    assert (record["status"], record["diagnostic"]) == ("TIMED_OUT", "PIPES_HELD_AFTER_KILL")
+    # Pipes still held once the tree is dead prove that the kill missed something: that is
+    # said, recorded, and no other session is started while it may still be alive.
+    assert "outlived the kill and still holds its pipes" in capsys.readouterr().err
+    assert report["stopped_early"] is True
+    assert len(rig.calls("exec")) == 1
 
 
 def test_a_kill_that_does_not_take_is_said_aloud(
@@ -915,12 +969,40 @@ def test_a_cli_that_refuses_the_key_stops_the_run_without_echoing_it(rig: Rig) -
 
 
 def test_a_model_name_that_is_not_a_plain_identifier_is_refused(rig: Rig) -> None:
-    with pytest.raises(launcher.RehearsalRefusedError, match="plain identifier"):
-        rig.run(["look around"], model="gpt & calc")
+    # A shell's characters — or a key pasted in the wrong place: the model name is an
+    # argument and a report field.
+    for model in ("gpt & calc", KEY):
+        with pytest.raises(launcher.RehearsalRefusedError, match="plain identifier"):
+            rig.run(["look around"], model=model)
     assert rig.calls() == []
     rig.run(["look around"], model="some-model.v1")
     argv = rig.calls("exec")[0]["argv"]
     assert argv[argv.index("--model") + 1] == "some-model.v1"
+
+
+def test_the_version_shape_takes_the_real_clis_answer_and_never_a_key() -> None:
+    shape = launcher.VERSION_SHAPE
+    # What the installed CLI answered to ``--version`` when this was written.
+    assert shape.fullmatch("codex-cli 0.116.0")
+    assert shape.fullmatch("codex-cli 0.117.0-alpha.3")
+    for not_a_version in (
+        KEY,
+        "sk-" + "a" * 48,
+        "codex-cli",
+        "0.116.0",
+        f"codex-cli 0.116.0 {KEY}",
+    ):
+        assert shape.fullmatch(not_a_version) is None, not_a_version
+
+
+def test_records_that_cannot_be_read_are_refused_before_anything_starts(rig: Rig) -> None:
+    rig.out.mkdir()
+    for content in ("not json\n", '{"status": "COMPLETED"}\n', "[1, 2]\n"):
+        (rig.out / launcher.RECORDS).write_text(content, encoding="utf-8")
+        with pytest.raises(launcher.RehearsalRefusedError, match="records this script cannot read"):
+            rig.run(["look around"])
+    assert rig.calls() == []
+    assert rig.launched() == 0
 
 
 def test_the_command_line_refuses_with_its_own_exit_code(
@@ -943,6 +1025,11 @@ def test_a_malformed_task_file_is_refused(tmp_path: Path) -> None:
     for content in ("[]", '[{"task_id": "a"}]', '[{"task_id": "a", "prompt": " "}]'):
         path.write_text(content, encoding="utf-8")
         with pytest.raises(launcher.RehearsalRefusedError):
+            launcher.load_tasks(path)
+    # A task id is written in the records and the report: a name, never a path or a sentence.
+    for task_id in ("C:/somewhere/private", "a task about someone", ""):
+        path.write_text(json.dumps([{"task_id": task_id, "prompt": "x"}]), encoding="utf-8")
+        with pytest.raises(launcher.RehearsalRefusedError, match="plain name"):
             launcher.load_tasks(path)
     path.write_text(
         json.dumps([{"task_id": "a", "prompt": "x"}, {"task_id": "a", "prompt": "y"}]),

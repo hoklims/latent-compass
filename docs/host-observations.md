@@ -239,34 +239,43 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   the CLI wrote on its error stream is classified and dropped, because that
   stream can carry the agent's last message. The one string of the CLI's that
   is kept is its version, and only when it has the shape of a version — a key
-  cannot pass for one. A rehearsal that kept more would be a look at results
-  before the freeze. A harness status is still a fact about a task, which is
-  why rehearsal tasks belong to no population. It counts tokens and fabricates
-  no money cost; the report's ranges cover completed sessions only, beside a
-  count per status, because a session that failed or timed out says nothing
-  about what a session costs.
+  cannot pass for one. A task id is a plain name, and a model name cannot be a
+  key: both are written in the report. A rehearsal that kept more would be a
+  look at results before the freeze. A harness status is still a fact about a
+  task, which is why rehearsal tasks belong to no population. It counts tokens
+  and fabricates no money cost; the report's ranges cover completed sessions
+  only, beside a count per status, because a session that failed or timed out
+  says nothing about what a session costs.
 - **Its ceilings are constants, not defaults.** Six sessions **per directory
   holding the key file**: the ledger lies beside the key under a fixed name, so
   neither another output directory nor a copy of the key file beside it gives
-  the allowance back, and a lock beside the key refuses a second run at the
-  same time. A session is counted once its copy is ready and before its process
-  starts: a crash still counts, a copy that could not be made does not. A run
-  stops at the first session that fails — failed to start, failed turn, error
-  exit: a CLI that rejects a flag or the key would otherwise burn the allowance
-  in seconds. Flags lower both ceilings and never raise them. A mistyped commit
-  or a refused key is refused before it can cost a session.
-- **Fifteen minutes per session, while the launcher is alive.** On overrun the
-  process tree is killed — a kill that does not take is printed, with the
-  process id — and the pipes get a bounded time to drain: an orphan that keeps
-  them open is abandoned, which means not awaited and not killed. An
-  interruption of the launcher (Ctrl+C, a termination signal, Ctrl+Break) kills
-  the session before it propagates. A launcher killed outright — its process
-  terminated, the power cut — kills nothing: the session it started runs to its
-  own end. The durable fix on Windows, a job object that dies with the
-  launcher, is not built.
-- **The ledger is not a spend limit.** It guards against mistakes, not against
-  its owner, who can delete it. The money bound is the hard limit set on the
-  key's project at the provider — outside this script, and not instantaneous.
+  the allowance back, and a lock beside the key — it names the process that
+  took it — refuses a second run at the same time. A session is counted once
+  its copy is ready and before its process starts: a crash still counts, a copy
+  that could not be made does not. A run stops at the first session that fails
+  — failed to start, failed turn, error exit: a CLI that rejects a flag or the
+  key would otherwise burn the allowance in seconds. Flags lower both ceilings
+  and never raise them. A mistyped commit, a refused key, or an output
+  directory whose records cannot be read is refused before it can cost a
+  session.
+- **Fifteen minutes per session, while the launcher is alive** — plus at most
+  some forty seconds to kill it and drain its pipes. On overrun the process
+  tree is killed. A kill that does not take is printed with the process id,
+  and so is the proof that it missed something: pipes still held once the tree
+  is dead. What holds them is not awaited and not killed — it is recorded, and
+  the run stops there: no session is started while something of the last one
+  may still be alive. An interruption of the launcher — Ctrl+C anywhere,
+  Ctrl+Break on Windows, a termination signal on POSIX — kills the session
+  before it propagates. A launcher killed outright — its process terminated,
+  which on Windows is what any termination request from outside amounts to, or
+  the power cut — kills nothing: the session it started runs to its own end.
+  The durable fix on Windows, a job object that dies with the launcher, is not
+  built.
+- **The ledger is not a spend limit.** It guards against mistakes — not
+  against its owner, who can delete it, and not against the agent the launcher
+  starts, which on a platform without a sandbox can write the ledger like
+  anything else. The money bound is the hard limit set on the key's project at
+  the provider — outside this script, and not instantaneous.
 - **No key file, nothing starts.** A file that does not hold exactly one API
   key — several tokens, too long, not the provider's prefix — is refused: a
   wrong file is not sent to the CLI. The CLI that receives the key is resolved
@@ -281,16 +290,24 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   where the launcher cannot delete it — an OS keyring — is refused, with the
   instruction to revoke the key. The pin is the setting the CLI documents; it
   was not exercised against the installed CLI, which is why the check after the
-  login exists.
+  login exists. **The agent can read the key it runs under** — the CLI keeps it
+  in the home the agent is given: that is why the key is dedicated and capped,
+  and why it is to be **revoked when the rehearsal is over**.
 - **Whether the key copy is gone is said, as far as the launcher still runs.**
   It is printed on every path on which the launcher still runs — an
-  interruption included, and a second one while the copy is being deleted; it
-  is written in the report, and is the command line's exit code (`3`), when the
-  run reaches its end. A run that died without unwinding leaves that home, and
-  the key in it, behind: the next run looks for it first, deletes it, says so,
-  and refuses once. If the home cannot be deleted, do not read what else it
-  holds: the CLI is asked not to persist session files (`--ephemeral`), and
-  that is a request, not something the launcher checks.
+  interruption included, and a second one while the copy is being deleted,
+  which is held back until the deletion is over; it is written in the report,
+  and is the command line's exit code (`3`), when the run reaches its end. A
+  run that died without unwinding leaves that home, and the key in it, behind:
+  the next run looks for it first, under the lock, deletes it, says so, and
+  refuses once. If the home cannot be deleted, do not read what else it holds:
+  the CLI is asked not to persist session files (`--ephemeral`), and that is a
+  request, not something the launcher checks.
+- **The launcher deletes only real directories it made.** A link or a junction
+  — under the name of a home, of a session copy, or anywhere inside one — is
+  never followed and never removed: what lies behind it is not the launcher's,
+  the owner's own agent home least of all. It is named, and the run refuses or
+  reports a failure.
 - **The agent inherits almost nothing — and that is not a jail.** An
   allow-listed environment: every home and temporary directory and Git's global
   configuration inside the isolated home, Git's system configuration and
@@ -300,30 +317,35 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   or login — **the agent it starts is another matter**. The CLI's
   `workspace-write` policy lets the agent **read the whole file system** by
   design. What stops it from **writing** outside its copy is the platform's
-  sandbox: documented for Linux and macOS; on native Windows it is a
-  restricted-token sandbox whose enforcement the launcher cannot verify. On
-  Windows, assume the agent can read and write whatever the account running the
-  launcher can, the owner's own agent home included — and two of the six tasks
-  ask it to edit files and run commands. Nor does the launcher control what the
-  CLI writes outside `CODEX_HOME`, or the network. Do not run it under a harness
-  that prints local variables in tracebacks: the key is one of them until the
-  login is done, and Python does not erase it from memory.
+  sandbox: documented for Linux and macOS. **On native Windows the CLI applies
+  no sandbox unless its configuration asks for one, and the launcher does not
+  ask**: the author could not exercise the Windows sandbox, and it is not
+  something to switch on blind on the owner's machine. On Windows the agent can
+  read and write whatever the account running the launcher can — the owner's
+  own agent home included, and the launcher's ledger and lock — and two of the
+  six tasks ask it to edit files and run commands. Nor does the launcher
+  control what the CLI writes outside `CODEX_HOME` — on Windows a redirected
+  home does not move what a program asks the system for — or the network. Do
+  not run it under a harness that prints local variables in tracebacks: the key
+  is one of them until the login is done, and Python does not erase it from
+  memory.
 
-Two independent security reviews preceded any real run, and both returned
-"fix before the first real run". The first found five serious defects, all on
-error paths (a killed session awaited without a bound, an interruption that
-left the session running, a removal reported without looking, the CLI resolved
-from the current directory, an allowance tied to the output directory). The
-second, on the corrected version, found two: a run that dies without unwinding
-left the key on disk and no later run noticed; and the text disclaimed what the
-agent can read under the sandbox, never what it can write, on the one platform
-where the sandbox is not established. It also found seven lesser defects —
-among them a failed session that did not stop the run, a version shape a key
-could pass, an allowance tied to the key file's name, a removal that could walk
-through a junction. This version closes what code can close. **It has not been
-reviewed a third time, and what the sandbox enforces on Windows is not a
-defect that a commit can close: it is a condition of the first real run, for
-the owner to decide.**
+Three independent security reviews preceded any real run, each by a fresh
+reviewer, and each returned "fix before the first real run". The first found
+five serious defects, all on error paths (a killed session awaited without a
+bound, an interruption that left the session running, a removal reported
+without looking, the CLI resolved from the current directory, an allowance
+tied to the output directory). The second found two: a run that dies without
+unwinding left the key on disk and no later run noticed; and the text
+disclaimed what the agent can read, never what it can write. The third found
+two more, **one of them introduced by the correction of the second**: the
+sweep of a dead run's key copy would delete *through* a junction planted under
+that name — the owner's own login, on the platform where the agent can write
+anywhere — and the branch that proves a kill missed something said nothing.
+Each review also found lesser defects. This version closes what code can
+close. **It has not been reviewed a fourth time. What an agent can do on
+native Windows is not a defect a commit can close: it is a condition of the
+first real run, for the owner to decide.**
 
 `examples/lab-rehearsal-tasks.json` holds six throwaway tasks on this
 repository. They were written by the author, belong to no population and are
@@ -331,9 +353,9 @@ excluded from any protocol. The tests drive the launcher with a stub standing
 in for the agent CLI — a real process, which can overrun, leave a child or an
 orphan behind, fail, write on its error stream, lie about its version and keep
 the key elsewhere; on Windows one test runs it behind a batch shim, the shape
-the real CLI has on the author's host. No real session runs in the test suite
-or in CI, no test delivers a real termination signal, and **the rehearsal
-itself has not run**.
+the real CLI has on the author's host, and another plants a junction under the
+name of a home. No real session runs in the test suite or in CI, no test
+delivers a real termination signal, and **the rehearsal itself has not run**.
 
 ## Non-claims
 

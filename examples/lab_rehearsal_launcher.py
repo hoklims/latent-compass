@@ -25,18 +25,23 @@ What bounds it:
   beside the key refuses a second run at the same time;
 * a run stops at the first session that fails — failed to start, failed turn, error exit.
   A CLI that rejects a flag or the key would otherwise burn the allowance in seconds;
-* fifteen minutes per session **while this script is alive**. On overrun the process tree
-  is killed — a kill that does not take is printed, with the process id — and the pipes
-  get a bounded time to drain: an orphan that keeps them open is abandoned, which means
-  not awaited and not killed. An interruption of this script (Ctrl+C, a termination
-  signal, Ctrl+Break) kills the session before it propagates. A launcher killed outright
-  — its process terminated, the power cut — kills nothing: the session it started runs
-  to its own end;
+* fifteen minutes per session **while this script is alive**, plus at most some forty
+  seconds to kill it and drain its pipes. On overrun the process tree is killed. A kill
+  that does not take is printed with the process id, and so is the proof that it missed
+  something: pipes still held once the tree is dead. What holds them is not awaited and
+  not killed — it is recorded, and the run stops there: no session is started while
+  something of the last one may still be alive. An interruption of this script — Ctrl+C
+  anywhere, Ctrl+Break on Windows, a termination signal on POSIX — kills the session
+  before it propagates. A launcher killed outright — its process terminated, which on
+  Windows is what any termination request from outside amounts to, or the power cut —
+  kills nothing: the session it started runs to its own end;
 * flags may lower both ceilings and never raise them.
 
-**The ledger is not a spend limit.** It guards against mistakes, not against its owner,
-who can delete it. The money bound is the hard limit the owner set on the key's project at
-the provider — outside this script, and not instantaneous.
+**The ledger is not a spend limit.** It guards against mistakes — not against its owner,
+who can delete it, and not against the agent this script starts, which on a platform
+without a sandbox can write the ledger like anything else. The money bound is the hard
+limit the owner set on the key's project at the provider — outside this script, and not
+instantaneous.
 
 What isolates the key:
 
@@ -53,18 +58,29 @@ What isolates the key:
   reaches its end;
 * a run that died without unwinding leaves that home, and the key in it, behind. The next
   run looks for it first, deletes it, says so, and refuses once;
+* this script deletes only real directories it made. A link or a junction — under the
+  name of a home, of a session copy, or anywhere inside one — is never followed and never
+  removed: what lies behind it is not this script's, the owner's own agent home least of
+  all. It is named, and the run refuses or reports a failure;
 * that home's configuration pins the CLI's credential store to a file inside it, and the
   run stops unless the login really left its credentials there: a CLI that put the key
   somewhere this script cannot delete — an OS keyring — is refused before any session;
-* **this script** never reads, copies or writes the owner's own agent home or login.
+* **this script** never reads, copies or writes the owner's own agent home or login;
+* **the agent can read the key it runs under**: the CLI keeps it in the home the agent is
+  given. That is why the key is dedicated and capped — and why it is to be **revoked when
+  the rehearsal is over**.
 
 What it does **not** control, and does not claim. The CLI's ``workspace-write`` policy
 lets the agent **read the whole file system** by design. What stops the agent from
-**writing** outside its copy is the platform's sandbox: documented for Linux and macOS; on
-native Windows it is a restricted-token sandbox whose enforcement this script cannot
-verify. On Windows, assume the agent can read and write whatever the account running this
-script can — the owner's own agent home included. Nor does this script control what the
-CLI writes outside ``CODEX_HOME``, or the network. The agent gets an allow-listed
+**writing** outside its copy is the platform's sandbox: documented for Linux and macOS. On
+native Windows the CLI applies **no sandbox unless its configuration asks for one, and
+this script does not ask**: the Windows sandbox could not be exercised by the author, and
+is not something to switch on blind on the owner's machine. On Windows, the agent can
+read and write whatever the account running this script can — the owner's own agent home
+included, and this script's ledger and lock. Nor does this script control what the CLI
+writes outside ``CODEX_HOME`` — on Windows a redirected home does not move what a program
+asks the system for, so anything else the CLI keeps "in the home" may land in the owner's
+real profile — or the network. The agent gets an allow-listed
 environment — homes, temporary directories and Git's global configuration inside the
 isolated home, Git's system configuration and credential prompts off, a ``PATH`` reduced
 to the tools it needs — and its own copy of one commit extracted from Git objects. That
@@ -93,11 +109,11 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 
 APPROVED_MAX_SESSIONS: Final = 6
 APPROVED_SESSION_SECONDS: Final = 900
@@ -108,6 +124,7 @@ ARCHIVE_SECONDS: Final = 300
 # them rather than wait.
 DRAIN_SECONDS = 15
 KILL_SECONDS = 5
+TASKKILL_SECONDS: Final = 20
 INTERRUPTIONS_ABSORBED: Final = 5
 EXIT_OK: Final = 0
 EXIT_REFUSED: Final = 2
@@ -133,6 +150,10 @@ USAGE_FIELDS: Final = (
 # What a child process inherits. PATH is rebuilt, everything else stays behind.
 PASSED_THROUGH: Final = ("PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "LANG", "LC_ALL")
 MODEL_SHAPE: Final = re.compile(r"[A-Za-z0-9._:\-]{1,80}")
+# A task id lands in the records and the report: a name, never a path or free text.
+TASK_ID_SHAPE: Final = re.compile(r"[A-Za-z0-9._\-]{1,80}")
+# The label of a session whose pipes something still held after its process tree was killed.
+PIPES_HELD: Final = "PIPES_HELD_AFTER_KILL"
 # A name, a space, three numbers. A key has no space: it cannot pass for a version.
 VERSION_SHAPE: Final = re.compile(
     r"[A-Za-z][A-Za-z\-]{0,19} \d{1,4}\.\d{1,4}\.\d{1,4}(-[\w.]{1,20})?"
@@ -195,6 +216,8 @@ def load_tasks(path: Path) -> list[Task]:
         task_id, prompt = item["task_id"], item["prompt"]
         if not isinstance(task_id, str) or not isinstance(prompt, str) or not prompt.strip():
             raise RehearsalRefusedError("a task is exactly a task_id and a prompt")
+        if not TASK_ID_SHAPE.fullmatch(task_id):
+            raise RehearsalRefusedError("a task_id is a plain name: it is written in the report")
         tasks.append(Task(task_id=task_id, prompt=prompt))
     if len({task.task_id for task in tasks}) != len(tasks):
         raise RehearsalRefusedError("task ids repeat")
@@ -237,14 +260,18 @@ def exclusive(key_file: Path) -> Iterator[None]:
     """One rehearsal at a time per key: two runs counting together could overshoot."""
     lock = lock_path(key_file)
     try:
-        lock.open("x", encoding="utf-8").close()
+        handle = lock.open("x", encoding="utf-8")
     except FileExistsError as error:
         raise RehearsalRefusedError(
-            "a lock lies beside the key file: another rehearsal is running, or one died. "
-            "Check that no agent session is still running, then remove the lock: the next run "
-            "deletes the copy of the key that a dead run may have left beside it"
+            "a lock lies beside the key file: another rehearsal is running, or one died. The "
+            "lock names the process that took it. Remove it ONLY once that process and every "
+            "agent session are gone — a run that finds no lock deletes what it takes for a dead "
+            "run's copy of the key, a live run's included"
         ) from error
     try:
+        with handle:
+            # For the operator only: which process to look for before removing a stale lock.
+            handle.write(f"pid {os.getpid()} since {datetime.now(UTC).isoformat()}\n")
         yield
     finally:
         with contextlib.suppress(OSError):
@@ -254,8 +281,9 @@ def exclusive(key_file: Path) -> Iterator[None]:
 def resolve_command(name: str) -> str | None:
     """An absolute path, or a bare name found on PATH — never in the current directory."""
     candidate = Path(name)
+    runnable = sys.platform == "win32" or os.access(candidate, os.X_OK)
     if candidate.is_absolute():
-        return str(candidate) if candidate.is_file() else None
+        return str(candidate) if candidate.is_file() and runnable else None
     if candidate.name != name:
         return None
     suffixes = [""]
@@ -359,7 +387,7 @@ def _kill_tree(process: subprocess.Popen[bytes]) -> bool:
                 [tool, "/T", "/F", "/PID", str(process.pid)],
                 capture_output=True,
                 check=False,
-                timeout=HOUSEKEEPING_SECONDS,
+                timeout=TASKKILL_SECONDS,
             )
             # 128: the process was already gone.
             confirmed = done.returncode in (0, 128)
@@ -391,6 +419,16 @@ def _kill_and_say(process: subprocess.Popen[bytes]) -> None:
         )
 
 
+class Ran(NamedTuple):
+    """What a bounded process did. ``pipes_held``: something outlived the kill of its tree."""
+
+    overran: bool
+    returncode: int | None
+    stdout: bytes
+    stderr: bytes
+    pipes_held: bool = False
+
+
 def _bounded(
     command: Sequence[str],
     *,
@@ -398,8 +436,8 @@ def _bounded(
     environment: Mapping[str, str] | None,
     cwd: Path | None,
     seconds: int,
-) -> tuple[bool, int | None, bytes, bytes]:
-    """Run to completion or to ``seconds``. Returns whether it overran, and what it wrote."""
+) -> Ran:
+    """Run to completion or to ``seconds``. Says whether it overran, and what it wrote."""
     process = subprocess.Popen(  # noqa: S603 - resolved command, fixed arguments, no shell
         list(command),
         stdin=subprocess.PIPE,
@@ -416,20 +454,33 @@ def _bounded(
         try:
             stdout, stderr = process.communicate(timeout=DRAIN_SECONDS)
         except subprocess.TimeoutExpired:
-            # An orphan still holds the pipes. It is abandoned, not awaited: the ceiling on
-            # a session must hold whatever the session left behind.
-            stdout, stderr = b"", b""
+            # Something that outlived the kill still holds the pipes. It is not awaited —
+            # the ceiling on a session must hold whatever the session left behind — and it
+            # is not passed over in silence: this is the proof that the kill missed something.
             process.poll()  # reap the killed session itself
-        return True, process.returncode, stdout, stderr
+            print(
+                f"WARNING: something started by process {process.pid} outlived the kill and "
+                "still holds its pipes: a paid session may be alive. Stop it by hand.",
+                file=sys.stderr,
+            )
+            return Ran(True, process.returncode, b"", b"", pipes_held=True)
+        return Ran(True, process.returncode, stdout, stderr)
     except BaseException:
         # An interruption of this script must not leave a paid session running.
         _kill_and_say(process)
         raise
-    return False, process.returncode, stdout, stderr
+    return Ran(False, process.returncode, stdout, stderr)
+
+
+def _is_link(path: Path) -> bool:
+    """A symbolic link or a junction: a name for something that lies elsewhere."""
+    return path.is_symlink() or path.is_junction()
 
 
 def _remove_what_can_be(directory: Path) -> None:
     """Best effort, and never through a link or a junction: what lies behind one is not ours."""
+    if _is_link(directory):
+        return
     try:
         entries = list(os.scandir(directory))
     except OSError:
@@ -444,7 +495,15 @@ def _remove_what_can_be(directory: Path) -> None:
 
 
 def _discard(directory: Path) -> bool:
-    """Delete a directory and say whether it is really gone."""
+    """Delete a directory this script created, and say whether it is really gone.
+
+    A link or a junction is never followed and never removed: this script creates none, so
+    one found under a name of its own was put there by something else. What lies behind it
+    is not this script's to delete, and the directory it replaced — the key copy, perhaps —
+    is somewhere else: that is reported as a failure, never as a removal.
+    """
+    if _is_link(directory):
+        return False
     shutil.rmtree(directory, ignore_errors=True)
     if directory.exists():
         # A locked entry must not shelter the rest: remove what can be, entry by entry.
@@ -454,14 +513,19 @@ def _discard(directory: Path) -> bool:
     return not directory.exists()
 
 
-def _discard_despite_interruptions(directory: Path) -> bool:
-    """An impatient second Ctrl+C must not stop the deletion of the key copy half-way."""
+def _discard_despite_interruptions(directory: Path) -> tuple[bool, bool]:
+    """An impatient second Ctrl+C must not stop the deletion of the key copy half-way.
+
+    Returns whether the directory is gone, and whether an interruption was held back: the
+    caller owes it to the operator once the deletion is over.
+    """
+    held_back = False
     for _ in range(INTERRUPTIONS_ABSORBED):
         try:
-            return _discard(directory)
+            return _discard(directory), held_back
         except KeyboardInterrupt:
-            continue
-    return _discard(directory)
+            held_back = True
+    return _discard(directory), held_back
 
 
 def sweep_dead_runs(key_file: Path) -> None:
@@ -469,7 +533,16 @@ def sweep_dead_runs(key_file: Path) -> None:
     leftovers = sorted(key_file.parent.glob(HOME_PREFIX + "*"))
     if not leftovers:
         return
-    stuck = [str(path) for path in leftovers if not _discard_despite_interruptions(path)]
+    # Only a real directory can be a home this script made. Anything else under that name —
+    # a link, a junction, a file — was put there by something else: it is named, not touched.
+    foreign = [str(path) for path in leftovers if _is_link(path) or not path.is_dir()]
+    if foreign:
+        raise RehearsalRefusedError(
+            "beside the key file, under the name of a rehearsal home, lies something this "
+            f"script did not make and will not touch: {', '.join(foreign)}. Look at it, and "
+            "remove it by hand"
+        )
+    stuck = [str(path) for path in leftovers if not _discard_despite_interruptions(path)[0]]
     outcome = f"It could NOT be deleted: {', '.join(stuck)}." if stuck else "It is deleted now."
     raise RehearsalRefusedError(
         f"a run that died left a copy of the key beside the key file ({len(leftovers)} found). "
@@ -479,16 +552,16 @@ def sweep_dead_runs(key_file: Path) -> None:
 
 def _extract(git: str, source: Path, ref: str, into: Path) -> None:
     try:
-        overran, code, archive, _ = _bounded(
+        ran = _bounded(
             [git, "-C", str(source), "-c", "core.autocrlf=false", "archive", "--format=tar", ref],
             stdin=b"",
             environment=None,
             cwd=None,
             seconds=ARCHIVE_SECONDS,
         )
-        if overran or code != 0:
+        if ran.overran or ran.returncode != 0:
             raise RehearsalRefusedError("the copy of the commit could not be made")
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        with tarfile.open(fileobj=io.BytesIO(ran.stdout)) as tar:
             tar.extractall(into, filter="data")
     except (OSError, tarfile.TarError) as error:
         raise RehearsalRefusedError("the copy of the commit could not be made") from error
@@ -496,7 +569,7 @@ def _extract(git: str, source: Path, ref: str, into: Path) -> None:
 
 def _login(codex: Sequence[str], environment: Mapping[str, str], key: bytes) -> None:
     try:
-        overran, code, _, _ = _bounded(
+        ran = _bounded(
             [*codex, "login", "--with-api-key"],
             stdin=key + b"\n",
             environment=environment,
@@ -505,14 +578,14 @@ def _login(codex: Sequence[str], environment: Mapping[str, str], key: bytes) -> 
         )
     except OSError as error:
         raise RehearsalRefusedError("the agent CLI could not be started for the login") from error
-    if overran or code != 0:
+    if ran.overran or ran.returncode != 0:
         # Its output is not echoed: a CLI may repeat the key it was given.
         raise RehearsalRefusedError("the agent CLI refused the dedicated key")
 
 
 def _version(codex: Sequence[str], environment: Mapping[str, str]) -> str:
     try:
-        overran, _, stdout, _ = _bounded(
+        ran = _bounded(
             [*codex, "--version"],
             stdin=b"",
             environment=environment,
@@ -521,8 +594,8 @@ def _version(codex: Sequence[str], environment: Mapping[str, str]) -> str:
         )
     except OSError:
         return "unknown"
-    declared = stdout.decode("utf-8", errors="replace").strip()
-    return declared if not overran and VERSION_SHAPE.fullmatch(declared) else "unknown"
+    declared = ran.stdout.decode("utf-8", errors="replace").strip()
+    return declared if not ran.overran and VERSION_SHAPE.fullmatch(declared) else "unknown"
 
 
 def _append(path: Path, payload: Mapping[str, Any]) -> None:
@@ -538,21 +611,40 @@ def _spread(values: Sequence[int]) -> dict[str, int]:
     return {"min": min(values), "median": round(statistics.median(values)), "max": max(values)}
 
 
+def read_records(out: Path) -> list[dict[str, Any]]:
+    """The session records of an output directory, or a refusal if they are not this script's.
+
+    Called before anything starts too: records that cannot be read must not be discovered
+    when the report is written, after the sessions have been paid for.
+    """
+    path = out / RECORDS
+    if not path.is_file():
+        return []
+    expected = {field.name for field in fields(SessionRecord)}
+    records = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if not isinstance(record, dict) or set(record) != expected:
+                raise ValueError("not a session record")
+            records.append(record)
+    except (OSError, ValueError) as error:
+        raise RehearsalRefusedError(
+            "the output directory holds records this script cannot read: choose another one"
+        ) from error
+    return records
+
+
 def write_report(
     out: Path,
     key_file: Path,
     codex_version: str,
     model: str | None,
     key_copy_removed: bool,
-    stopped_after_failure: bool,
+    stopped_early: bool,
 ) -> dict[str, Any]:
     """Everything recorded in ``out``, this run's sessions and any earlier run's."""
-    records_path = out / RECORDS
-    records = (
-        [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines()]
-        if records_path.is_file()
-        else []
-    )
+    records = read_records(out)
     # A session that did not complete says nothing about what a session costs.
     completed = [record for record in records if record["status"] == SessionStatus.COMPLETED]
     report: dict[str, Any] = {
@@ -560,7 +652,7 @@ def write_report(
         "approved_max_sessions": APPROVED_MAX_SESSIONS,
         "approved_session_seconds": APPROVED_SESSION_SECONDS,
         "sessions_launched": launched_so_far(key_file),
-        "stopped_after_failure": stopped_after_failure,
+        "stopped_early": stopped_early,
         "key_copy_removed": key_copy_removed,
         "agent_cli": codex_version,
         "model_declared": model,
@@ -592,7 +684,10 @@ def run_rehearsal(
         raise RehearsalRefusedError("the session count may be lowered, never raised")
     if not 1 <= session_seconds <= APPROVED_SESSION_SECONDS:
         raise RehearsalRefusedError("the session length may be lowered, never raised")
-    if model is not None and not MODEL_SHAPE.fullmatch(model):
+    if model is not None and (
+        not MODEL_SHAPE.fullmatch(model) or model.encode().startswith(KEY_PREFIX)
+    ):
+        # The model name is an argument and a report field: a key pasted there would be both.
         raise RehearsalRefusedError("the model name is not a plain identifier")
     key = read_key(key_file)
     resolved, git = resolve_command(codex[0]), resolve_command("git")
@@ -600,19 +695,20 @@ def run_rehearsal(
         raise RehearsalRefusedError("the agent CLI is not an absolute path and is not on PATH")
     if git is None:
         raise RehearsalRefusedError("git is not on PATH")
-    if Path(resolved).suffix.lower() in BATCH_SUFFIXES and BATCH_UNSAFE.search(
-        tempfile.gettempdir()
+    if Path(resolved).suffix.lower() in BATCH_SUFFIXES and any(
+        BATCH_UNSAFE.search(argument) for argument in (tempfile.gettempdir(), *codex[1:])
     ):
         # The copy's path is an argument, and a batch shim lets the shell read it again.
         raise RehearsalRefusedError(
-            "the temporary directory's path holds a character a batch shim would read as a command"
+            "an argument, or the temporary directory's path, holds a character a batch shim "
+            "would read as a command"
         )
     command = [resolved, *codex[1:]]
+    # Records that cannot be read are found now, not once the sessions have been paid for.
+    read_records(out)
     verify = [git, "-C", str(source), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"]
-    overran, code, _, _ = _bounded(
-        verify, stdin=b"", environment=None, cwd=None, seconds=HOUSEKEEPING_SECONDS
-    )
-    if overran or code != 0:
+    checked = _bounded(verify, stdin=b"", environment=None, cwd=None, seconds=HOUSEKEEPING_SECONDS)
+    if checked.overran or checked.returncode != 0:
         # A mistyped commit must not cost a session of the allowance.
         raise RehearsalRefusedError("the source repository does not hold that commit")
 
@@ -652,8 +748,8 @@ def run_rehearsal(
                 session += ["--model", model]
             for task in list(tasks)[:allowance]:
                 workdir = Path(tempfile.mkdtemp(prefix=COPY_PREFIX))
-                status, duration, code = SessionStatus.FAILED_TO_START, 0, None
-                stdout, stderr = b"", b""
+                status, duration = SessionStatus.FAILED_TO_START, 0
+                ran = Ran(False, None, b"", b"")
                 try:
                     # The copy comes first: a copy that cannot be made costs no session.
                     _extract(git, source, ref, workdir)
@@ -667,14 +763,14 @@ def run_rehearsal(
                     started = time.monotonic()
                     # The prompt travels on stdin ("-"): nothing is quoted through a shell shim.
                     with contextlib.suppress(OSError):
-                        overran, code, stdout, stderr = _bounded(
+                        ran = _bounded(
                             [*session, "--cd", str(workdir), "-"],
                             stdin=task.prompt.encode("utf-8"),
                             environment=environment,
                             cwd=workdir,
                             seconds=session_seconds,
                         )
-                        status = SessionStatus.TIMED_OUT if overran else SessionStatus.COMPLETED
+                        status = SessionStatus.TIMED_OUT if ran.overran else SessionStatus.COMPLETED
                     duration = round((time.monotonic() - started) * 1000)
                 finally:
                     copy_removed = _discard(workdir)
@@ -684,10 +780,16 @@ def run_rehearsal(
                             file=sys.stderr,
                         )
                 usage, turns, failed = read_usage(
-                    stdout.decode("utf-8", errors="replace").splitlines()
+                    ran.stdout.decode("utf-8", errors="replace").splitlines()
                 )
-                if status is SessionStatus.COMPLETED and (failed or turns == 0 or code != 0):
+                if status is SessionStatus.COMPLETED and (
+                    failed or turns == 0 or ran.returncode != 0
+                ):
                     status = SessionStatus.TURN_FAILED
+                if status is SessionStatus.COMPLETED:
+                    diagnostic = "NONE"
+                else:
+                    diagnostic = PIPES_HELD if ran.pipes_held else diagnose(ran.stderr)
                 record = SessionRecord(
                     session_index=index,
                     task_id=task.task_id,
@@ -695,29 +797,36 @@ def run_rehearsal(
                     duration_ms=duration,
                     status=status.value,
                     turns=turns,
-                    diagnostic="NONE" if status is SessionStatus.COMPLETED else diagnose(stderr),
+                    diagnostic=diagnostic,
                     copy_removed=copy_removed,
                     **usage,
                 )
                 _append(out / RECORDS, asdict(record))
-                if status in (SessionStatus.FAILED_TO_START, SessionStatus.TURN_FAILED):
+                failure = status in (SessionStatus.FAILED_TO_START, SessionStatus.TURN_FAILED)
+                if failure or ran.pipes_held:
                     # A CLI that rejects a flag or the key fails every session the same way:
-                    # the rest of the allowance is left for a run that can use it.
+                    # the rest of the allowance is left for a run that can use it. And no
+                    # session is started while something of the last one may still be alive.
                     stopped = True
                     break
         finally:
             # On every path this script still runs, an interruption included — and a second
             # one while the key copy is being deleted.
+            held_back = False
             try:
-                key_copy_removed = _discard_despite_interruptions(home)
+                key_copy_removed, held_back = _discard_despite_interruptions(home)
             finally:
                 if not key_copy_removed:
                     print(
-                        f"WARNING: a copy of the dedicated key may remain under {home}. "
-                        "Delete it, revoke the key, and do not read what else it holds: "
-                        "the CLI may have written the agent's words there.",
+                        f"WARNING: a copy of the dedicated key may remain under {home} — or, if "
+                        "a link has taken that name, wherever the directory was moved. Delete "
+                        "it, revoke the key, and do not read what else it holds: the CLI may "
+                        "have written the agent's words there.",
                         file=sys.stderr,
                     )
+            if held_back:
+                # The operator asked to stop while the key copy was being deleted: now it is.
+                raise KeyboardInterrupt
     return write_report(out, key_file, version, model, key_copy_removed, stopped)
 
 
@@ -769,8 +878,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             signal.signal(number, handler)
     statuses = [record["status"] for record in report["records"]]
     print(f"{report['sessions_launched']} of {APPROVED_MAX_SESSIONS} sessions launched: {statuses}")
-    if report["stopped_after_failure"]:
-        print("stopped after a failed session: what is left of the allowance is untouched")
+    if report["stopped_early"]:
+        print(
+            "stopped early — a session failed, or something outlived its kill: "
+            "what is left of the allowance is untouched"
+        )
     return EXIT_OK if report["key_copy_removed"] else EXIT_KEY_COPY_LEFT
 
 
