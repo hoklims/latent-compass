@@ -12,8 +12,10 @@ here reads.
 These tests prove that each revision still reproduces seal for seal and is never
 edited in place, that only the two named pilot perimeters are ever eligible for
 anything other than ``KEEP``, which assets hold by one lock and which by two,
-and that the vocabulary travelling with the evidence is exactly the declared
-one. They prove nothing about whether any index is useful.
+that the vocabulary travelling with the evidence is exactly the declared one,
+and that neither the ADR nor the scope document is reworded without a pin
+changing. They prove nothing about whether any index is useful, and nothing
+about the operator's reads the scope document quotes.
 """
 
 from __future__ import annotations
@@ -59,6 +61,9 @@ ADR_SECTIONS = {
         "sha256:ba30f07452dcd307d4ceb84e2dcd45aa0e9c9c984623d472d215406c0bc3724b"
     ),
 }
+#: The scope document is revised in place, so it is pinned whole: a reworded perimeter
+#: shows up as a changed pin in the same diff, never as prose nobody had to look at.
+SCOPE_DOCUMENT_DIGEST = "sha256:6bbdc646bc8f2d36b9bfd98dbd28325f49235c024dec6e3f9015fff3ab89027c"
 
 #: (generated_at, inventory_digest, report_seal) of every committed revision.
 PINNED = {
@@ -125,6 +130,31 @@ DECLARED_SCOPES = {
     "professional-excluded",
     "workstation-shared",
 }
+DECLARED_ROLES = {
+    "artefact-store",
+    "authored-semantic-layer",
+    "derived-structural-index",
+    "host-receipt-store",
+    "invalidation-hook",
+    "language-server-bridge",
+    "mcp-gateway",
+    "multi-purpose-hook",
+    "project-mcp-servers",
+    "reconcile-worker",
+    "refresh-hook",
+    "routing-hook",
+    "scheduled-sweep",
+    "scheduled-task",
+    "semantic-code-index",
+    "symbolic-edit-server",
+    "unregistered-hook-script",
+    "vault-dense-index",
+    "vault-knowledge-graph",
+    "worktree-local-cache",
+}
+#: The one role the second-pilot revision introduced: a per-repository symbolic cache, where
+#: the earlier reads only knew the workstation-wide server.
+SECOND_PILOT_ROLE = "symbolic-tool-cache"
 DECLARED_PROVIDERS = {
     "cocoindex-code",
     "graphify",
@@ -253,22 +283,26 @@ def test_the_second_pilot_revision_appends_five_assets_and_changes_nothing_else(
     }
 
 
-def test_only_the_named_pilot_perimeters_are_ever_eligible_for_more_than_keep() -> None:
-    dispositions = {item.asset_id: item for item in committed_report().dispositions}
+@pytest.mark.parametrize(
+    ("directory", "eligible"),
+    [
+        # Before the owner's decision the first pilot stood alone.
+        (CORRECTED, PILOT_ASSETS),
+        (CURRENT, PILOT_ASSETS | SECOND_PILOT_CANDIDATES),
+    ],
+)
+def test_only_the_named_pilot_perimeters_are_ever_eligible_for_more_than_keep(
+    directory: str, eligible: set[str]
+) -> None:
+    dispositions = {item.asset_id: item for item in committed_report(directory).dispositions}
     not_kept = {
         asset_id
         for asset_id, item in dispositions.items()
         if item.action is not RetirementAction.KEEP
     }
 
-    assert not_kept == PILOT_ASSETS | SECOND_PILOT_CANDIDATES
-    # Before the owner's decision the first pilot stood alone.
-    assert {
-        item.asset_id
-        for item in committed_report(CORRECTED).dispositions
-        if item.action is not RetirementAction.KEEP
-    } == PILOT_ASSETS
-    for asset_id in PILOT_ASSETS | SECOND_PILOT_CANDIDATES:
+    assert not_kept == eligible
+    for asset_id in eligible:
         item = dispositions[asset_id]
         # No evidence exists yet, so nothing is retained for rollback and
         # every gate, closable or not, is still listed as missing.
@@ -291,6 +325,17 @@ def test_the_personal_lab_scope_kind_names_the_two_pilot_perimeters_and_nothing_
         PILOT_SCOPE: PILOT_ASSETS,
         SECOND_PILOT_SCOPE: SECOND_PILOT_CANDIDATES | SECOND_PILOT_KEPT,
     }
+
+
+def test_ccc_has_one_pilot_subject_and_the_first_pilot_carries_graphify_alone() -> None:
+    # What the scope document concludes about CCC, read off the committed inventory rather
+    # than off the operator's file counts, which this repository cannot show.
+    lab = [asset for asset in inventory() if asset.scope_kind is ScopeKind.PERSONAL_LAB]
+
+    assert {asset.asset_id for asset in lab if asset.provider_id == "cocoindex-code"} == {
+        "ccc-semantic-index.pilot-second-repository"
+    }
+    assert {asset.provider_id for asset in lab if asset.scope == PILOT_SCOPE} == {"graphify"}
 
 
 def test_inside_the_second_pilot_a_kept_asset_holds_by_its_classification_alone() -> None:
@@ -398,15 +443,23 @@ def test_forging_the_classification_alone_never_moves_an_excluded_asset(asset_id
 def test_the_vocabulary_travelling_with_the_evidence_is_exactly_the_declared_one() -> None:
     # Every text field is an identifier, which cannot hold a path separator: a
     # needle scan is inert here. What an identifier can hold is a hostname, an
-    # account, an employer or a private repository name, so each vocabulary is
-    # pinned to an exact set that a newcomer has to be added to by hand.
+    # account, an employer or a private repository name, so the vocabularies an
+    # author words freely — scope, provider, role, consumer — are each pinned to an
+    # exact set that a newcomer has to be added to by hand. The host label is pinned
+    # beside the asset count. Asset identifiers are pinned by name where a perimeter
+    # or a lock is asserted, not here: outside those sets only their number is.
     for directory in PINNED:
         assets = inventory(directory)
         assert assets, directory
-        # The second pilot's alias is the one newcomer, and only from the revision that
-        # carries the owner's decision. It names no repository.
-        newcomers = {SECOND_PILOT_SCOPE} if directory == CURRENT else set()
-        assert {asset.scope for asset in assets} == DECLARED_SCOPES | newcomers, directory
+        # The second pilot's alias and its one new role are the only newcomers, and only
+        # from the revision that carries the owner's decision. Neither names a repository.
+        current = directory == CURRENT
+        assert {asset.scope for asset in assets} == DECLARED_SCOPES | (
+            {SECOND_PILOT_SCOPE} if current else set()
+        ), directory
+        assert {asset.role for asset in assets} == DECLARED_ROLES | (
+            {SECOND_PILOT_ROLE} if current else set()
+        ), directory
         assert {asset.provider_id for asset in assets} == DECLARED_PROVIDERS
         assert {
             consumer.consumer_id for asset in assets for consumer in asset.consumers
@@ -414,7 +467,9 @@ def test_the_vocabulary_travelling_with_the_evidence_is_exactly_the_declared_one
 
 
 def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
-    # The scenario fixtures carry free text, where these needles can really fire.
+    # The scenario fixtures carry free text, where these needles can really fire, and so do
+    # the documents written beside the evidence: a pin stops a silent rewording, never an
+    # author who rewords and re-pins.
     # Assembled at runtime so this module does not contain what it forbids.
     needles = (
         ":" + "\\",
@@ -426,6 +481,7 @@ def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
     )
     paths = sorted(SCENARIOS.glob("*.json")) + sorted(REPO.glob("evidence/hok799-*/*.json"))
     assert len(paths) == 11
+    paths += [SCOPE_DOCUMENT, ADR, REPO / "evidence" / "README.md"]
     for path in paths:
         text = path.read_text(encoding="utf-8").lower()
         for needle in needles:
@@ -451,6 +507,11 @@ def test_the_adr_is_append_only_and_every_section_is_pinned() -> None:
     assert f"evidence/{CURRENT}/" in amendments[-1]
     assert f"evidence/{CURRENT}/" not in "".join(amendments[:-1])
     assert f"`{SECOND_PILOT_SCOPE}`" in amendments[-1]
+
+
+def test_the_scope_document_cannot_be_reworded_without_its_pin_changing() -> None:
+    text = SCOPE_DOCUMENT.read_bytes().replace(b"\r\n", b"\n")
+    assert "sha256:" + hashlib.sha256(text).hexdigest() == SCOPE_DOCUMENT_DIGEST
 
 
 def test_the_scope_document_names_every_asset_and_every_revision() -> None:

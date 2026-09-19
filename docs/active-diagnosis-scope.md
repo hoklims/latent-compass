@@ -31,6 +31,13 @@ is a dated read, not a standing fact; every size below is as of that read.
 The second pilot repository was read separately, on 2026-09-19 at 12:56 UTC,
 the same way; its sizes are as of that second read.
 
+Every size, file count and age in this document is an **operator declaration**.
+The committed inventory carries none of them — the `1.0.0` asset contract has
+no size, count or age field — and no test or artefact in this repository
+supports them. The reads they come from are operator-held, because they name
+repositories and host paths this repository refuses. They explain a decision;
+they prove nothing, and nobody outside the workstation can check them.
+
 ## 2. Inventory
 
 The machine-readable inventory is 30 assets in the
@@ -93,12 +100,12 @@ only index the first pilot can produce evidence about.
 | `graphify-code-graph.pilot-second-repository` | Derived structural graph artefacts kept for that repository in the shared store (one entry, about 52 MiB at the read) |
 | `graphify-worktree-cache.pilot-second-repository` | The git-ignored `graphify-out/` cache directory inside that checkout (under 1 MiB) |
 
-That repository tracked 1,671 files at the read, 939 of them code in five
-languages, on a single checkout: well above the 150-file, two-language
-admission threshold the first pilot stays under. Its newest index artefact was
-about 23 days old, and so were both hosts' route caches for it: **configured,
-and not recently visited**. That is a dated observation, not a measurement of
-use (U2).
+By the operator's read, that repository tracked 1,671 files, 939 of them code
+in five languages, on a single checkout: above the 150-file, two-language
+admission threshold the first pilot stays under. The newest file date among its
+index artefacts, and among both hosts' route caches for it, was about 23 days
+before the read. A file date is not a freshness verdict and measures no use
+(U2).
 
 ### Kept inside the second pilot — by classification alone
 
@@ -163,12 +170,14 @@ professional alike, so none can be retired from inside the pilot perimeter.
   dependency directories; no rule separates personal from professional roots.
   Any retirement must therefore be decided per *(provider, worktree)* couple
   and never for the store as a whole.
-- **CCC can be judged on the second pilot only.** The admission policy
-  provisions CCC only from 150 code files in at least two languages; this
-  repository tracked about 90 at the read, all Python, and carries no CCC
-  settings. A CCC verdict needed a second named pilot repository — the owner
-  decision U1, taken on 2026-09-19. One repository is one subject: whatever
-  HOK-804 finds there says nothing about any other repository.
+- **CCC has one subject: the second pilot.** The committed inventory holds a
+  CCC asset, with a settings digest, for the second pilot and none for this
+  repository. The operator's reads say why — the admission policy provisions
+  CCC only from 150 code files in at least two languages, and this repository
+  tracked about 90, all Python — but that reason is declared, not shown here.
+  A CCC verdict needed a second named pilot repository — the owner decision
+  U1, taken on 2026-09-19. One repository is one subject: whatever HOK-804
+  finds there says nothing about any other repository.
 - **Hidden indexes are declared, not denied.** Language servers keep their own
   index, and the lab's justification memory is itself a specialised lookup
   structure. Both count as residual cost; neither supports a “zero index”
