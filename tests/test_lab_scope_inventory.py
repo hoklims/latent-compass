@@ -7,7 +7,9 @@ instant later than its own commit. ``evidence/hok799-scope-inventory-v1.1.0``
 corrects both. ``evidence/hok799-scope-inventory-v1.2.0`` carries the owner's
 U1 decision: it appends the index artefacts of a second personal repository,
 under an alias, and changes nothing else. It is the revision a test here reads
-unless it names another.
+unless it names another. Those tests used to read 1.1.0: it is no longer read
+by them directly, and stays covered because 1.2.0 must begin with it unchanged,
+asset for asset, and because its own seals stay pinned.
 
 These tests prove that each revision still reproduces seal for seal and that an
 edit in place cannot pass unless its pin is changed in the same diff, that only
@@ -65,6 +67,10 @@ ADR_SECTIONS = {
 #: The scope document is revised in place, so it is pinned whole: a reworded perimeter
 #: shows up as a changed pin in the same diff, never as prose nobody had to look at.
 SCOPE_DOCUMENT_DIGEST = "sha256:be0ec9d83f807380238379d6aebb289f66b3c313fa98652c82c1a35c5849384a"
+#: The README beside the evidence quotes the seals and says what the files do not prove:
+#: pinned whole for the same reason.
+EVIDENCE_README = REPO / "evidence" / "README.md"
+EVIDENCE_README_DIGEST = "sha256:18aafd01b98db05483aade622753968b65ab35b135827df2f04c548e51b7f35a"
 
 #: (generated_at, inventory_digest, report_seal) of every committed revision.
 PINNED = {
@@ -316,6 +322,26 @@ def test_the_second_pilot_revision_appends_five_assets_and_changes_nothing_else(
         ),
         "serena-symbolic-cache" + suffix: ("serena", SECOND_PILOT_ROLE, "SOURCE_OR_SYMBOLIC_TOOL"),
     }
+    # And who is declared to consume it: a consumer borrowed from another scope and attached
+    # to a pilot asset would leave the union of declared consumers unchanged.
+    gateways = {"claude.mcp.code-intelligence", "codex.mcp.code-intelligence"}
+    assert {
+        asset.asset_id: {consumer.consumer_id for consumer in asset.consumers}
+        for asset in inventory()[len(corrected) :]
+    } == {
+        "ccc-semantic-index" + suffix: gateways | {"claude.skill.ccc"},
+        "graphify-code-graph" + suffix: gateways
+        | {
+            "claude.hook.index-routing",
+            "claude.skill.graphify",
+            "codex.hook.index-routing",
+            "shared.skill.index-control-plane",
+        },
+        "graphify-worktree-cache" + suffix: {"shared.worker.reconcile"},
+        "semctx-semantic-layer" + suffix: gateways
+        | {"claude.plugin.semctx", "codex.plugin.semctx-control"},
+        "serena-symbolic-cache" + suffix: gateways,
+    }
 
 
 @pytest.mark.parametrize(
@@ -477,8 +503,8 @@ def test_forging_the_classification_alone_never_moves_an_excluded_asset(asset_id
 
 def test_the_vocabulary_travelling_with_the_evidence_is_exactly_the_declared_one() -> None:
     # Every field an author words freely — asset identifier, scope, provider, role,
-    # consumer, host label — is an identifier, which cannot hold a path separator: a
-    # needle scan is inert here. What an identifier can hold is a hostname, an
+    # consumer, host label — is an identifier, which cannot hold a path separator: the
+    # path needles are inert here. What an identifier can hold is a hostname, an
     # account, an employer or a private repository name, so each of these vocabularies
     # is pinned to an exact set that a newcomer has to be added to by hand, where a
     # reviewer reads it as a word and not as a changed digest. The test checks set
@@ -531,7 +557,7 @@ def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
     )
     paths = sorted(SCENARIOS.glob("*.json")) + sorted(REPO.glob("evidence/hok799-*/*.json"))
     assert len(paths) == 11
-    paths += [SCOPE_DOCUMENT, ADR, REPO / "evidence" / "README.md"]
+    paths += [SCOPE_DOCUMENT, ADR, EVIDENCE_README]
     for path in paths:
         text = path.read_text(encoding="utf-8").lower()
         for needle in needles:
@@ -562,6 +588,11 @@ def test_the_adr_is_append_only_and_every_section_is_pinned() -> None:
 def test_the_scope_document_cannot_be_reworded_without_its_pin_changing() -> None:
     text = SCOPE_DOCUMENT.read_bytes().replace(b"\r\n", b"\n")
     assert "sha256:" + hashlib.sha256(text).hexdigest() == SCOPE_DOCUMENT_DIGEST
+
+
+def test_the_evidence_readme_cannot_be_reworded_without_its_pin_changing() -> None:
+    text = EVIDENCE_README.read_bytes().replace(b"\r\n", b"\n")
+    assert "sha256:" + hashlib.sha256(text).hexdigest() == EVIDENCE_README_DIGEST
 
 
 def test_the_scope_document_names_every_asset_and_every_revision() -> None:
