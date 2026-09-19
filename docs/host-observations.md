@@ -152,6 +152,22 @@ an outcome:
 Every attempt, a failed one included, is charged at its reserved ceiling: the
 bench measures durations and invents no token or money cost.
 
+**Delegation.** `run_delegation` (`--delegate`) hands the same diagnosis to
+child episodes that reserve against **one** pool. A delegation records its
+scope, what the pool still held when it was made, whether it was cancelled, and
+its result; a child's probe reservations are nested under it, so the one ledger
+says who spent what.
+
+| Situation | What the loop does |
+| --- | --- |
+| the pool cannot pay for a second child | that child buys nothing and decides on its prior |
+| a child plans on a stale remainder | advised and accepted, then refused by the pool; nothing runs, nothing is retried |
+| a delegation is cancelled before it starts | no checkout is built; the budget stays for its sibling |
+| two children are given the same checkout | refused before anything is built |
+
+The children are bench episodes run one after another. Nothing here is a live
+sub-agent, and nothing is claimed about concurrent writers to a pool.
+
 **Known limit.** `propose()` has no way to be told that a probe cannot be
 obtained, so it names the same probe again and the loop stops on the best
 admissible decision. On the bench model that stop is not free: with 4 points

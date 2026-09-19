@@ -23,6 +23,12 @@ between two live hosts. Costs are settled at each reservation's own ceiling:
 the bench measures durations and fabricates no token or money cost. Every
 timestamp in a trace comes from a fixed bench clock, so that seals reproduce;
 only ``duration_ms`` is wall-clock.
+
+:func:`run_delegation` hands the same diagnosis to child episodes that reserve
+against **one** pool: a child's reservations are nested under its delegation,
+the pool refuses a starved or stale child before anything runs, and every
+child works in a checkout of its own. The children are bench episodes run one
+after another — not live sub-agents, and no claim about concurrent writers.
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Final
 
@@ -67,6 +74,7 @@ from latent_compass.lab.routing import (
     BudgetReservation,
     BudgetSettlement,
     CapabilityKind,
+    LabRoutingViolation,
     RouteVerdict,
     SettlementOutcome,
     admit_host_capability_snapshot,
@@ -537,6 +545,17 @@ def _route(
     return evaluate_route(request, capabilities, now=NOW)
 
 
+class SharedBudget:
+    """The one budget pool an episode — or several delegated ones — reserves against.
+
+    The pool stays an immutable lab contract. This only holds its latest state,
+    so that episodes run one after another against the same pool.
+    """
+
+    def __init__(self, total_budget: int) -> None:
+        self.pool = BudgetPoolState(total_budget=total_budget, reservations=(), charges=())
+
+
 def run_episode(
     root: Path,
     *,
@@ -551,12 +570,23 @@ def run_episode(
     unavailable_tools: frozenset[str] = frozenset(),
     policy: ObservationPolicy | None = None,
     route_request_overrides: dict[str, Any] | None = None,
+    budget: SharedBudget | None = None,
+    episode_id: str | None = None,
+    delegation_id: str | None = None,
+    stale_budget_view: int | None = None,
 ) -> dict[str, Any]:
     """Run one bounded episode in a fresh ``root`` and return its linked trace.
 
     ``route_request_overrides`` replaces fields of every route request, so a
     drill can present advice that is expired, computed on another source,
     addressed to another scope, or missing a required review or Semctx proof.
+
+    A delegated episode is handed the ``budget`` it shares with its siblings
+    (``total_budget`` is then ignored), an ``episode_id`` that keeps its
+    reservations apart from theirs, and the ``delegation_id`` each of them is
+    nested under. ``stale_budget_view`` is a drill: the episode plans on that
+    remainder instead of reading the pool, as a child told once what was left
+    would.
     """
     if root.exists():
         raise FileExistsError(f"refusing to reuse existing bench root: {root}")
@@ -588,9 +618,12 @@ def run_episode(
         max_bytes_per_file=64 * 1024,
     )
     binding = derive_host_lab_binding(model, snapshot, catalog, session_policy)
-    state = initial_state(model, state_id=f"bench-episode-{family.value}", binding=binding)
+    state = initial_state(
+        model, state_id=episode_id or f"bench-episode-{family.value}", binding=binding
+    )
     history: list[DiagnosisStateRevision] = [state]
-    pool = BudgetPoolState(total_budget=total_budget, reservations=(), charges=())
+    budget = budget if budget is not None else SharedBudget(total_budget)
+    prefix = "" if episode_id is None else f"{episode_id}-"
     capabilities = sorted(
         {spec.tool.tool_id for spec in catalog.probes} - set(withheld_capabilities)
     )
@@ -598,10 +631,13 @@ def run_episode(
     steps: list[dict[str, Any]] = []
 
     for index in range(len(model.probes) + 1):
+        believed_budget = (
+            stale_budget_view if stale_budget_view is not None else max(budget.pool.available(), 0)
+        )
         report = propose(
             model,
             state,
-            budget=max(pool.available(), 0),
+            budget=believed_budget,
             horizon=2,
             expected_binding=binding,
             history=None if state.revision == 0 else history,
@@ -642,7 +678,7 @@ def run_episode(
             source_digest=binding.source_scope_digest,
             capability_id=spec.tool.tool_id,
             cost_ceiling=probe.cost,
-            remaining_budget=max(pool.available(), 0),
+            remaining_budget=believed_budget,
             observed_capabilities=capabilities,
             advisor_present=advisor_present,
             kill_switch_engaged=kill_switch_engaged,
@@ -666,16 +702,24 @@ def run_episode(
             break
 
         reservation = BudgetReservation(
-            reservation_id=f"reservation-{index}-{probe_id}",
+            reservation_id=f"{prefix}reservation-{index}-{probe_id}",
+            parent_reservation_id=delegation_id,
             requested_maximum=probe.cost,
             reserved_at=NOW,
         )
-        pool = reserve_budget(pool, reservation)
+        try:
+            budget.pool = reserve_budget(budget.pool, reservation)
+        except LabRoutingViolation as exc:
+            # The pool bounds spending, not an episode's view of it: a child that
+            # planned on a stale remainder is refused before anything runs.
+            step["budget_refusal"] = exc.detail
+            steps.append(step)
+            break
         observation = executor.observe(
             spec,
             family=family,
             mode=session_policy.mode.value,
-            observation_id=f"observation-{index}-{probe_id}",
+            observation_id=f"{prefix}observation-{index}-{probe_id}",
         )
         step["execution"] = {
             "observation_seal": observation.observation_seal(),
@@ -702,14 +746,16 @@ def run_episode(
                 history=None if state.revision == 0 else history,
             )
         except ContractViolation as exc:
-            pool = _settle(pool, reservation, SettlementOutcome.FAILED)
+            budget.pool = _settle(budget.pool, reservation, SettlementOutcome.FAILED)
             step["result"] = {"refused": exc.code, "state_seal": state.state_seal()}
             steps.append(step)
             break
 
         unknown = result.outcome_id is None
-        pool = _settle(
-            pool, reservation, SettlementOutcome.FAILED if unknown else SettlementOutcome.SUCCEEDED
+        budget.pool = _settle(
+            budget.pool,
+            reservation,
+            SettlementOutcome.FAILED if unknown else SettlementOutcome.SUCCEEDED,
         )
         step["result"] = {
             "outcome_id": result.outcome_id,
@@ -748,8 +794,8 @@ def run_episode(
         "binding_source_scope_digest": binding.source_scope_digest,
         "final_state_revision": state.revision,
         "final_decision_id": final.stopping_decision_id,
-        "total_budget": total_budget,
-        "remaining_budget": pool.available(),
+        "total_budget": budget.pool.total_budget,
+        "remaining_budget": budget.pool.available(),
         # Building the throwaway repository runs git too; it is counted apart
         # so that "no probe ran" is never read as "no process ran".
         "setup_child_processes": setup.child_processes,
@@ -774,12 +820,81 @@ def _settle(
     )
 
 
+def run_delegation(
+    workspace: Path,
+    *,
+    family: AgentFamily = AgentFamily.CLAUDE,
+    total_budget: int = 3,
+    children: Sequence[str] = ("child-a", "child-b"),
+    cancelled: frozenset[str] = frozenset(),
+    stale_budget_view: int | None = None,
+) -> dict[str, Any]:
+    """Delegate the same diagnosis to child episodes that share one budget pool.
+
+    Each delegation carries its scope, what the pool still held when it was
+    made, whether it was cancelled, and its result. A child gets a checkout of
+    its own and its reservations are nested under its delegation, so the one
+    ledger says who spent what. Children run one after another: the bench makes
+    no claim about concurrent writers to a pool.
+    """
+    if len(set(children)) != len(children):
+        raise ValueError(f"each child needs a checkout of its own: {sorted(children)}")
+    budget = SharedBudget(total_budget)
+    delegations: list[dict[str, Any]] = []
+    for child in children:
+        delegation = BudgetReservation(
+            reservation_id=f"delegation-{child}", requested_maximum=0, reserved_at=NOW
+        )
+        record: dict[str, Any] = {
+            "child": child,
+            "delegation_id": delegation.reservation_id,
+            "scope": {"agent_family": family.value, "checkout": child},
+            "remaining_budget_at_delegation": budget.pool.available(),
+        }
+        budget.pool = reserve_budget(budget.pool, delegation)
+        if child in cancelled:
+            # Cancelled before it started: no checkout is built, nothing is launched.
+            outcome = SettlementOutcome.CANCELLED
+            record["episode"] = None
+        else:
+            outcome = SettlementOutcome.SUCCEEDED
+            record["episode"] = run_episode(
+                workspace / child,
+                family=family,
+                budget=budget,
+                episode_id=child,
+                delegation_id=delegation.reservation_id,
+                stale_budget_view=stale_budget_view,
+            )
+        budget.pool = _settle(budget.pool, delegation, outcome)
+        record["outcome"] = outcome.value
+        delegations.append(record)
+    return {
+        "notice": BENCH_NOTICE,
+        "non_authority_notice": LAB_NON_AUTHORITY_NOTICE,
+        "total_budget": total_budget,
+        "spent": budget.pool.spent(),
+        "remaining_budget": budget.pool.available(),
+        "delegations": delegations,
+        "budget_ledger": budget.pool.canonical_payload(),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--family", choices=["claude", "codex"], default="claude")
+    parser.add_argument(
+        "--delegate",
+        action="store_true",
+        help="run two child episodes that share one budget pool instead of one episode",
+    )
     arguments = parser.parse_args(argv)
+    family = AgentFamily(arguments.family)
     with tempfile.TemporaryDirectory(prefix="lab-host-bench-") as temporary:
-        trace = run_episode(Path(temporary) / "repository", family=AgentFamily(arguments.family))
+        if arguments.delegate:
+            trace = run_delegation(Path(temporary) / "delegation", family=family)
+        else:
+            trace = run_episode(Path(temporary) / "repository", family=family)
     json.dump(trace, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0

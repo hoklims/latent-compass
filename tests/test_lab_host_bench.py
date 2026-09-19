@@ -429,3 +429,119 @@ def test_both_families_run_the_same_loop_and_never_share_an_episode(tmp_path: Pa
     assert claude_drill.apply(claude_drill.observe("define-legacy-consumer")).outcome_id == (
         "defined-in-invoice"
     )
+
+
+# --- delegation: child agents share one global budget -----------------------------------------
+
+
+def _executed_costs(episode: dict[str, Any]) -> list[int]:
+    return [step["execution"]["planned_cost"] for step in episode["steps"] if "execution" in step]
+
+
+def test_child_agents_draw_on_one_global_budget_not_on_a_reserve_each(tmp_path: Path) -> None:
+    # Alone, 3 points buy the 2-point symbol probe. That is what each child would do with a
+    # reserve of its own — and what only the first can do once the 3 points are shared.
+    alone = bench.run_episode(tmp_path / "alone", total_budget=3)
+    assert _executed_costs(alone) == [2]
+
+    trace = bench.run_delegation(tmp_path / "shared", total_budget=3)
+    first, second = trace["delegations"]
+    assert [item["child"] for item in (first, second)] == ["child-a", "child-b"]
+    assert [item["remaining_budget_at_delegation"] for item in (first, second)] == [3, 1]
+    assert _executed_costs(first["episode"]) == [2]
+    assert first["episode"]["final_state_revision"] == 1
+
+    # The starved child buys nothing and still decides natively, on its prior alone.
+    assert _executed_costs(second["episode"]) == []
+    assert [step["advice"]["recommended_action"] for step in second["episode"]["steps"]] == ["STOP"]
+    assert second["episode"]["final_state_revision"] == 0
+    assert second["episode"]["final_decision_id"] == "hold-and-fix"
+
+    # One ledger says who spent what: each probe reservation is nested under its delegation.
+    ledger = trace["budget_ledger"]
+    assert {
+        (item["reservation_id"], item["parent_reservation_id"], item["requested_maximum"])
+        for item in ledger["reservations"]
+    } == {
+        ("delegation-child-a", None, 0),
+        ("child-a-reservation-0-define-legacy-consumer", "delegation-child-a", 2),
+        ("delegation-child-b", None, 0),
+    }
+    assert ledger["total_budget"] == 3
+    assert (trace["total_budget"], trace["spent"], trace["remaining_budget"]) == (3, 2, 1)
+
+
+def test_a_pool_that_holds_enough_serves_every_child(tmp_path: Path) -> None:
+    # The other half: a child is starved by the pool, not by being a second child.
+    trace = bench.run_delegation(tmp_path / "shared", total_budget=4)
+    assert [_executed_costs(item["episode"]) for item in trace["delegations"]] == [[2], [2]]
+    assert [item["remaining_budget_at_delegation"] for item in trace["delegations"]] == [4, 2]
+    assert (trace["spent"], trace["remaining_budget"]) == (4, 0)
+    # Two children, two checkouts: neither episode ran in the other's repository.
+    assert sorted(path.name for path in (tmp_path / "shared").iterdir()) == ["child-a", "child-b"]
+    assert [item["scope"]["checkout"] for item in trace["delegations"]] == ["child-a", "child-b"]
+
+
+def test_a_child_planning_on_a_stale_remainder_is_refused_by_the_pool_before_anything_runs(
+    tmp_path: Path,
+) -> None:
+    # Both children are told "3 points remain", as two children briefed at the same instant
+    # would be. The first spends 2. The second still plans, is advised and accepted — and the
+    # pool, not its view of the pool, refuses the reservation.
+    trace = bench.run_delegation(tmp_path / "shared", total_budget=3, stale_budget_view=3)
+    first, second = trace["delegations"]
+    assert _executed_costs(first["episode"]) == [2]
+
+    assert len(second["episode"]["steps"]) == 1, "the refused child went on"
+    (refused,) = second["episode"]["steps"]
+    assert refused["advice"]["recommended_probe_id"] == "define-legacy-consumer"
+    assert refused["routing"]["verdict"] == "ADVICE"
+    assert refused["host_decision"] == "ACCEPTED"
+    assert "execution" not in refused
+    assert refused["budget_refusal"] == {
+        "reservation_id": "child-b-reservation-0-define-legacy-consumer",
+        "requested_maximum": 2,
+        "available": 1,
+    }
+    assert second["episode"]["final_state_revision"] == 0
+    assert (trace["spent"], trace["remaining_budget"]) == (2, 1)
+    assert "child-b-reservation-0-define-legacy-consumer" not in {
+        item["reservation_id"] for item in trace["budget_ledger"]["reservations"]
+    }
+
+
+def test_a_cancelled_delegation_builds_no_checkout_and_leaves_the_budget_to_its_sibling(
+    tmp_path: Path,
+) -> None:
+    trace = bench.run_delegation(
+        tmp_path / "shared", total_budget=3, cancelled=frozenset({"child-a"})
+    )
+    cancelled, sibling = trace["delegations"]
+    assert (cancelled["outcome"], cancelled["episode"]) == ("CANCELLED", None)
+    assert not (tmp_path / "shared" / "child-a").exists()
+    assert sibling["outcome"] == "SUCCEEDED"
+    assert sibling["remaining_budget_at_delegation"] == 3
+    assert _executed_costs(sibling["episode"]) == [2]
+    assert {
+        item["reservation_id"]: (item["outcome"], item["charged_cost"])
+        for item in trace["budget_ledger"]["charges"]
+    } == {
+        "delegation-child-a": ("CANCELLED", 0),
+        "child-b-reservation-0-define-legacy-consumer": ("SUCCEEDED", 2),
+        "delegation-child-b": ("SUCCEEDED", 0),
+    }
+
+
+def test_two_children_are_never_handed_the_same_checkout(tmp_path: Path) -> None:
+    # A later lock would refuse too — a replayed reservation id — but only once the first
+    # child had already built its checkout and spent. The refusal has to come first.
+    with pytest.raises((ValueError, bench.LabRoutingViolation)) as refusal:
+        bench.run_delegation(tmp_path / "shared", children=("child-a", "child-a"))
+    assert not (tmp_path / "shared").exists(), "something was built before the refusal"
+    assert isinstance(refusal.value, ValueError)
+    assert "checkout of its own" in str(refusal.value)
+
+    # And no episode, delegated or not, reuses a checkout that already exists.
+    bench.run_delegation(tmp_path / "shared", children=("child-a",))
+    with pytest.raises(FileExistsError, match="refusing to reuse"):
+        bench.run_delegation(tmp_path / "shared", children=("child-a",))
