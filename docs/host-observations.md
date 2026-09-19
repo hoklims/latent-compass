@@ -335,7 +335,14 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   not verified on the installed CLI. The CLI's `workspace-write`
   policy lets the agent **read the whole file system** by design. What stops
   it from **writing** outside its copy is the platform's
-  sandbox: documented for Linux and macOS. **On native Windows the CLI applies
+  sandbox: documented for Linux and macOS. On the author's host it was
+  exercised before any session, under WSL2 and with CLI `0.116.0`, through the
+  CLI's own `sandbox linux --full-auto` subcommand: a write and a deletion
+  outside the working directory — in the Linux home and on a mounted Windows
+  drive — were refused, each beside the same attempt without the sandbox,
+  which succeeded; a read outside was allowed, as designed, and the network
+  was off for the sandboxed command. That exercises the mechanism on one host,
+  not a real `exec` session, which needs the key. **On native Windows the CLI applies
   no sandbox unless its configuration asks for one, and the launcher does not
   ask**: the author could not exercise the Windows sandbox, and it is not
   something to switch on blind on the owner's machine. On Windows the agent can
