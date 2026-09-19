@@ -23,19 +23,25 @@ What bounds it:
   beside it gives the allowance back. A session is written to it after its copy is ready
   and before its process starts: a crash still counts, a failed copy does not. A lock
   beside the key refuses a second run at the same time;
-* a run stops at the first session that fails — failed to start, failed turn, error exit.
-  A CLI that rejects a flag or the key would otherwise burn the allowance in seconds;
+* a run stops at the first session that fails — failed to start, failed turn, error exit —
+  and its exit code says so. A CLI that rejects a flag or the key would otherwise burn the
+  allowance in seconds;
 * fifteen minutes per session **while this script is alive**, plus at most some forty
   seconds to kill it and drain its pipes. On overrun the process tree is killed. A kill
   that does not take is printed with the process id, and so is the proof that it missed
   something: pipes still held once the tree is dead. What holds them is not awaited and
   not killed — it is recorded, and the run stops there: no session is started while
   something of the last one may still be alive. An interruption of this script — Ctrl+C
-  anywhere, Ctrl+Break on Windows, a termination signal on POSIX — kills the session
-  before it propagates. A launcher killed outright — its process terminated, which on
-  Windows is what any termination request from outside amounts to, or the power cut —
-  kills nothing: the session it started runs to its own end;
-* flags may lower both ceilings and never raise them.
+  anywhere, Ctrl+Break on Windows; on POSIX a termination signal, a quit, or the terminal
+  closing — kills the session before it propagates. A launcher killed outright — its
+  process terminated, which on Windows is what any termination request from outside
+  amounts to, or the power cut — kills nothing: the session it started runs to its own
+  end;
+* flags may lower both ceilings and never raise them. The session always gets
+  ``--sandbox workspace-write`` and ``--ephemeral``; no flag of this script changes that.
+
+It needs Python 3.12 or later: what it relies on to tell a junction from a directory does
+not exist before, and it fails loudly rather than guess.
 
 **The ledger is not a spend limit.** It guards against mistakes — not against its owner,
 who can delete it, and not against the agent this script starts, which on a platform
@@ -58,10 +64,13 @@ What isolates the key:
   reaches its end;
 * a run that died without unwinding leaves that home, and the key in it, behind. The next
   run looks for it first, deletes it, says so, and refuses once;
-* this script deletes only real directories it made. A link or a junction — under the
-  name of a home, of a session copy, or anywhere inside one — is never followed and never
-  removed: what lies behind it is not this script's, the owner's own agent home least of
-  all. It is named, and the run refuses or reports a failure;
+* this script deletes only real directories it made, and checks that the home is one
+  before it writes in it. A link or a junction — under the name of a home, of a session
+  copy, or anywhere inside one — is never followed and never removed: what lies behind it
+  is not this script's, the owner's own agent home least of all. It is named, and the run
+  refuses or reports a failure. These are checks, not locks: a name swapped for a link
+  between a check and the write or the removal it guards is not caught, and whatever does
+  that is already writing beside the key file;
 * that home's configuration pins the CLI's credential store to a file inside it, and the
   run stops unless the login really left its credentials there: a CLI that put the key
   somewhere this script cannot delete — an OS keyring — is refused before any session;
@@ -141,6 +150,11 @@ COPY_PREFIX: Final = "lc-rehearsal-copy-"
 CREDENTIALS: Final = "auth.json"
 KEY_PREFIX: Final = b"sk-"
 MAX_KEY_BYTES: Final = 512
+MAX_PROMPT_BYTES: Final = 32 * 1024
+# What asks this script to stop. Ctrl+C already unwinds; without a handler these would not —
+# a closed terminal (SIGHUP) least of all, and the session, in its own session, would not die.
+UNWOUND_SIGNALS: Final = ("SIGTERM", "SIGBREAK", "SIGHUP", "SIGQUIT")
+EXIT_STOPPED_EARLY: Final = 4
 USAGE_FIELDS: Final = (
     "input_tokens",
     "cached_input_tokens",
@@ -206,7 +220,10 @@ class SessionRecord:
 
 
 def load_tasks(path: Path) -> list[Task]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RehearsalRefusedError("the task file cannot be read as JSON") from error
     if not isinstance(raw, list) or not raw:
         raise RehearsalRefusedError("the task file holds no task")
     tasks = []
@@ -268,6 +285,8 @@ def exclusive(key_file: Path) -> Iterator[None]:
             "agent session are gone — a run that finds no lock deletes what it takes for a dead "
             "run's copy of the key, a live run's included"
         ) from error
+    except OSError as error:
+        raise RehearsalRefusedError("the lock beside the key file could not be taken") from error
     try:
         with handle:
             # For the operator only: which process to look for before removing a stale lock.
@@ -315,6 +334,12 @@ def tool_path(command: str) -> str:
 
 def child_environment(home: Path, path: str) -> dict[str, str]:
     """An allow-list: homes, temporary directories and Git's configuration inside the home."""
+    if _is_link(home) or not home.is_dir():
+        # The link policy holds for what this script writes, not only for what it deletes:
+        # behind a link under this name, ``config.toml`` would be someone else's.
+        raise RehearsalRefusedError(
+            "the isolated home is not the directory this script made: nothing is written in it"
+        )
     environment = {name: os.environ[name] for name in PASSED_THROUGH if name in os.environ}
     temporary, roaming, local = (
         home / "tmp",
@@ -508,9 +533,12 @@ def _discard(directory: Path) -> bool:
     if directory.exists():
         # A locked entry must not shelter the rest: remove what can be, entry by entry.
         _remove_what_can_be(directory)
-        with contextlib.suppress(OSError):
-            directory.rmdir()
-    return not directory.exists()
+        # Looked at again: a link that took the name meanwhile must not be removed in the
+        # directory's stead, and its removal must not pass for the directory's.
+        if not _is_link(directory):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+    return not directory.exists() and not _is_link(directory)
 
 
 def _discard_despite_interruptions(directory: Path) -> tuple[bool, bool]:
@@ -542,12 +570,19 @@ def sweep_dead_runs(key_file: Path) -> None:
             f"script did not make and will not touch: {', '.join(foreign)}. Look at it, and "
             "remove it by hand"
         )
-    stuck = [str(path) for path in leftovers if not _discard_despite_interruptions(path)[0]]
+    swept = [(path, *_discard_despite_interruptions(path)) for path in leftovers]
+    stuck = [str(path) for path, removed, _ in swept if not removed]
     outcome = f"It could NOT be deleted: {', '.join(stuck)}." if stuck else "It is deleted now."
-    raise RehearsalRefusedError(
+    said = (
         f"a run that died left a copy of the key beside the key file ({len(leftovers)} found). "
         f"{outcome} Check that no agent session is still running, then run again"
     )
+    if any(held_back for _, _, held_back in swept):
+        # The operator asked to stop while a key copy was being deleted: what the sweep
+        # found is said first, then the interruption is theirs.
+        print(f"refused: {said}", file=sys.stderr)
+        raise KeyboardInterrupt
+    raise RehearsalRefusedError(said)
 
 
 def _extract(git: str, source: Path, ref: str, into: Path) -> None:
@@ -703,6 +738,15 @@ def run_rehearsal(
             "an argument, or the temporary directory's path, holds a character a batch shim "
             "would read as a command"
         )
+    if Path(git).suffix.lower() in BATCH_SUFFIXES and any(
+        BATCH_UNSAFE.search(argument) for argument in (str(source), ref)
+    ):
+        raise RehearsalRefusedError(
+            "the source or the commit holds a character a batch shim of git would read as a command"
+        )
+    if any(len(task.prompt.encode("utf-8")) > MAX_PROMPT_BYTES for task in tasks):
+        # Writing a prompt to a CLI that does not read it has no timeout on every platform.
+        raise RehearsalRefusedError("a prompt is longer than a rehearsal task has any use for")
     command = [resolved, *codex[1:]]
     # Records that cannot be read are found now, not once the sessions have been paid for.
     read_records(out)
@@ -826,8 +870,13 @@ def run_rehearsal(
                     )
             if held_back:
                 # The operator asked to stop while the key copy was being deleted: now it is.
+                # A refusal on its way out would be lost behind the interruption: it is said.
+                pending = sys.exc_info()[1]
+                if isinstance(pending, RehearsalRefusedError):
+                    print(f"refused: {pending}", file=sys.stderr)
                 raise KeyboardInterrupt
-    return write_report(out, key_file, version, model, key_copy_removed, stopped)
+        # Under the lock still: the count it reports is this run's, not a later one's.
+        return write_report(out, key_file, version, model, key_copy_removed, stopped)
 
 
 def _unwind(_signum: int, _frame: object) -> None:
@@ -848,8 +897,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-sessions", type=int, default=APPROVED_MAX_SESSIONS)
     parser.add_argument("--session-seconds", type=int, default=APPROVED_SESSION_SECONDS)
     arguments = parser.parse_args(argv)
-    # Ctrl+C already unwinds. A termination signal and Ctrl+Break would not.
-    names = ("SIGTERM", "SIGBREAK") if threading.current_thread() is threading.main_thread() else ()
+    # Ctrl+C already unwinds. A termination signal, a closed terminal and Ctrl+Break would not.
+    names = UNWOUND_SIGNALS if threading.current_thread() is threading.main_thread() else ()
     numbers = [getattr(signal, name) for name in names if hasattr(signal, name)]
     previous = {number: signal.signal(number, _unwind) for number in numbers}
     try:
@@ -883,7 +932,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "stopped early — a session failed, or something outlived its kill: "
             "what is left of the allowance is untouched"
         )
-    return EXIT_OK if report["key_copy_removed"] else EXIT_KEY_COPY_LEFT
+    if not report["key_copy_removed"]:
+        return EXIT_KEY_COPY_LEFT
+    return EXIT_STOPPED_EARLY if report["stopped_early"] else EXIT_OK
 
 
 if __name__ == "__main__":

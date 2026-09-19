@@ -372,6 +372,24 @@ def test_a_run_holds_the_lock_while_it_lasts_and_a_refused_run_leaves_its_key_co
     assert not launcher.lock_path(rig.key_file).exists()
 
 
+def test_the_report_is_written_while_the_lock_is_still_held(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held: list[bool] = []
+    write_report = launcher.write_report
+
+    def watched(*arguments: Any, **keywords: Any) -> dict[str, Any]:
+        held.append(launcher.lock_path(rig.key_file).exists())
+        report: dict[str, Any] = write_report(*arguments, **keywords)
+        return report
+
+    monkeypatch.setattr(launcher, "write_report", watched)
+    rig.run(["look around"])
+    # The count it reports is this run's, not that of a run that took the lock meanwhile.
+    assert held == [True]
+    assert not launcher.lock_path(rig.key_file).exists()
+
+
 def _link(name: Path, target: Path) -> None:
     """A junction on Windows, which needs no privilege; a symbolic link elsewhere."""
     if sys.platform == "win32":
@@ -409,6 +427,67 @@ def test_a_link_under_the_name_of_a_home_is_named_and_never_followed(
     with pytest.raises(launcher.RehearsalRefusedError, match="did not make and will not touch"):
         rig.run(["look around"])
     assert stray.read_text(encoding="utf-8") == "not a home"
+
+
+def test_the_link_policy_holds_for_what_is_written_and_for_a_name_taken_meanwhile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owners = tmp_path / "the-owners-own-agent-home"
+    owners.mkdir()
+    settings = owners / "config.toml"
+    settings.write_text("the owner's own settings", encoding="utf-8")
+    # Writing: a home that is a link, or no directory at all, gets nothing written into it.
+    taken = tmp_path / "lc-rehearsal-home-taken"
+    _link(taken, owners)
+    for not_a_home in (taken, tmp_path / "never-made"):
+        with pytest.raises(launcher.RehearsalRefusedError, match="not the directory this script"):
+            launcher.child_environment(not_a_home, "anywhere")
+    assert settings.read_text(encoding="utf-8") == "the owner's own settings"
+    assert sorted(path.name for path in owners.iterdir()) == ["config.toml"]
+    # Deleting: a link that takes the directory's name while it is being removed is neither
+    # removed in its stead nor reported as the directory's removal.
+    discard = vars(launcher)["_discard"]
+    home = tmp_path / "lc-rehearsal-home-swapped"
+    home.mkdir()
+    (home / "auth.json").write_text(KEY, encoding="utf-8")
+
+    def moved_aside_and_replaced(directory: Path, **_keywords: Any) -> None:
+        Path(directory).rename(tmp_path / "moved-aside")
+        _link(Path(directory), owners)
+
+    monkeypatch.setattr(shutil, "rmtree", moved_aside_and_replaced)
+    assert discard(home) is False, "a link that took the name passed for the removal"
+    assert home.exists(), "the link was removed in the directory's stead"
+    assert settings.is_file()
+    # A link that leads nowhere does not "exist", and is still not the directory's removal.
+    dangling = tmp_path / "lc-rehearsal-home-dangling"
+    dangling.mkdir()
+    nowhere = tmp_path / "nowhere"
+
+    def replaced_by_a_link_to_nowhere(directory: Path, **_keywords: Any) -> None:
+        Path(directory).rmdir()
+        nowhere.mkdir()
+        _link(Path(directory), nowhere)
+        nowhere.rmdir()
+
+    monkeypatch.setattr(shutil, "rmtree", replaced_by_a_link_to_nowhere)
+    assert discard(dangling) is False, "a link to nowhere passed for the removal"
+    # Left as it was found; removed here only so that the test's own directory can be.
+    dangling.rmdir() if sys.platform == "win32" else dangling.unlink()
+
+
+def test_a_link_inside_a_directory_survives_the_real_first_pass_untouched(tmp_path: Path) -> None:
+    # No stand-in here: the first pass is the interpreter's own removal, on every normal run.
+    outside = tmp_path / "the-owners-own-agent-home"
+    outside.mkdir()
+    precious = outside / "auth.json"
+    precious.write_text("the owner's own login", encoding="utf-8")
+    copy = tmp_path / "copy"
+    (copy / "deep").mkdir(parents=True)
+    _link(copy / "deep" / "way-out", outside)
+    assert vars(launcher)["_discard"](copy) is True
+    assert not copy.exists()
+    assert precious.is_file(), "the removal went through the link and deleted what lay behind it"
 
 
 def test_a_key_copy_left_by_a_run_that_died_is_deleted_and_said_before_anything_starts(
@@ -488,7 +567,8 @@ def test_a_run_stops_at_the_first_failed_session_and_leaves_the_rest_of_the_allo
     # The command line says it to the operator.
     capsys.readouterr()
     arguments = rig.command_line(["please FAIL", "look around"], out=rig.out.with_name("cli"))
-    assert launcher.main(arguments) == launcher.EXIT_OK
+    # ...and to a calling script, with an exit code of its own.
+    assert launcher.main(arguments) == launcher.EXIT_STOPPED_EARLY
     assert "stopped early" in capsys.readouterr().out
     assert rig.launched() == 4
 
@@ -655,6 +735,39 @@ def test_a_second_interruption_does_not_stop_the_deletion_of_the_key_copy(
     assert not launcher.lock_path(rig.key_file).exists()
 
 
+def test_an_interruption_held_back_hides_neither_a_refusal_nor_what_the_sweep_found(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real = vars(launcher)["_discard"]
+    interrupted: list[Path] = []
+
+    def impatient(directory: Path) -> bool:
+        if directory.name.startswith("lc-rehearsal-home-") and directory not in interrupted:
+            interrupted.append(directory)
+            raise KeyboardInterrupt
+        return bool(real(directory))
+
+    monkeypatch.setattr(launcher, "_discard", impatient)
+    # The most important thing this script can say — where did the key go — must not vanish
+    # behind the interruption that arrives while the home is being deleted.
+    rig.key_file.write_text(KEY + "-ELSEWHERE\n", encoding="utf-8")
+    with pytest.raises(KeyboardInterrupt):
+        rig.run(["look around"])
+    assert "revoke the key" in capsys.readouterr().err
+    assert rig.key_copies() == []
+    # The same while a dead run's key copy is swept: what was found is said, then it stops.
+    dead = rig.vault / "lc-rehearsal-home-left-by-a-dead-run"
+    dead.mkdir()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            rig.run(["look around"])
+    except launcher.RehearsalRefusedError:
+        pytest.fail("the interruption held back while the sweep deleted was never given back")
+    assert "a run that died left a copy" in capsys.readouterr().err
+    assert not dead.exists()
+    assert not launcher.lock_path(rig.key_file).exists()
+
+
 def test_a_directory_is_reported_removed_only_when_it_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -752,6 +865,54 @@ def test_a_batch_shim_is_refused_when_the_shell_could_read_the_copy_path_as_a_co
         assert launcher.resolve_command(str(shim)) is None
 
 
+def test_a_batch_shim_of_git_is_held_to_the_same_rule_as_one_of_the_cli(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shim = tmp_path / "git.cmd"
+    shim.write_text("@echo off\n", encoding="utf-8")
+    resolve = launcher.resolve_command
+
+    def git_behind_a_shim(name: str) -> str | None:
+        return str(shim) if name == "git" else resolve(name)
+
+    monkeypatch.setattr(launcher, "resolve_command", git_behind_a_shim)
+    # The commit and the source are the operator's, and git is handed both as arguments.
+    with pytest.raises(launcher.RehearsalRefusedError, match="batch shim of git"):
+        rig.run(["look around"], ref="100%")
+    with pytest.raises(launcher.RehearsalRefusedError, match="batch shim of git"):
+        rig.run(["look around"], source=rig.source.with_name("a%b"))
+    assert rig.calls() == []
+    assert rig.key_copies() == []
+
+
+def test_a_prompt_too_long_to_be_written_under_a_bound_is_refused_before_anything_starts(
+    rig: Rig,
+) -> None:
+    # Writing a prompt to a CLI that never reads it has no timeout on every platform. The bound
+    # is counted in bytes, as the pipe counts them.
+    for prompt in (
+        "x" * (launcher.MAX_PROMPT_BYTES + 1),
+        "é" * (launcher.MAX_PROMPT_BYTES // 2 + 1),
+    ):
+        with pytest.raises(launcher.RehearsalRefusedError, match="prompt is longer"):
+            rig.run([prompt])
+    assert rig.calls() == []
+    assert rig.launched() == 0
+    assert rig.run(["x" * launcher.MAX_PROMPT_BYTES])["sessions_launched"] == 1
+
+
+def test_a_lock_that_cannot_be_taken_is_a_refusal_and_is_left_where_it_lies(rig: Rig) -> None:
+    lock = launcher.lock_path(rig.key_file)
+    lock.mkdir()
+    try:
+        with pytest.raises(launcher.RehearsalRefusedError, match="lock"):
+            rig.run(["look around"])
+    except OSError as error:
+        pytest.fail(f"a lock that cannot be taken surfaced as {type(error).__name__}")
+    assert rig.calls() == []
+    assert lock.is_dir()
+
+
 def test_the_agent_gets_an_isolated_home_and_none_of_the_parent_environment(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -790,6 +951,13 @@ def test_each_session_works_on_its_own_copy_and_the_source_is_only_read(rig: Rig
     assert report["records"][0]["copy_removed"] is True
     assert session["argv"][-1] == "-"
     assert session["prompt"] == "look around"
+    # The session's own flags, as the launcher passes them and no flag of its own can change:
+    # the sandbox policy is the only confinement claimed anywhere, and it is this string.
+    argv = session["argv"]
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert argv[argv.index("--color") + 1] == "never"
+    assert {"--ephemeral", "--json", "--skip-git-repo-check"} <= set(argv)
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
     after = _git(rig.source, "status", "--porcelain")
     assert before == after == b""
 
@@ -854,7 +1022,8 @@ def test_what_outlives_the_kill_is_not_awaited_and_not_passed_over_in_silence(
     report = rig.run(["please leave an ORPHAN", "look around"], session_seconds=3)
     # The orphan lives for 25 s and keeps the pipes open: the run must not wait for it.
     assert time.monotonic() - started < 15
-    (record,) = report["records"]
+    assert len(report["records"]) == 1, "a session was started beside what outlived the kill"
+    record = report["records"][0]
     assert (record["status"], record["diagnostic"]) == ("TIMED_OUT", "PIPES_HELD_AFTER_KILL")
     # Pipes still held once the tree is dead prove that the kill missed something: that is
     # said, recorded, and no other session is started while it may still be alive.
@@ -941,7 +1110,10 @@ def test_a_termination_request_unwinds_like_an_interruption(
     rig: Rig, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     unwind = vars(launcher)["_unwind"]
-    numbers = [getattr(signal, name) for name in ("SIGTERM", "SIGBREAK") if hasattr(signal, name)]
+    # A closed terminal sends SIGHUP and Ctrl+\ sends SIGQUIT: left alone, either one ends the
+    # launcher without unwinding, and the paid session outlives it with nothing left to bound it.
+    assert {"SIGTERM", "SIGBREAK", "SIGHUP", "SIGQUIT"} <= set(launcher.UNWOUND_SIGNALS)
+    numbers = [getattr(signal, name) for name in launcher.UNWOUND_SIGNALS if hasattr(signal, name)]
     before = [signal.getsignal(number) for number in numbers]
     during: list[Any] = []
 
@@ -1015,6 +1187,10 @@ def test_the_command_line_refuses_with_its_own_exit_code(
     assert ANSWER not in output.out + output.err
     assert launcher.main([*arguments, "--cli-version", "0.116.0"]) == launcher.EXIT_REFUSED
     assert "not the expected version" in capsys.readouterr().err
+    absent = str(rig.source.parent / "absent.json")
+    unreadable = [absent if item.endswith("tasks.json") else item for item in arguments]
+    assert launcher.main(unreadable) == launcher.EXIT_REFUSED
+    assert "cannot be read as JSON" in capsys.readouterr().err
     rig.key_file.unlink()
     assert launcher.main(arguments) == launcher.EXIT_REFUSED
     assert "refused" in capsys.readouterr().err
@@ -1037,6 +1213,13 @@ def test_a_malformed_task_file_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(launcher.RehearsalRefusedError, match="repeat"):
         launcher.load_tasks(path)
+    # A file that is not JSON, or is not there, is a refusal like any other, not a traceback.
+    for content in ("not json", ""):
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(launcher.RehearsalRefusedError, match="cannot be read as JSON"):
+            launcher.load_tasks(path)
+    with pytest.raises(launcher.RehearsalRefusedError, match="cannot be read as JSON"):
+        launcher.load_tasks(tmp_path / "absent.json")
 
 
 def test_the_committed_throwaway_tasks_load_and_fit_the_allowance() -> None:

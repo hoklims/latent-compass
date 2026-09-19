@@ -254,10 +254,13 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   its copy is ready and before its process starts: a crash still counts, a copy
   that could not be made does not. A run stops at the first session that fails
   — failed to start, failed turn, error exit: a CLI that rejects a flag or the
-  key would otherwise burn the allowance in seconds. Flags lower both ceilings
-  and never raise them. A mistyped commit, a refused key, or an output
-  directory whose records cannot be read is refused before it can cost a
-  session.
+  key would otherwise burn the allowance in seconds. A run that stopped early
+  says so in the command line's exit code (`4`). Flags lower both ceilings and
+  never raise them. A mistyped commit, a refused key, a task file that cannot
+  be read, a prompt too long to be written under a bound, an argument that a
+  batch shim — the CLI's or Git's — would hand back to the shell as a command,
+  or an output directory whose records cannot be read is refused before it can
+  cost a session.
 - **Fifteen minutes per session, while the launcher is alive** — plus at most
   some forty seconds to kill it and drain its pipes. On overrun the process
   tree is killed. A kill that does not take is printed with the process id,
@@ -265,8 +268,9 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   is dead. What holds them is not awaited and not killed — it is recorded, and
   the run stops there: no session is started while something of the last one
   may still be alive. An interruption of the launcher — Ctrl+C anywhere,
-  Ctrl+Break on Windows, a termination signal on POSIX — kills the session
-  before it propagates. A launcher killed outright — its process terminated,
+  Ctrl+Break on Windows; on POSIX a termination signal, a quit (`SIGQUIT`), or
+  the terminal closing (`SIGHUP`) — kills the session before it propagates. A
+  launcher killed outright — its process terminated,
   which on Windows is what any termination request from outside amounts to, or
   the power cut — kills nothing: the session it started runs to its own end.
   The durable fix on Windows, a job object that dies with the launcher, is not
@@ -303,20 +307,27 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   refuses once. If the home cannot be deleted, do not read what else it holds:
   the CLI is asked not to persist session files (`--ephemeral`), and that is a
   request, not something the launcher checks.
-- **The launcher deletes only real directories it made.** A link or a junction
-  — under the name of a home, of a session copy, or anywhere inside one — is
-  never followed and never removed: what lies behind it is not the launcher's,
-  the owner's own agent home least of all. It is named, and the run refuses or
-  reports a failure.
+- **The launcher deletes only real directories it made, and checks that the
+  home is one before it writes in it.** A link or a junction — under the name
+  of a home, of a session copy, or anywhere inside one — is never followed and
+  never removed: what lies behind it is not the launcher's, the owner's own
+  agent home least of all. It is named, and the run refuses or reports a
+  failure. These are checks, not locks: a name swapped for a link between a
+  check and the write or the removal it guards is not caught, and whatever
+  does that is already writing beside the key file. The launcher needs Python
+  3.12 or later: what tells a junction from a directory does not exist before,
+  and it fails loudly rather than guess.
 - **The agent inherits almost nothing — and that is not a jail.** An
   allow-listed environment: every home and temporary directory and Git's global
   configuration inside the isolated home, Git's system configuration and
   credential prompts off, a `PATH` rebuilt from the few tools it needs; its own
   copy of one commit, extracted from Git objects; the source repository only
   read. The launcher never reads, copies or writes the owner's own agent home
-  or login — **the agent it starts is another matter**. The CLI's
-  `workspace-write` policy lets the agent **read the whole file system** by
-  design. What stops it from **writing** outside its copy is the platform's
+  or login — **the agent it starts is another matter**. Every session is
+  started with `--sandbox workspace-write` and `--ephemeral`: no flag of the
+  launcher changes that, and a test holds both. The CLI's `workspace-write`
+  policy lets the agent **read the whole file system** by design. What stops
+  it from **writing** outside its copy is the platform's
   sandbox: documented for Linux and macOS. **On native Windows the CLI applies
   no sandbox unless its configuration asks for one, and the launcher does not
   ask**: the author could not exercise the Windows sandbox, and it is not
@@ -330,7 +341,7 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   is one of them until the login is done, and Python does not erase it from
   memory.
 
-Three independent security reviews preceded any real run, each by a fresh
+Four independent security reviews preceded any real run, each by a fresh
 reviewer, and each returned "fix before the first real run". The first found
 five serious defects, all on error paths (a killed session awaited without a
 bound, an interruption that left the session running, a removal reported
@@ -342,10 +353,21 @@ two more, **one of them introduced by the correction of the second**: the
 sweep of a dead run's key copy would delete *through* a junction planted under
 that name — the owner's own login, on the platform where the agent can write
 anywhere — and the branch that proves a kill missed something said nothing.
-Each review also found lesser defects. This version closes what code can
-close. **It has not been reviewed a fourth time. What an agent can do on
-native Windows is not a defect a commit can close: it is a condition of the
-first real run, for the owner to decide.**
+The fourth found no serious defect and four lesser ones it still wanted closed
+first: on POSIX a closed terminal or a quit ended the launcher without
+unwinding, against what this page claimed, and left a paid session with
+nothing to bound it; a removal could report as removed a name that a link had
+taken meanwhile; the link policy held for what the launcher deletes and not
+for what it writes; and no test held the sandbox flag a session is started
+with. Each review also found lesser defects. This version closes what code can
+close. **The corrections of the fourth review have not themselves been re-read
+at this commit**, and every round of corrections so far has introduced or left
+a defect — the third review's first finding is the proof. The fourth reviewer
+named its conditions for a first run once they are closed: the CLI version
+pinned, a single session first, an output directory outside the repository,
+the provider's hard limit checked to be active, the key revoked at the end.
+**What an agent can do on native Windows is not a defect a commit can close:
+it is a condition of the first real run, for the owner to decide.**
 
 `examples/lab-rehearsal-tasks.json` holds six throwaway tasks on this
 repository. They were written by the author, belong to no population and are
