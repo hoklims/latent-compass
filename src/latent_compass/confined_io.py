@@ -11,6 +11,7 @@ import ctypes
 import errno
 import os
 import secrets
+import stat
 import sys
 from contextlib import suppress
 from pathlib import Path
@@ -81,14 +82,14 @@ def plan_confined_target(root: Path, target: Path, *, what: str) -> Path:
         common = Path(os.path.commonpath((absolute_root, absolute_target)))
     except ValueError as exc:
         raise ContractViolation(
-            f"{what} must be written inside the root named on the command line",
+            f"{what} must be located inside the root named on the command line",
             detail={"what": what, "root": str(absolute_root), "requested": str(absolute_target)},
         ) from exc
     if os.path.normcase(common) != os.path.normcase(absolute_root) or os.path.normcase(
         absolute_target
     ) == os.path.normcase(absolute_root):
         raise ContractViolation(
-            f"{what} must be written inside the root named on the command line",
+            f"{what} must be located inside the root named on the command line",
             detail={"what": what, "root": str(absolute_root), "requested": str(absolute_target)},
         )
     return absolute_target
@@ -104,6 +105,58 @@ def write_new_file(root: Path, target: Path, data: bytes, *, what: str) -> Path:
     else:
         _write_posix(absolute_root, relative, data, what=what)
     return absolute_target
+
+
+#: Hard ceiling on a single read syscall, independent of any caller-supplied
+#: byte budget. Bounds peak memory for one chunk regardless of file size.
+_READ_CHUNK_BYTES: Final = 1 << 20
+
+
+def _require_positive_read_limit(value: object, *, what: str) -> int:
+    """Validate a caller-supplied byte limit whose static type may lie.
+
+    Accepting ``object`` (rather than trusting the public ``int`` annotation)
+    is what keeps the ``isinstance`` checks meaningful instead of tautological
+    under strict type-checking, while still refusing at runtime whatever a
+    caller who ignores the annotation actually passes.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ContractViolation(
+            f"{what} read limit must be a positive number of bytes",
+            detail={"what": what, "max_bytes": repr(value)},
+        )
+    return value
+
+
+def read_confined_file(root: Path, target: Path, *, max_bytes: int, what: str) -> bytes:
+    """Read at most ``max_bytes`` from an existing confined regular file.
+
+    Mirrors :func:`write_new_file`'s non-following, handle-relative
+    containment: every directory component between the root and the target is
+    opened without following symlinks or Windows reparse points, and the final
+    component must open as an existing regular file, opened without following
+    a symlink or reparse point either. A file larger than ``max_bytes`` is
+    refused outright rather than silently truncated. Never creates a directory
+    or a file.
+
+    Every read is bound to the opened handle's own size and modification time,
+    checked immediately before and after the read: a file observably grown,
+    shrunk or modified in place during the read is refused rather than
+    silently returned. This cannot detect a path-level replacement that
+    leaves the already-open handle's underlying file untouched (ordinary
+    rename/unlink semantics on both platforms), and it does not make several
+    separate reads atomic with each other; it only proves that *this* read's
+    own bytes were not observably disturbed while they were being read.
+    """
+    checked_max_bytes = _require_positive_read_limit(max_bytes, what=what)
+    absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
+    absolute_target = plan_confined_target(absolute_root, target, what=what)
+    relative = Path(os.path.relpath(absolute_target, absolute_root))
+    if sys.platform == "win32":
+        data = _read_windows(absolute_root, relative, max_bytes=checked_max_bytes, what=what)
+    else:
+        data = _read_posix(absolute_root, relative, max_bytes=checked_max_bytes, what=what)
+    return data
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -145,6 +198,118 @@ def _open_or_create_directory_posix(
                 detail={"what": what, "path": str(path)},
             ) from exc
         raise
+
+
+def _open_directory_posix_readonly(
+    parent: int,
+    component: str,
+    path: Path,
+    *,
+    what: str,
+    directory_flags: int,
+) -> int:
+    try:
+        return os.open(component, directory_flags, dir_fd=parent)
+    except FileNotFoundError as exc:
+        raise ContractViolation(
+            f"{what} does not exist",
+            detail={"what": what, "path": str(path)},
+        ) from exc
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ContractViolation(
+                f"{what} traverses a symbolic link or a non-directory component; refusing the read",
+                detail={"what": what, "path": str(path)},
+            ) from exc
+        raise
+
+
+def _read_posix(root: Path, relative: Path, *, max_bytes: int, what: str) -> bytes:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # ``O_NONBLOCK`` is what stops opening a FIFO with no writer from hanging;
+    # it has no effect on a regular file open.
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptors: list[int] = []
+    file_descriptor: int | None = None
+    final_path = root / relative
+    try:
+        anchor = Path(root.anchor)
+        current = os.open(anchor, directory_flags)
+        descriptors.append(current)
+        traversed = anchor
+        directory_components = (*root.parts[1:], *relative.parts[:-1])
+        for component in directory_components:
+            traversed /= component
+            child = _open_directory_posix_readonly(
+                current,
+                component,
+                traversed,
+                what=what,
+                directory_flags=directory_flags,
+            )
+            descriptors.append(child)
+            current = child
+
+        final_name = relative.name
+        try:
+            file_descriptor = os.open(final_name, file_flags, dir_fd=current)
+        except FileNotFoundError as exc:
+            raise ContractViolation(
+                f"{what} does not exist",
+                detail={"what": what, "path": str(final_path)},
+            ) from exc
+        status = os.fstat(file_descriptor)
+        if not stat.S_ISREG(status.st_mode):
+            raise ContractViolation(
+                f"{what} is not a regular file; refusing the read",
+                detail={"what": what, "path": str(final_path)},
+            )
+        if status.st_size > max_bytes:
+            raise ContractViolation(
+                f"{what} exceeds the declared byte limit",
+                detail={
+                    "what": what,
+                    "path": str(final_path),
+                    "size": status.st_size,
+                    "limit": max_bytes,
+                },
+            )
+        declared_size = status.st_size
+        remaining = declared_size
+        chunks: list[bytes] = []
+        while remaining > 0:
+            chunk = os.read(file_descriptor, min(remaining, _READ_CHUNK_BYTES))
+            if not chunk:
+                raise ContractViolation(
+                    f"{what} ended before its declared length; refusing the read",
+                    detail={
+                        "what": what,
+                        "path": str(final_path),
+                        "declared_size": declared_size,
+                        "bytes_read": declared_size - remaining,
+                    },
+                )
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(file_descriptor)
+        if after.st_size != declared_size or after.st_mtime_ns != status.st_mtime_ns:
+            raise ContractViolation(
+                f"{what} was modified while being read; refusing the read",
+                detail={"what": what, "path": str(final_path)},
+            )
+        return b"".join(chunks)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ContractViolation(
+                f"{what} traverses a symbolic link; refusing the read",
+                detail={"what": what, "path": str(final_path)},
+            ) from exc
+        raise
+    finally:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _write_posix(root: Path, relative: Path, data: bytes, *, what: str) -> None:
@@ -239,6 +404,8 @@ if sys.platform == "win32":
         _FILE_LIST_DIRECTORY | _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
     )
     _FILE_ACCESS = _FILE_WRITE_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE
+    _FILE_READ_DATA = 0x0001
+    _FILE_READ_ACCESS = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
     # Denying FILE_SHARE_DELETE pins every opened directory in the namespace
     # until publication completes. An attacker cannot rename a parent out of
     # the confined root after we have validated and opened it.
@@ -284,6 +451,24 @@ if sys.platform == "win32":
     class _FileDispositionInformation(ctypes.Structure):
         _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
 
+    class _FileStandardInfo(ctypes.Structure):
+        _fields_ = [
+            ("AllocationSize", ctypes.c_longlong),
+            ("EndOfFile", ctypes.c_longlong),
+            ("NumberOfLinks", wintypes.ULONG),
+            ("DeletePending", wintypes.BOOLEAN),
+            ("Directory", wintypes.BOOLEAN),
+        ]
+
+    class _FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        ]
+
     _kernel32.CreateFileW.restype = wintypes.HANDLE
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -304,6 +489,13 @@ if sys.platform == "win32":
     _kernel32.WriteFile.argtypes = [
         wintypes.HANDLE,
         wintypes.LPCVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    ]
+    _kernel32.ReadFile.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
         wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
         wintypes.LPVOID,
@@ -353,7 +545,7 @@ if sys.platform == "win32":
             raise OSError(error, ctypes.FormatError(error), str(path))
         if info.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
             raise ContractViolation(
-                f"{what} traverses a Windows reparse point; refusing the write",
+                f"{what} traverses a Windows reparse point; refusing the operation",
                 detail={"what": what, "path": str(path)},
             )
 
@@ -518,6 +710,151 @@ if sys.platform == "win32":
         )
         if status < 0:
             _raise_windows_error(status, path)
+
+    def _open_directory_windows_readonly(parent: int, name: str, path: Path, *, what: str) -> int:
+        try:
+            handle = _nt_create_relative(
+                parent,
+                name,
+                access=_DIRECTORY_TRAVERSE_ACCESS,
+                disposition=_FILE_OPEN,
+                options=_FILE_DIRECTORY_FILE,
+                path=path,
+            )
+        except FileNotFoundError as exc:
+            raise ContractViolation(
+                f"{what} does not exist",
+                detail={"what": what, "path": str(path)},
+            ) from exc
+        except OSError as exc:
+            raise ContractViolation(
+                f"{what} contains a directory component that cannot be opened safely",
+                detail={"what": what, "path": str(path)},
+            ) from exc
+        try:
+            _reject_reparse(handle, path, what=what)
+        except BaseException:
+            _kernel32.CloseHandle(handle)
+            raise
+        return handle
+
+    def _open_file_windows_readonly(parent: int, name: str, path: Path, *, what: str) -> int:
+        try:
+            handle = _nt_create_relative(
+                parent,
+                name,
+                access=_FILE_READ_ACCESS,
+                disposition=_FILE_OPEN,
+                # FILE_NON_DIRECTORY_FILE is what makes NtCreateFile refuse a
+                # directory here instead of silently handing back a handle to it.
+                options=_FILE_NON_DIRECTORY_FILE,
+                path=path,
+            )
+        except FileNotFoundError as exc:
+            raise ContractViolation(
+                f"{what} does not exist",
+                detail={"what": what, "path": str(path)},
+            ) from exc
+        except OSError as exc:
+            raise ContractViolation(
+                f"{what} cannot be opened as a regular file",
+                detail={"what": what, "path": str(path)},
+            ) from exc
+        try:
+            _reject_reparse(handle, path, what=what)
+        except BaseException:
+            _kernel32.CloseHandle(handle)
+            raise
+        return handle
+
+    def _file_size_windows(handle: int, path: Path) -> int:
+        info = _FileStandardInfo()
+        if not _kernel32.GetFileInformationByHandleEx(
+            handle, 1, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        if info.EndOfFile < 0:
+            raise OSError(f"negative file size reported for {path}")
+        return int(info.EndOfFile)
+
+    def _file_last_write_time_windows(handle: int, path: Path) -> int:
+        info = _FileBasicInfo()
+        if not _kernel32.GetFileInformationByHandleEx(
+            handle, 0, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        return int(info.LastWriteTime)
+
+    def _read_all_windows(handle: int, size: int, path: Path, *, what: str) -> bytes:
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining > 0:
+            chunk_size = min(remaining, _READ_CHUNK_BYTES)
+            buffer = ctypes.create_string_buffer(chunk_size)
+            read_count = wintypes.DWORD()
+            if not _kernel32.ReadFile(handle, buffer, chunk_size, ctypes.byref(read_count), None):
+                error = ctypes.get_last_error()
+                raise OSError(error, ctypes.FormatError(error), str(path))
+            count = read_count.value
+            if count == 0:
+                raise ContractViolation(
+                    f"{what} ended before its declared length; refusing the read",
+                    detail={
+                        "what": what,
+                        "path": str(path),
+                        "declared_size": size,
+                        "bytes_read": size - remaining,
+                    },
+                )
+            chunks.append(buffer.raw[:count])
+            remaining -= count
+        return b"".join(chunks)
+
+    def _read_windows(root: Path, relative: Path, *, max_bytes: int, what: str) -> bytes:
+        handles: list[int] = []
+        file_handle: int | None = None
+        final_path = root / relative
+        try:
+            anchor = Path(root.anchor)
+            current = _open_windows_anchor(anchor, what=what)
+            handles.append(current)
+            traversed = anchor
+            directory_components = (*root.parts[1:], *relative.parts[:-1])
+            for component in directory_components:
+                traversed /= component
+                current = _open_directory_windows_readonly(current, component, traversed, what=what)
+                handles.append(current)
+            file_handle = _open_file_windows_readonly(current, relative.name, final_path, what=what)
+            size = _file_size_windows(file_handle, final_path)
+            if size > max_bytes:
+                raise ContractViolation(
+                    f"{what} exceeds the declared byte limit",
+                    detail={
+                        "what": what,
+                        "path": str(final_path),
+                        "size": size,
+                        "limit": max_bytes,
+                    },
+                )
+            write_time_before = _file_last_write_time_windows(file_handle, final_path)
+            data = _read_all_windows(file_handle, size, final_path, what=what)
+            write_time_after = _file_last_write_time_windows(file_handle, final_path)
+            if (
+                write_time_after != write_time_before
+                or _file_size_windows(file_handle, final_path) != size
+            ):
+                raise ContractViolation(
+                    f"{what} was modified while being read; refusing the read",
+                    detail={"what": what, "path": str(final_path)},
+                )
+            return data
+        finally:
+            if file_handle is not None:
+                _kernel32.CloseHandle(file_handle)
+            for handle in reversed(handles):
+                _kernel32.CloseHandle(handle)
 
     def _write_windows(root: Path, relative: Path, data: bytes, *, what: str) -> None:
         handles: list[int] = []

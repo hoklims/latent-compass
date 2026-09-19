@@ -1,0 +1,61 @@
+{
+  "contract_version": "1.0.0",
+  "model_id": "scenario-known-identifier",
+  "worlds": [
+    { "id": "defined-in-module-a", "weight": 2 },
+    { "id": "defined-in-module-b", "weight": 1 },
+    { "id": "none-of-the-above", "weight": 1 }
+  ],
+  "probes": [
+    {
+      "id": "literal-search-identifier",
+      "cost": 1,
+      "outcome_space": ["hit-module-a", "hit-module-b", "no-hit"],
+      "outcomes": {
+        "defined-in-module-a": "hit-module-a",
+        "defined-in-module-b": "hit-module-b",
+        "none-of-the-above": "no-hit"
+      }
+    },
+    {
+      "id": "symbol-definition-lookup",
+      "cost": 2,
+      "outcome_space": ["defined-in-a", "defined-in-b", "undefined"],
+      "outcomes": {
+        "defined-in-module-a": "defined-in-a",
+        "defined-in-module-b": "defined-in-b",
+        "none-of-the-above": "undefined"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "edit-module-a",
+      "losses": {
+        "defined-in-module-a": 0,
+        "defined-in-module-b": 10,
+        "none-of-the-above": 10
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "edit-module-b",
+      "losses": {
+        "defined-in-module-a": 10,
+        "defined-in-module-b": 0,
+        "none-of-the-above": 10
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "abstain",
+      "losses": {
+        "defined-in-module-a": 4,
+        "defined-in-module-b": 4,
+        "none-of-the-above": 4
+      },
+      "required_evidence": []
+    }
+  ],
+  "abstain_decision_id": "abstain"
+}

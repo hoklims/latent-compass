@@ -1,0 +1,61 @@
+{
+  "contract_version": "1.0.0",
+  "model_id": "scenario-indirect-dependency",
+  "worlds": [
+    { "id": "no-dependent", "weight": 2 },
+    { "id": "direct-dependent-only", "weight": 1 },
+    { "id": "indirect-dependent-via-registry", "weight": 1 }
+  ],
+  "probes": [
+    {
+      "id": "find-direct-references",
+      "cost": 2,
+      "outcome_space": ["reference-found", "no-reference"],
+      "outcomes": {
+        "no-dependent": "no-reference",
+        "direct-dependent-only": "reference-found",
+        "indirect-dependent-via-registry": "no-reference"
+      }
+    },
+    {
+      "id": "literal-search-registry-key",
+      "cost": 1,
+      "outcome_space": ["key-present", "key-absent"],
+      "outcomes": {
+        "no-dependent": "key-absent",
+        "direct-dependent-only": "key-absent",
+        "indirect-dependent-via-registry": "key-present"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "change-in-place",
+      "losses": {
+        "no-dependent": 0,
+        "direct-dependent-only": 8,
+        "indirect-dependent-via-registry": 40
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "change-with-adapter",
+      "losses": {
+        "no-dependent": 6,
+        "direct-dependent-only": 6,
+        "indirect-dependent-via-registry": 6
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "abstain",
+      "losses": {
+        "no-dependent": 7,
+        "direct-dependent-only": 7,
+        "indirect-dependent-via-registry": 7
+      },
+      "required_evidence": []
+    }
+  ],
+  "abstain_decision_id": "abstain"
+}
