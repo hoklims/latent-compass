@@ -91,13 +91,14 @@ RECORDED = {
             "results by stratum, with uncertainties and the cases that regress, are published "
             "whatever the outcome"
         ),
-        "Rehearsal outside the protocol": (
-            "six real sessions of at most fifteen minutes on a throwaway copy, outside the "
-            "protocol and excluded from the population; only duration and cost are recorded, "
-            "never an outcome; paid through a dedicated key under a 25 USD hard limit"
-        ),
     }.items()
 }
+RECORDED["Rehearsal outside the protocol"] = (
+    "**supersedes the 2026-09-19 rehearsal decision: no rehearsal or trial creates an "
+    "additional model or API call; cost and latency are observed only from ordinary harness "
+    "runs already undertaken for real work, in shadow mode, or remain unknown** — 2026-09-20, "
+    "repository owner"
+)
 # A record holds the value, its date and who took it. Only the repository owner decides.
 RECORD = re.compile(
     r"\*\*[^*|]+\*\* — \d{4}-\d{2}-\d{2}, repository owner(, on the author's proposal)?"

@@ -414,3 +414,77 @@ def test_invalid_cli_binding_is_a_structured_refusal() -> None:
     assert code == EXIT_REFUSED
     assert out is None
     assert error["error"] == "contract_violation"
+
+
+def test_route_advice_is_a_local_json_in_json_out_harness_surface(tmp_path: Path) -> None:
+    digest = "sha256:" + "a" * 64
+    request = tmp_path / "route-request.json"
+    capabilities = tmp_path / "capabilities.json"
+    request.write_text(
+        json.dumps(
+            {
+                "contract_version": "1.0.0",
+                "request_digest": digest,
+                "model_digest": digest,
+                "state_digest": digest,
+                "source_digest": digest,
+                "host_id": "harness-host",
+                "agent_family": "codex",
+                "scope": "local-worktree",
+                "candidate_capability_id": "literal-search",
+                "candidate_kind": "TOOL",
+                "requested_at": "2026-09-20T00:00:00Z",
+                "expiry": "2026-09-20T00:10:00Z",
+                "cost_ceiling": 1,
+                "remaining_budget": 1,
+                "advisor_present": True,
+                "kill_switch_engaged": False,
+                "review_required": False,
+                "review_satisfied": False,
+                "semctx_proof_required": False,
+                "semctx_proof_satisfied": False,
+                "explicit_missing_authority": False,
+                "explicit_missing_precondition": False,
+                "fallback_observation_id": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+    capabilities.write_text(
+        json.dumps(
+            {
+                "contract_version": "1.0.0",
+                "host_id": "harness-host",
+                "agent_family": "codex",
+                "scope": "local-worktree",
+                "current_source_digest": digest,
+                "snapshot_taken_at": "2026-09-20T00:00:00Z",
+                "observed_capabilities": [
+                    {
+                        "capability_id": "literal-search",
+                        "kind": "TOOL",
+                        "observed_at": "2026-09-20T00:00:00Z",
+                        "expires_at": "2026-09-20T00:10:00Z",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code, out, error = run(
+        "route-advice",
+        "--request",
+        str(request),
+        "--capabilities",
+        str(capabilities),
+        "--now",
+        "2026-09-20T00:05:00Z",
+    )
+
+    assert code == EXIT_OK
+    assert error is None
+    assert out["verdict"] == "ADVICE"
+    assert out["matched_capability_id"] == "literal-search"
+    assert out["execution_authority"] is False
+    assert out["empirical_claim"] is False

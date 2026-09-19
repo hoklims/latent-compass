@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ import pytest
 
 from latent_compass import __version__
 from latent_compass.episode import AgentFamily
+from latent_compass.lab.cli import EXIT_OK
+from latent_compass.lab.cli import main as lab_cli_main
 from latent_compass.lab.errors import (
     LabCrossModelStateError,
     LabRepeatedProbeError,
@@ -261,6 +264,80 @@ def dependency_session(
         ["caller.py", "core.py", "registry.py"],
         **options,
     )
+
+
+def run_lab_cli(*argv: str) -> tuple[int, Any, Any]:
+    out, err = StringIO(), StringIO()
+    code = lab_cli_main(list(argv), stdout=out, stderr=err)
+    return code, json.loads(out.getvalue() or "null"), json.loads(err.getvalue() or "null")
+
+
+def write_payload(path: Path, payload: object) -> Path:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_the_harness_cli_initializes_and_advances_a_bound_host_session(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    session = dependency_session(root, caller=CALLER_DIRECT)
+    model_path = write_payload(tmp_path / "model.json", session.model.canonical_payload())
+    snapshot_path = write_payload(tmp_path / "snapshot.json", session.snapshot.canonical_payload())
+    catalog_path = write_payload(tmp_path / "catalog.json", session.catalog.canonical_payload())
+    policy_path = write_payload(tmp_path / "policy.json", session.policy.canonical_payload())
+
+    code, state, error = run_lab_cli(
+        "init-host-state",
+        "--model",
+        str(model_path),
+        "--snapshot",
+        str(snapshot_path),
+        "--catalog",
+        str(catalog_path),
+        "--policy",
+        str(policy_path),
+        "--state-id",
+        "episode-one",
+    )
+    assert code == EXIT_OK, error
+    assert error is None
+    assert state == session.state.canonical_payload()
+
+    state_path = write_payload(tmp_path / "state.json", state)
+    observation_path = write_payload(
+        tmp_path / "observation.json", found_in_caller().canonical_payload()
+    )
+    code, result, error = run_lab_cli(
+        "apply-host-observation",
+        "--root",
+        str(root),
+        "--model",
+        str(model_path),
+        "--snapshot",
+        str(snapshot_path),
+        "--catalog",
+        str(catalog_path),
+        "--policy",
+        str(policy_path),
+        "--state",
+        str(state_path),
+        "--observation",
+        str(observation_path),
+        "--expected-host-id",
+        HOST_ID,
+        "--expected-agent-family",
+        "claude",
+        "--expected-root-id",
+        ROOT_ID,
+        "--verified-at",
+        VERIFIED_AT,
+    )
+    assert code == EXIT_OK
+    assert error is None
+    assert result["outcome_id"] == "reference-found"
+    assert result["unknown_reason"] is None
+    assert result["state"]["revision"] == 1
+    assert result["verification"]["conclusiveness"] == "FULL"
 
 
 # --- the whole loop -----------------------------------------------------------------

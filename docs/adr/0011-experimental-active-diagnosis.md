@@ -206,3 +206,24 @@ kept, by their classification alone: joining a pilot removes the scope lock.
 Every other personal repository stays unassessed, the professional environment
 and the vault stay excluded, and the workstation-wide CCC machinery stays
 outside any pilot. Nothing was activated, disabled, deleted or measured.
+
+## Amendment 2026-09-20 — local harness integration without model calls (HOK-803/804)
+
+The decision above is unchanged. On 2026-09-20 the repository owner replaced
+the planned paid rehearsal with a stricter constraint: finishing and integrating
+the candidate must not create additional model or API calls.
+
+The lab CLI therefore exposes three existing pure boundaries to a host harness:
+derive a host-bound revision-zero state, verify and apply one host observation,
+and evaluate one declared route against one declared capability snapshot. Each
+command reads bounded JSON files, computes, emits JSON and stops. None launches
+a model, tool or subprocess; opens a network connection; mutates a hook, store
+or provider; dispatches an agent; or accepts an authority bit. The host still
+executes observations and decides whether to follow `ADVICE`.
+
+Ordinary harness runs may feed this surface in shadow mode without duplicating
+the underlying work. Their cost and latency may be observed as operational
+telemetry, but they are not automatically HOK-804 trials and cannot support an
+index-retirement verdict. If comparative bounds cannot be obtained without new
+calls, they remain unknown; the software does not invent them to complete the
+preregistration.

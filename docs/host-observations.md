@@ -115,6 +115,42 @@ episode**, as is a changed question, a widened coverage or a relaxed policy.
 A result in paths that answer differently is a world the model does not
 declare. It is refused, never resolved by picking one.
 
+## Local harness surface
+
+The package exposes the composition points a host harness needs through
+`python -m latent_compass.lab`. They are JSON-file-in, JSON-out commands and
+perform no network request, model call, tool execution or host mutation:
+
+```text
+python -m latent_compass.lab init-host-state \
+  --model model.json --snapshot snapshot.json --catalog catalog.json \
+  --policy policy.json --state-id episode-one
+
+python -m latent_compass.lab apply-host-observation \
+  --root <observed checkout> --model model.json --snapshot snapshot.json \
+  --catalog catalog.json --policy policy.json --state state.json \
+  --observation observation.json --expected-host-id <declared host label> \
+  --expected-agent-family codex --expected-root-id <declared root label> \
+  --verified-at 2026-09-20T00:00:00Z
+
+python -m latent_compass.lab route-advice \
+  --request route-request.json --capabilities capabilities.json \
+  --now 2026-09-20T00:00:00Z
+```
+
+`init-host-state` derives the source-scope digest from the sealed model,
+snapshot, catalog, tool identities and policy; a harness does not invent that
+digest. `apply-host-observation` emits the updated state, the mapped outcome or
+typed `UNKNOWN`, and the lab's verification record. `route-advice` emits the
+existing sealed `ADVICE`, `ABSTAIN` or `ESCALATE` document. The harness remains
+the router and executor, and may ignore the advice.
+
+This surface is suitable for shadow integration into ordinary local harness
+runs. Shadow integration does not create an extra model call and does not turn
+normal work into an HOK-804 trial. It establishes contract compatibility only;
+it does not establish comparative quality, cost, latency or retirement
+readiness.
+
 ## The isolated bench (HOK-803)
 
 `examples/lab_host_bench.py` runs the whole loop — advice, routing, host
@@ -219,12 +255,14 @@ sessions remains open.
 ## The rehearsal launcher (HOK-804)
 
 `examples/lab_rehearsal_launcher.py` is the one script here that contacts a
-real agent. The repository owner authorised a rehearsal **outside the
-protocol** (`docs/active-diagnosis-preregistration.md`, "Rehearsal outside the
-protocol"): six real `codex exec` sessions of at most fifteen minutes on a
-throwaway copy, to size the cost and latency ranges, the spend ceiling and the
-pair count, which cannot be chosen blind. It is not a trial runner and emits no
-`LabTrial`.
+real agent. It is retained as a tested historical artefact, but **must not be
+run under the current project decision**. On 2026-09-20 the repository owner
+superseded the earlier rehearsal authorisation: neither a rehearsal nor a trial
+may create an additional model or API call. Cost and latency may be observed
+only from ordinary work already being performed through a harness, in shadow
+mode, or remain unknown. The launcher is not a trial runner and emits no
+`LabTrial`; the command and safeguards below document the dormant artefact,
+not an authorised next action.
 
 ```text
 python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated key> \

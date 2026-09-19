@@ -1,7 +1,8 @@
 """``python -m latent_compass.lab`` — the isolated active-diagnosis lab CLI.
 
-Five verbs, all read-validate-compute-emit: ``limits``, ``validate-model``,
-``init-state``, ``propose`` and ``apply-observation``. There is no verb that
+Eight verbs, all read-validate-compute-emit: ``limits``, ``validate-model``,
+``init-state``, ``init-host-state``, ``propose``, ``apply-observation``,
+``apply-host-observation`` and ``route-advice``. There is no verb that
 executes, promotes, dispatches or reaches any external system — every command
 either validates a payload, computes a value from one, or refuses. This CLI is
 deliberately **not** wired into ``latent-compass``'s own command line; nothing
@@ -28,6 +29,7 @@ from typing import Final, TextIO
 from pydantic import ValidationError
 
 from latent_compass.confined_io import read_confined_file
+from latent_compass.contracts import validate_contract
 from latent_compass.episode import AgentFamily
 from latent_compass.errors import ContractViolation, LatentCompassError
 from latent_compass.lab.contracts import (
@@ -36,8 +38,23 @@ from latent_compass.lab.contracts import (
     MAX_STATE_REVISION,
     lab_limits,
 )
+from latent_compass.lab.host_observations import (
+    admit_host_observation,
+    admit_observation_policy,
+)
+from latent_compass.lab.host_session import (
+    apply_host_observation,
+    derive_host_lab_binding,
+    load_host_probe_catalog,
+)
 from latent_compass.lab.model import load_model
+from latent_compass.lab.observations import SourceSnapshot
 from latent_compass.lab.planner import propose, propose_excluding
+from latent_compass.lab.routing import (
+    admit_host_capability_snapshot,
+    admit_route_request,
+    evaluate_route,
+)
 from latent_compass.lab.state import (
     DiagnosisStateRevision,
     LabBinding,
@@ -123,6 +140,16 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--agent-family", required=True, choices=["codex", "claude", "other"])
     init.add_argument("--source-scope-digest", required=True)
 
+    host_init = sub.add_parser(
+        "init-host-state",
+        help="derive a sealed host-session binding and emit its revision-zero state",
+    )
+    host_init.add_argument("--model", required=True, type=Path)
+    host_init.add_argument("--snapshot", required=True, type=Path)
+    host_init.add_argument("--catalog", required=True, type=Path)
+    host_init.add_argument("--policy", required=True, type=Path)
+    host_init.add_argument("--state-id", required=True)
+
     proposal = sub.add_parser(
         "propose", help="bounded exact value-of-observation planning from one state"
     )
@@ -172,6 +199,38 @@ def build_parser() -> argparse.ArgumentParser:
     )
     apply_command.add_argument("--source-scope-digest", required=True)
 
+    host_apply = sub.add_parser(
+        "apply-host-observation",
+        help="verify and apply one host observation to a bound diagnosis state",
+    )
+    host_apply.add_argument("--root", required=True, type=Path)
+    host_apply.add_argument("--model", required=True, type=Path)
+    host_apply.add_argument("--snapshot", required=True, type=Path)
+    host_apply.add_argument("--catalog", required=True, type=Path)
+    host_apply.add_argument("--policy", required=True, type=Path)
+    host_apply.add_argument("--state", required=True, type=Path)
+    host_apply.add_argument(
+        "--history",
+        type=Path,
+        default=None,
+        help="JSON array of the full replay history; required above revision 0",
+    )
+    host_apply.add_argument("--observation", required=True, type=Path)
+    host_apply.add_argument("--expected-host-id", required=True)
+    host_apply.add_argument(
+        "--expected-agent-family", required=True, choices=["codex", "claude", "other"]
+    )
+    host_apply.add_argument("--expected-root-id", required=True)
+    host_apply.add_argument("--verified-at", required=True)
+
+    route_advice = sub.add_parser(
+        "route-advice",
+        help="evaluate one declared route against one local capability snapshot",
+    )
+    route_advice.add_argument("--request", required=True, type=Path)
+    route_advice.add_argument("--capabilities", required=True, type=Path)
+    route_advice.add_argument("--now", required=True)
+
     return parser
 
 
@@ -192,6 +251,21 @@ def _dispatch(args: argparse.Namespace, out: TextIO) -> int:
             agent_family=AgentFamily(args.agent_family),
             source_scope_digest=args.source_scope_digest,
         )
+        state = initial_state(model, state_id=args.state_id, binding=binding)
+        _emit(out, state.canonical_payload())
+        return EXIT_OK
+
+    if args.command == "init-host-state":
+        model = load_model(_read_json(args.model))
+        snapshot = validate_contract(
+            SourceSnapshot,
+            _read_json(args.snapshot),
+            error=ContractViolation,
+            context="source snapshot",
+        )
+        catalog = load_host_probe_catalog(_read_json(args.catalog))
+        policy = admit_observation_policy(_read_json(args.policy))
+        binding = derive_host_lab_binding(model, snapshot, catalog, policy)
         state = initial_state(model, state_id=args.state_id, binding=binding)
         _emit(out, state.canonical_payload())
         return EXIT_OK
@@ -250,6 +324,54 @@ def _dispatch(args: argparse.Namespace, out: TextIO) -> int:
             history=history,
         )
         _emit(out, updated.canonical_payload())
+        return EXIT_OK
+
+    if args.command == "apply-host-observation":
+        model = load_model(_read_json(args.model))
+        snapshot = validate_contract(
+            SourceSnapshot,
+            _read_json(args.snapshot),
+            error=ContractViolation,
+            context="source snapshot",
+        )
+        catalog = load_host_probe_catalog(_read_json(args.catalog))
+        policy = admit_observation_policy(_read_json(args.policy))
+        state = load_state(_read_json(args.state))
+        history = _read_history(args.history)
+        observation = admit_host_observation(_read_json(args.observation))
+        result = apply_host_observation(
+            model,
+            state,
+            root=args.root,
+            snapshot=snapshot,
+            catalog=catalog,
+            policy=policy,
+            observation=observation,
+            expected_host_id=args.expected_host_id,
+            expected_agent_family=AgentFamily(args.expected_agent_family),
+            expected_root_id=args.expected_root_id,
+            verified_at=args.verified_at,
+            history=history,
+        )
+        _emit(
+            out,
+            {
+                "state": result.state.canonical_payload(),
+                "probe_id": result.probe_id,
+                "outcome_id": result.outcome_id,
+                "unknown_reason": (
+                    result.unknown_reason.value if result.unknown_reason is not None else None
+                ),
+                "verification": result.verification.canonical_payload(),
+            },
+        )
+        return EXIT_OK
+
+    if args.command == "route-advice":
+        request = admit_route_request(_read_json(args.request))
+        capabilities = admit_host_capability_snapshot(_read_json(args.capabilities))
+        decision = evaluate_route(request, capabilities, now=args.now)
+        _emit(out, decision.canonical_payload())
         return EXIT_OK
 
     raise AssertionError(f"unreachable command: {args.command!r}")  # pragma: no cover

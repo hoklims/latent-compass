@@ -63,6 +63,9 @@ ADR_SECTIONS = {
     "Amendment 2026-09-19 — a second pilot repository (HOK-799, U1)": (
         "sha256:ba30f07452dcd307d4ceb84e2dcd45aa0e9c9c984623d472d215406c0bc3724b"
     ),
+    "Amendment 2026-09-20 — local harness integration without model calls (HOK-803/804)": (
+        "sha256:81afcdeea1c30faa547e4c6107d0af157c08216648dc60dc6efebfeeb30444f0"
+    ),
 }
 #: The scope document is revised in place, so it is pinned whole: a reworded perimeter
 #: shows up as a changed pin in the same diff, never as prose nobody had to look at.
@@ -579,13 +582,14 @@ def test_the_adr_is_append_only_and_every_section_is_pinned() -> None:
         for name, section in sections.items()
     }
     assert digests == ADR_SECTIONS
-    # Each amendment names the evidence it rests on; the revision carrying the owner's U1
-    # decision is named by the amendment that records it, and by no earlier one.
+    # The revisions carrying the inventory decisions stay named by the amendments that
+    # record them, and by no earlier one. Later amendments may concern another boundary.
     for directory in (ORIGINAL, CORRECTED):
         assert f"evidence/{directory}/" in amendments[0]
-    assert f"evidence/{CURRENT}/" in amendments[-1]
-    assert f"evidence/{CURRENT}/" not in "".join(amendments[:-1])
-    assert f"`{SECOND_PILOT_SCOPE}`" in amendments[-1]
+    second_pilot = sections["Amendment 2026-09-19 — a second pilot repository (HOK-799, U1)"]
+    assert f"evidence/{CURRENT}/" in second_pilot
+    assert f"evidence/{CURRENT}/" not in "".join(amendments[:2])
+    assert f"`{SECOND_PILOT_SCOPE}`" in second_pilot
 
 
 def test_the_scope_document_cannot_be_reworded_without_its_pin_changing() -> None:
