@@ -115,6 +115,45 @@ refused with a typed error. The CLI emits JSON and does not persist states;
 check the exit status before saving a returned document. Shell redirection
 has its own file-writing behavior.
 
+## Planning around an unobtainable probe (`1.1.0`)
+
+A `1.0.0` plan cannot be told that a probe is impossible to obtain — a tool that
+is not installed, a run that timed out. The state is left untouched by such an
+attempt, so the same probe is still a candidate and `propose` names it again.
+
+`propose_excluding` takes the host's word for it. The probes it is handed are
+removed from the candidates at **every** node of the search, not only the
+first, and the same exact recursion is solved on what remains:
+
+```bash
+# check-b alone separates nothing worth its cost: without check-a the plan is to stop at 3.
+python -m latent_compass.lab propose \
+  --model examples/lab-model.json --state /tmp/state-0.json --budget 2 --horizon 2 \
+  --unobtainable-probe check-a \
+  --host-id demo-host --agent-family claude \
+  --source-scope-digest sha256:00000000000000000000000000000000000000000000000000000000000000aa
+```
+
+The result is a second document beside the first, never a new shape of it: a
+`1.1.0` `ConstrainedPlanReport` with the same fields plus
+`unobtainable_probe_ids` and `exclusion_basis`. Without the flag the command
+emits the `1.0.0` `PlanReport`, byte for byte what it was. Neither loader
+accepts the other's version, and the two classes are siblings rather than
+parent and child: a value planned around an exclusion is never read as an
+unrestricted one.
+
+An id the model does not declare, a repeated id or a bare string is refused
+before any search starts — a mistyped exclusion would otherwise exclude nothing
+while the host believes its plan avoids the probe. Naming a probe already
+acquired is allowed and changes nothing. A decision whose required evidence
+only an unobtainable probe could supply stays inadmissible on every path.
+
+`exclusion_basis` is always `HOST_DECLARED`: the lab does not verify that a
+probe is unobtainable. Excluding one that could in fact be obtained yields a
+plan that is exact for the restricted problem and may be worse than the
+unrestricted one. `tests/test_lab_enumeration.py` confronts the restricted
+values with an independent enumeration of complete policies.
+
 ## Mandatory evidence: loss is not the only gate
 
 `examples/lab-mandatory-evidence.json` has `decide-release` with a loss of

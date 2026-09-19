@@ -33,7 +33,7 @@ from latent_compass.lab.host_session import (
 )
 from latent_compass.lab.model import load_model
 from latent_compass.lab.observations import HostBinding, capture_source_snapshot
-from latent_compass.lab.planner import propose
+from latent_compass.lab.planner import propose, propose_excluding
 from latent_compass.lab.state import initial_state
 
 BENCH_PATH = Path(__file__).resolve().parents[1] / "examples" / "lab_host_bench.py"
@@ -345,11 +345,11 @@ def test_an_unobtainable_probe_is_not_retried_and_no_other_provider_stands_in(
     tmp_path: Path,
 ) -> None:
     trace = bench.run_episode(tmp_path / "repository", unavailable_tools=frozenset({"python-ast"}))
-    assert len(trace["steps"]) == 2, "the unobtainable probe was attempted again"
-    attempted, stopped = trace["steps"]
+    assert len(trace["steps"]) == 3, "the loop did not plan around the unobtainable probe"
+    attempted, around, stopped = trace["steps"]
 
-    # Hand-derived: probing the symbol first is worth 5/2 against 15/4 for stopping, and it
-    # still is once its failed attempt has cost 2 of the 6 points. The advisor names it again.
+    # Hand-derived: probing the symbol first is worth 5/2 against 15/4 for stopping.
+    assert attempted["advice"]["contract_version"] == "1.0.0"
     assert attempted["advice"]["recommended_probe_id"] == "define-legacy-consumer"
     assert attempted["advice"]["plan_value"] == "5/2"
     assert attempted["execution"]["status"] == "TOOL_ABSENT"
@@ -358,20 +358,68 @@ def test_an_unobtainable_probe_is_not_retried_and_no_other_provider_stands_in(
     assert attempted["result"]["unknown_reason"] == "NON_CONCLUSIVE_STATUS"
     assert attempted["result"]["state_seal"] == attempted["result"]["prior_state_seal"]
 
-    assert stopped["advice"]["recommended_probe_id"] == "define-legacy-consumer"
-    assert stopped["stopped_because"] == "recommended_probe_unobtainable"
+    # The host declares it unobtainable. With the 4 points left, the 1.1.0 plan does without
+    # it: the check is worth 7/2 against 15/4 — a different question put to its own tool,
+    # never the symbol question handed to another provider.
+    assert around["advice"]["contract_version"] == "1.1.0"
+    assert around["advice"]["recommended_probe_id"] == "run-invoice-check"
+    assert around["advice"]["plan_value"] == "7/2"
+    assert around["execution"]["tool"]["tool_id"] == "python-check"
+    assert around["execution"]["status"] == "OBSERVED"
+    assert around["result"]["outcome_id"] == "check-fails"
+
+    assert stopped["advice"]["contract_version"] == "1.1.0"
+    assert stopped["advice"]["recommended_action"] == "STOP"
     assert "execution" not in stopped
-    # The failed attempt is still paid for, at its reserved ceiling; nothing else ran.
-    assert trace["remaining_budget"] == 4
-    assert trace["probe_child_processes"] == 0
-    assert trace["final_state_revision"] == 0
+    # The symbol probe was attempted exactly once, and nothing answered in its place.
+    attempts = [step["advice"]["recommended_probe_id"] for step in trace["steps"]]
+    assert attempts.count("define-legacy-consumer") == 1
+    assert [step["execution"]["tool"]["tool_id"] for step in (attempted, around)] == [
+        "python-ast",
+        "python-check",
+    ]
+    # Both attempts are paid for at their reserved ceilings: 6 - 2 - 3. The decision now rests
+    # on an observation, not on the prior alone.
+    assert trace["remaining_budget"] == 1
+    assert trace["probe_child_processes"] == 1
+    assert trace["final_state_revision"] == 1
     assert trace["final_decision_id"] == "hold-and-fix"
 
 
-def test_the_documented_planner_limit_is_stated_with_its_real_numbers(tmp_path: Path) -> None:
-    # docs/host-observations.md quotes these values. With 4 points left the advisor still
-    # names the unobtainable symbol probe; the check probe (7/2) would beat stopping (15/4),
-    # and diff-pricing's 3/1 cannot be reused: it assumes the symbol probe comes next.
+def test_when_nothing_obtainable_is_worth_its_cost_the_loop_stops_on_its_prior(
+    tmp_path: Path,
+) -> None:
+    # The other half: planning around is not probing at all costs. With the check tool gone
+    # too, the one probe left is not worth a point, and the advisor says stop.
+    trace = bench.run_episode(
+        tmp_path / "repository", unavailable_tools=frozenset({"python-ast", "python-check"})
+    )
+    assert [step["advice"]["recommended_probe_id"] for step in trace["steps"]] == [
+        "define-legacy-consumer",
+        "run-invoice-check",
+        None,
+    ]
+    assert [step["execution"]["status"] for step in trace["steps"][:2]] == [
+        "TOOL_ABSENT",
+        "TOOL_ABSENT",
+    ]
+    final = trace["steps"][-1]["advice"]
+    assert (final["contract_version"], final["recommended_action"], final["plan_value"]) == (
+        "1.1.0",
+        "STOP",
+        "15/4",
+    )
+    assert trace["probe_child_processes"] == 0
+    assert trace["final_state_revision"] == 0
+    assert trace["remaining_budget"] == 1
+
+
+def test_the_documented_planner_limit_and_its_remedy_are_stated_with_their_real_numbers(
+    tmp_path: Path,
+) -> None:
+    # docs/host-observations.md quotes these values. The 1.0.0 plan cannot be told that a
+    # probe is unobtainable: with 4 points left it still names the symbol probe. Its other
+    # values cannot be reused either: diff-pricing's 3/1 assumes the symbol probe comes next.
     drill = Drill(tmp_path / "repository")
     report = propose(drill.model, drill.state, budget=4, horizon=2, expected_binding=drill.binding)
 
@@ -380,6 +428,24 @@ def test_the_documented_planner_limit_is_stated_with_its_real_numbers(tmp_path: 
     assert {probe.probe_id: probe.value for probe in report.probes} == {
         "define-legacy-consumer": "5/2",
         "diff-pricing": "3/1",
+        "run-invoice-check": "7/2",
+    }
+
+    # The 1.1.0 plan is told. Without the symbol probe behind it, diff-pricing is worth no
+    # more than stopping (15/4), and the check is the one probe that still pays: 7/2.
+    around = propose_excluding(
+        drill.model,
+        drill.state,
+        unobtainable_probe_ids=["define-legacy-consumer"],
+        budget=4,
+        horizon=2,
+        expected_binding=drill.binding,
+    )
+    assert (around.recommended_probe_id, around.plan_value) == ("run-invoice-check", "7/2")
+    assert around.stopping_value == "15/4"
+    assert {probe.probe_id: probe.value for probe in around.probes} == {
+        "define-legacy-consumer": None,
+        "diff-pricing": "15/4",
         "run-invoice-check": "7/2",
     }
 

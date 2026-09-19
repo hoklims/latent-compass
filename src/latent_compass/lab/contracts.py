@@ -18,6 +18,12 @@ from typing import Final
 LAB_CONTRACT_VERSION: Final = "1.0.0"
 SUPPORTED_LAB_VERSIONS: Final = frozenset({LAB_CONTRACT_VERSION})
 
+#: A plan computed around probes the host declared unobtainable. One more document
+#: of the diagnosis core, beside ``1.0.0`` and never in place of it: models, states
+#: and unconstrained plan reports stay ``1.0.0``, and no ``1.0.0`` loader accepts it.
+LAB_CONSTRAINED_PLAN_CONTRACT_VERSION: Final = "1.1.0"
+SUPPORTED_LAB_CONSTRAINED_PLAN_VERSIONS: Final = frozenset({LAB_CONSTRAINED_PLAN_CONTRACT_VERSION})
+
 #: The separate justification memory: facts, claims, supports, revisions.
 LAB_MEMORY_CONTRACT_VERSION: Final = "1.0.0"
 SUPPORTED_LAB_MEMORY_VERSIONS: Final = frozenset({LAB_MEMORY_CONTRACT_VERSION})
@@ -70,6 +76,7 @@ def lab_limits() -> dict[str, object]:
     """
     return {
         "lab_contract_version": LAB_CONTRACT_VERSION,
+        "lab_constrained_plan_contract_version": LAB_CONSTRAINED_PLAN_CONTRACT_VERSION,
         "lab_memory_contract_version": LAB_MEMORY_CONTRACT_VERSION,
         "model": {
             "max_worlds": MAX_WORLDS,

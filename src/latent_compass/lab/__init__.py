@@ -16,6 +16,7 @@ is deliberately not wired into the legacy ``latent-compass`` CLI.
 from __future__ import annotations
 
 from latent_compass.lab.contracts import (
+    LAB_CONSTRAINED_PLAN_CONTRACT_VERSION,
     LAB_CONTRACT_VERSION,
     LAB_MEMORY_CONTRACT_VERSION,
     LAB_NON_AUTHORITY_NOTICE,
@@ -54,7 +55,14 @@ from latent_compass.lab.model import (
     WorldPrior,
     load_model,
 )
-from latent_compass.lab.planner import PlanReport, load_plan_report, propose
+from latent_compass.lab.planner import (
+    ConstrainedPlanReport,
+    PlanReport,
+    load_constrained_plan_report,
+    load_plan_report,
+    propose,
+    propose_excluding,
+)
 from latent_compass.lab.state import (
     DiagnosisStateRevision,
     LabBinding,
@@ -66,11 +74,13 @@ from latent_compass.lab.state import (
 )
 
 __all__ = [
+    "LAB_CONSTRAINED_PLAN_CONTRACT_VERSION",
     "LAB_CONTRACT_VERSION",
     "LAB_MEMORY_CONTRACT_VERSION",
     "LAB_NON_AUTHORITY_NOTICE",
     "ClaimAssertion",
     "ClaimRevocation",
+    "ConstrainedPlanReport",
     "Decision",
     "DiagnosisModel",
     "DiagnosisStateRevision",
@@ -102,9 +112,11 @@ __all__ = [
     "compute_applicability",
     "initial_state",
     "lab_limits",
+    "load_constrained_plan_report",
     "load_model",
     "load_plan_report",
     "load_state",
     "propose",
+    "propose_excluding",
     "verify_state_history",
 ]

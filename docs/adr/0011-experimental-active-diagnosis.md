@@ -160,3 +160,26 @@ the Graphify code graph only, because CCC and Semctx are not configured for
 it; a CCC verdict needs a second named pilot repository. And the `1.0.0` lab
 binding does not bind tool versions, so every HOK-800 adapter must record the
 identity of the tool that produced its observation.
+
+## Amendment 2026-09-19 — unobtainable probes (HOK-802)
+
+The decision above is unchanged, and a test pins its text. Its recursion ranges
+over every probe not yet acquired and affordable, and the `1.0.0` contract gives
+a host no way to say that one of them cannot be obtained. The HOK-803 bench
+showed the cost: a failed attempt leaves the state untouched, the same probe is
+named again, and the loop can only stop — on the bench model at 15/4 while
+another probe was still worth 7/2.
+
+On 2026-09-19 the repository owner decided to add that input as a new contract
+version beside `1.0.0`, never in place of it. `propose_excluding` solves the
+same exact recursion with the inner minimum restricted, at every node, to
+probes outside a host-declared set. Its result is a separate `1.1.0` document,
+the constrained plan report, which names that set. Models, states and the
+unrestricted plan report stay `1.0.0`, their output is unchanged byte for byte,
+and neither loader accepts the other's version.
+
+Two limits bind it. That a probe is unobtainable is the host's declaration: the
+lab checks that the id names a probe of the model, not that the tool is absent,
+and the record says so. And the restricted plan is exact for the restricted
+problem only; it may be worse than the unrestricted one when the declaration
+was wrong. The lab still launches nothing and gains no authority.

@@ -7,6 +7,10 @@ either validates a payload, computes a value from one, or refuses. This CLI is
 deliberately **not** wired into ``latent-compass``'s own command line; nothing
 here is reachable from the legacy entry point.
 
+``propose`` emits the ``1.0.0`` plan report. Only when ``--unobtainable-probe`` is
+given does it plan around those probes and emit the ``1.1.0`` constrained plan
+report instead; without the flag its output is what it always was.
+
 Success writes one JSON document to stdout. Refusal writes one JSON document
 to stderr carrying a stable ``error`` code and exits ``3``. No failure reaches
 the caller as a traceback.
@@ -33,7 +37,7 @@ from latent_compass.lab.contracts import (
     lab_limits,
 )
 from latent_compass.lab.model import load_model
-from latent_compass.lab.planner import propose
+from latent_compass.lab.planner import propose, propose_excluding
 from latent_compass.lab.state import (
     DiagnosisStateRevision,
     LabBinding,
@@ -136,6 +140,16 @@ def build_parser() -> argparse.ArgumentParser:
     proposal.add_argument("--budget", required=True, type=int)
     proposal.add_argument("--horizon", required=True, type=int)
     proposal.add_argument("--max-expansions", type=int, default=None)
+    proposal.add_argument(
+        "--unobtainable-probe",
+        action="append",
+        default=None,
+        metavar="PROBE_ID",
+        help=(
+            "a probe the host declares it cannot obtain; repeatable. Plans around it and "
+            "emits the 1.1.0 constrained plan report instead of the 1.0.0 plan report"
+        ),
+    )
 
     apply_command = sub.add_parser(
         "apply-observation", help="exactly filter one state's posterior by one observed outcome"
@@ -191,16 +205,29 @@ def _dispatch(args: argparse.Namespace, out: TextIO) -> int:
             agent_family=AgentFamily(args.agent_family),
             source_scope_digest=args.source_scope_digest,
         )
-        report = propose(
-            model,
-            state,
-            budget=args.budget,
-            horizon=args.horizon,
-            expected_binding=expected_binding,
-            history=history,
-            max_expansions=MAX_EXPANSIONS if args.max_expansions is None else args.max_expansions,
-        )
-        _emit(out, report.canonical_payload())
+        max_expansions = MAX_EXPANSIONS if args.max_expansions is None else args.max_expansions
+        if args.unobtainable_probe is None:
+            document = propose(
+                model,
+                state,
+                budget=args.budget,
+                horizon=args.horizon,
+                expected_binding=expected_binding,
+                history=history,
+                max_expansions=max_expansions,
+            ).canonical_payload()
+        else:
+            document = propose_excluding(
+                model,
+                state,
+                unobtainable_probe_ids=args.unobtainable_probe,
+                budget=args.budget,
+                horizon=args.horizon,
+                expected_binding=expected_binding,
+                history=history,
+                max_expansions=max_expansions,
+            ).canonical_payload()
+        _emit(out, document)
         return EXIT_OK
 
     if args.command == "apply-observation":

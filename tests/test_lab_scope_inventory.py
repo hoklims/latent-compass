@@ -48,6 +48,9 @@ ADR_SECTIONS = {
     "Amendment 2026-09-19 — operational scope (HOK-799)": (
         "sha256:488e0521ee88283a2bf36cdef804b5cb39bd4b60d9f8024bdcb991bfe0f8368e"
     ),
+    "Amendment 2026-09-19 — unobtainable probes (HOK-802)": (
+        "sha256:6694cbff7ed758a35a2664e3a545b3bd527f874c3a52ed0ddf606ee72724fbf3"
+    ),
 }
 
 #: (generated_at, inventory_digest, report_seal) of every committed revision.

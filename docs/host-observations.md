@@ -145,7 +145,7 @@ an outcome:
 | advice expired, computed on another source, or for another scope | `ABSTAIN`; nothing executes |
 | review, authority or Semctx proof missing | `ESCALATE`; nothing executes |
 | host ignores the advice | nothing executes; the native decision stands |
-| recommended probe cannot be obtained | not retried, no other provider stands in; the loop stops |
+| recommended probe cannot be obtained | not retried, no other provider stands in; the host declares it unobtainable and the `1.1.0` plan does without it |
 | provider retired by the session policy | the session is refused before its first step |
 | observation made for the other agent family | refused, `scope_mismatch` |
 
@@ -168,14 +168,23 @@ says who spent what.
 The children are bench episodes run one after another. Nothing here is a live
 sub-agent, and nothing is claimed about concurrent writers to a pool.
 
-**Known limit.** `propose()` has no way to be told that a probe cannot be
-obtained, so it names the same probe again and the loop stops on the best
-admissible decision. On the bench model that stop is not free: with 4 points
-left, the check probe would still be worth 7/2 against 15/4 for stopping. The
-report's other values cannot simply be reused either: `diff-pricing`'s 3/1
-assumes the unobtainable probe comes next. Planning around an unobtainable
-probe needs a planner input that the `1.0.0` contract does not have; it is an
-open design decision, not a bench defect.
+**Planning around an unobtainable probe.** The `1.0.0` `propose()` has no way
+to be told that a probe cannot be obtained: a failed attempt leaves the state
+untouched, so it names the same probe again. A host that speaks only `1.0.0`
+can then do no better than stop — and on the bench model that stop is not free:
+with 4 points left, the check probe is still worth 7/2 against 15/4 for
+stopping. The report's other values cannot simply be reused either:
+`diff-pricing`'s 3/1 assumes the unobtainable probe comes next.
+
+The bench therefore plans with `1.0.0` until a probe proves unobtainable, then
+with the `1.1.0` `propose_excluding`, which is told so (owner decision of
+2026-09-19, see the ADR amendment and `docs/active-diagnosis.md`). With the
+symbol tool absent it runs the check instead — a different question put to its
+own tool, never the symbol question handed to another provider — and its final
+decision rests on an observation rather than on the prior. With the check tool
+absent as well, the one probe left is not worth its cost and the advisor says
+stop, at 15/4. That a probe is unobtainable stays the host's declaration; here
+it means "attempted once, no outcome, and this host does not retry".
 
 A `CLAUDE` or `CODEX` family on the bench is a declared lab identity. Running
 the same loop under both shows that two episodes never mix — **not** that two

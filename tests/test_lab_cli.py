@@ -58,6 +58,8 @@ def test_limits_reports_every_declared_bound() -> None:
         },
     }
     assert (out["lab_contract_version"], out["lab_memory_contract_version"]) == ("1.0.0", "1.0.0")
+    # The constrained plan report is a second document beside 1.0.0, never a bump of it.
+    assert out["lab_constrained_plan_contract_version"] == "1.1.0"
 
 
 def test_validate_model_reports_the_model_seal() -> None:
@@ -243,6 +245,82 @@ def test_the_full_loop_runs_end_to_end_through_the_cli(tmp_path: Path) -> None:
     assert code == EXIT_REFUSED
     assert out is None
     assert error["error"] == "lab_replay_violation"
+
+
+def _propose_at_revision_zero(tmp_path: Path, *extra: str) -> tuple[int, Any, Any]:
+    code, state0, _ = run(
+        "init-state",
+        "--model",
+        str(EXAMPLES / "lab-model.json"),
+        "--state-id",
+        "cli-episode-x",
+        "--host-id",
+        "cli-host",
+        "--agent-family",
+        "claude",
+        "--source-scope-digest",
+        SOURCE_SCOPE,
+    )
+    assert code == EXIT_OK
+    state_path = tmp_path / "state-0.json"
+    state_path.write_text(json.dumps(state0), encoding="utf-8")
+    return run(
+        "propose",
+        "--model",
+        str(EXAMPLES / "lab-model.json"),
+        "--state",
+        str(state_path),
+        "--host-id",
+        "cli-host",
+        "--agent-family",
+        "claude",
+        "--source-scope-digest",
+        SOURCE_SCOPE,
+        "--budget",
+        "2",
+        "--horizon",
+        "2",
+        *extra,
+    )
+
+
+def test_propose_plans_around_an_unobtainable_probe_only_when_told_to(tmp_path: Path) -> None:
+    # Without the flag: the 1.0.0 document, with exactly the keys it always had.
+    code, plain, _ = _propose_at_revision_zero(tmp_path)
+    assert code == EXIT_OK
+    assert plain["contract_version"] == "1.0.0"
+    assert "unobtainable_probe_ids" not in plain
+    assert "exclusion_basis" not in plain
+    assert len(plain) == 17
+    assert (plain["recommended_probe_id"], plain["plan_value"]) == ("check-a", "2/1")
+
+    # With it: the 1.1.0 document, which names what it was told and plans around it.
+    code, constrained, _ = _propose_at_revision_zero(tmp_path, "--unobtainable-probe", "check-a")
+    assert code == EXIT_OK
+    assert constrained["contract_version"] == "1.1.0"
+    assert constrained["unobtainable_probe_ids"] == ["check-a"]
+    assert constrained["exclusion_basis"] == "HOST_DECLARED"
+    assert (constrained["recommended_action"], constrained["plan_value"]) == ("STOP", "3/1")
+    assert set(constrained) - set(plain) == {"unobtainable_probe_ids", "exclusion_basis"}
+
+
+@pytest.mark.parametrize(
+    ("flags", "error"),
+    [
+        (("--unobtainable-probe", "check-z"), "lab_unknown_reference"),
+        (
+            ("--unobtainable-probe", "check-a", "--unobtainable-probe", "check-a"),
+            "lab_contract_violation",
+        ),
+    ],
+)
+def test_propose_refuses_an_unknown_or_repeated_unobtainable_probe(
+    tmp_path: Path, flags: tuple[str, ...], error: str
+) -> None:
+    code, out, err = _propose_at_revision_zero(tmp_path, *flags)
+    assert code == EXIT_REFUSED
+    assert out is None
+    assert err["error"] == error
 
 
 def test_apply_observation_refuses_an_impossible_outcome(tmp_path: Path) -> None:

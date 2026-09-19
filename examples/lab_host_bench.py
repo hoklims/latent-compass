@@ -67,7 +67,7 @@ from latent_compass.lab.host_session import (
 )
 from latent_compass.lab.model import DiagnosisModel, load_model
 from latent_compass.lab.observations import HostBinding, capture_source_snapshot
-from latent_compass.lab.planner import propose
+from latent_compass.lab.planner import propose, propose_excluding
 from latent_compass.lab.routing import (
     LAB_ROUTING_CONTRACT_VERSION,
     BudgetPoolState,
@@ -634,15 +634,30 @@ def run_episode(
         believed_budget = (
             stale_budget_view if stale_budget_view is not None else max(budget.pool.available(), 0)
         )
-        report = propose(
-            model,
-            state,
-            budget=believed_budget,
-            horizon=2,
-            expected_binding=binding,
-            history=None if state.revision == 0 else history,
+        # The 1.0.0 plan until a probe proves unobtainable; from then on the 1.1.0 plan,
+        # which is told so and looks for the best plan that does without it.
+        report = (
+            propose_excluding(
+                model,
+                state,
+                unobtainable_probe_ids=sorted(unknown_probe_ids),
+                budget=believed_budget,
+                horizon=2,
+                expected_binding=binding,
+                history=None if state.revision == 0 else history,
+            )
+            if unknown_probe_ids
+            else propose(
+                model,
+                state,
+                budget=believed_budget,
+                horizon=2,
+                expected_binding=binding,
+                history=None if state.revision == 0 else history,
+            )
         )
         advice = {
+            "contract_version": report.contract_version,
             "recommended_action": report.recommended_action,
             "recommended_probe_id": report.recommended_probe_id,
             "stopping_decision_id": report.stopping_decision_id,
@@ -652,19 +667,6 @@ def run_episode(
         probe_id = report.recommended_probe_id
         if report.recommended_action == "STOP" or probe_id is None:
             steps.append({"advice": advice, "routing": None, "host_decision": "NOT_ADVISED"})
-            break
-        if probe_id in unknown_probe_ids:
-            # The 1.0.0 planner cannot plan around a probe it cannot obtain, so the
-            # native path is to stop on the best admissible decision. Nothing is
-            # retried and no other provider stands in.
-            steps.append(
-                {
-                    "advice": advice,
-                    "routing": None,
-                    "host_decision": "NOT_ADVISED",
-                    "stopped_because": "recommended_probe_unobtainable",
-                }
-            )
             break
         probe = model.probe_by_id(probe_id)
         spec = catalog.spec_by_id(probe_id)
@@ -767,8 +769,8 @@ def run_episode(
         }
         steps.append(step)
         if unknown:
-            # No retry and no other provider. The advisor plans again on what is
-            # left of the budget; if it names this probe again, the loop stops.
+            # No retry, and no other provider stands in for this probe. The host declares
+            # it unobtainable and the advisor plans around it, on what is left of the budget.
             unknown_probe_ids.add(probe_id)
             continue
         state = result.state
