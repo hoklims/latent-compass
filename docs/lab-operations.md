@@ -190,8 +190,9 @@ exclusion is visible in the report rather than silently folded into the
 delta.
 
 What the repository owner has to decide before a real protocol is frozen — and
-what this `1.0.0` contract cannot hold at all — is listed, undecided, in
-[`docs/active-diagnosis-preregistration.md`](active-diagnosis-preregistration.md).
+what this `1.0.0` contract cannot hold at all — is listed row by row in
+[`docs/active-diagnosis-preregistration.md`](active-diagnosis-preregistration.md):
+each row is `OPEN` or carries the owner's dated decision.
 
 ## 3. Retirement dry-run (`latent_compass.lab.migration`)
 

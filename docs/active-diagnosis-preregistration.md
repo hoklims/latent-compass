@@ -1,7 +1,7 @@
 # Active-diagnosis preregistration skeleton (HOK-804)
 
-- Status: **skeleton — nothing is frozen, no parameter is chosen, nothing was
-  measured**
+- Status: **skeleton — 1 of 29 decisions recorded, nothing is frozen, nothing
+  was measured**
 - Written: 2026-09-19 (UTC), after the owner's decision U1
 
 This document lists what the repository owner has to decide before the first
@@ -10,7 +10,8 @@ HOK-804 trial (unknown U8 of
 decision would be frozen. Every cell marked `OPEN` is the owner's. The author
 chose none: an option listed here is not a recommendation, and its order means
 nothing. A decision is recorded by replacing `OPEN` with the value, its date
-and who took it.
+and who took it. Where the owner took an option the author had proposed, the
+record says so.
 
 It grants no authority to run anything. HOK-804 is a laboratory experiment; it
 is neither a canary nor an activation, and a favourable result would unlock
@@ -83,6 +84,7 @@ with its own review.
 | Decision rule | The verdicts are `RETIRABLE_EN_PILOTE`, `CONSERVER` and `PREUVE_INSUFFISANTE`; the report returns none of them | How per-arm tallies, paired deltas, critical violations, the margin and the cost target map to one verdict, written before trials. What `pairs_incomplete` does to a verdict. A green test, a zero usage rate or a better mean time is not a reason to retire | `OPEN` |
 | Power, or a bounded descriptive study | HOK-804 asks for one or the other, explicitly | A powered design needs a variance estimate nobody has yet, and many pairs. A bounded descriptive study is affordable and can only support `CONSERVER` or `PREUVE_INSUFFISANTE` with confidence; what it may support beyond that has to be said now | `OPEN` |
 | Stopping and reruns | No favourable stop chosen after results | The pair count is fixed up front. An infrastructure failure is `MISSING`, or is rerun under a rule written before trials — never decided case by case | `OPEN` |
+| Second-stage rule | The owner's two-stage decision (section 4) opens a second stage after the first is seen; a rule written then would be a stop chosen after results | What counts as a regression for a pilot: the decision rule above, or a separate threshold. Which per-couple protocols then run: one per couple; or one per agent-facing index, a cache following its graph (section 4 says why a cache-only protocol would measure rebuild cost, not quality) | `OPEN` |
 | Memory | HOK-804 asks to separate the effect of the controller, of the memory and of the index removal; three arms separate two of them | Justification memory off in `CONTROLLER_PLUS_SOURCE`: the controller's effect is isolated, the memory's is not measured. On: they are confounded. Two protocols: both are measured, at twice the cost. HOK-246 remains the longitudinal memory experiment | `OPEN` |
 | Which plan the controller arm uses | The candidate produces two plan documents | The free `1.0.0` plan, or the constrained `1.1.0` plan and the condition under which the host declares a probe unobtainable. A constrained plan is exact for the restricted problem only; a false declaration is a failure mode to count, not to exclude afterwards | `OPEN` |
 | Hosts and isolation | Tasks run on isolated snapshots and never modify an active working environment; the Codex and Claude stores stay separate | Which agent family runs which arm. One family: cheaper, and says nothing about the other. Both: the design doubles. Real agent sessions are needed either way; their cost and isolation are an owner decision shared with HOK-803 | `OPEN` |
@@ -110,15 +112,27 @@ other, so the two pilots cannot share a protocol. Within a pilot:
 
 | Option | What it gives | What it costs |
 | --- | --- | --- |
-| One protocol per pilot, every candidate couple removed at once | The fewest trials | One grouped result per pilot. A regression cannot be attributed to a couple, so a per-couple verdict other than `PREUVE_INSUFFISANTE` is hard to defend |
-| One protocol per couple | A result that can be attributed | Up to five protocols, each with three arms over the whole task population |
-| Grouped first, per couple only where the grouped result is not clearly unfavourable | Fewer trials when the answer is no | A two-stage design: the second stage is decided after seeing the first, so its rule has to be written before the first stage runs |
+| One protocol per pilot, every candidate couple removed at once | The fewest trials, on the configuration a joint retirement would produce | One grouped result per pilot. A regression cannot be attributed to a couple. Without one, a per-couple verdict holds for that configuration only — every candidate couple of the pilot removed together — which is the binding HOK-804 asks of a verdict |
+| One protocol per couple | A regression that can be attributed | Up to five protocols, each with three arms over the whole task population: a trial is sealed to one protocol, so the existing-stack arm runs again for each. Two indexes that cover for each other would each look removable alone, so per-couple results do not add up to a joint retirement |
+| Grouped first, then per couple only where the grouped result is not clearly unfavourable | Fewer trials when the answer is no | A two-stage design: the second stage is decided after seeing the first, so its rule has to be written before the first stage runs. A clearly unfavourable grouped result stops a pilot, couples that were removable alone included |
+| Grouped first, then per couple only where the grouped result shows a regression | Fewer trials when the answer is yes, and attribution where it is missing | The same two-stage constraint. A favourable result rests on the grouped protocol alone |
 
 What the index-free arms may not remove is already fixed: the second pilot's
 Semctx layer and symbolic-tool cache are kept by their classification, and no
 asset outside the two pilot perimeters is eligible for anything but `KEEP`.
 
-Decided: `OPEN`.
+Two of the five couples are worktree-local caches. In the committed inventory
+their only declared consumer is `shared.worker.reconcile` — a declaration, not
+observed use (U2). If it holds, removing a cache alone changes no input of an
+agent-facing consumer: such a protocol would measure rebuild cost, which
+belongs to "Cost accounting" in section 3, not quality.
+
+Decided: **grouped first, then per couple only where the grouped result shows
+a regression** — 2026-09-19, repository owner, on the author's proposal.
+
+The decision leaves its second stage unwritten. What counts as a regression,
+and which per-couple protocols then run, are the "Second-stage rule" row of
+section 3, still `OPEN`.
 
 ## 5. Freeze procedure
 
