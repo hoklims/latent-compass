@@ -32,9 +32,32 @@ def run(*argv: str) -> tuple[int, Any, Any]:
 def test_limits_reports_every_declared_bound() -> None:
     code, out, _ = run("limits")
     assert code == EXIT_OK
-    assert out["model"]["max_worlds"] > 0
-    assert out["planning"]["max_horizon"] > 0
     assert "non_authority_notice" in out
+    # The published bounds of the 1.0.0 contracts, as literals: a bound that is
+    # relaxed or tightened without a contract version change turns this red.
+    assert {section: values for section, values in out.items() if isinstance(values, dict)} == {
+        "model": {
+            "max_worlds": 64,
+            "max_decisions": 32,
+            "max_probes": 32,
+            "max_outcomes_per_probe": 16,
+            "max_required_evidence_per_decision": 8,
+            "max_prior_weight": 1_000_000_000,
+            "max_loss": 1_000_000_000,
+            "max_probe_cost": 1_000_000_000,
+        },
+        "planning": {"max_budget": 1_000_000_000, "max_horizon": 6, "max_expansions": 200_000},
+        "state": {"max_state_revision": 32},
+        "cli": {"max_input_bytes": 8 * 1024 * 1024},
+        "memory": {
+            "max_facts": 4096,
+            "max_claims": 4096,
+            "max_events": 65_536,
+            "max_premises_per_conjunction": 16,
+            "max_supports_per_claim": 16,
+        },
+    }
+    assert (out["lab_contract_version"], out["lab_memory_contract_version"]) == ("1.0.0", "1.0.0")
 
 
 def test_validate_model_reports_the_model_seal() -> None:
