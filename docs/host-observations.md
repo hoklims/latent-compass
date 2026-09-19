@@ -216,6 +216,50 @@ the same loop under both shows that two episodes never mix — **not** that two
 live hosts behave alike. Wiring the loop into real Codex and Claude Code
 sessions remains open.
 
+## The rehearsal launcher (HOK-804)
+
+`examples/lab_rehearsal_launcher.py` is the one script here that contacts a
+real agent. The repository owner authorised a rehearsal **outside the
+protocol** (`docs/active-diagnosis-preregistration.md`, "Rehearsal outside the
+protocol"): six real `codex exec` sessions of at most fifteen minutes on a
+throwaway copy, to size the cost and latency ranges, the spend ceiling and the
+pair count, which cannot be chosen blind. It is not a trial runner and emits no
+`LabTrial`.
+
+```text
+python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated key> \
+    --source <repository to copy> --ref <commit> \
+    --tasks examples/lab-rehearsal-tasks.json --out <directory outside this repository>
+```
+
+- **It keeps durations and token usage, never an outcome.** The agent's events
+  are read for their `type` and their `usage` and dropped; nothing the agent
+  said or did is written anywhere. A rehearsal that kept it would be a look at
+  results before the freeze. It counts tokens and fabricates no money cost.
+- **Its ceilings are constants, not defaults.** Six sessions ever for one
+  output directory — each written to a ledger before its process starts, so a
+  crash still counts — and fifteen minutes each, the process tree killed on
+  overrun. Flags lower them and never raise them. A mistyped commit or a
+  refused key is refused before it can cost a session.
+- **No key file, nothing starts.** The dedicated key travels on standard input
+  to `codex login --with-api-key`, into a `CODEX_HOME` created for the run and
+  deleted after it; it is never an argument, an environment variable, a log
+  line or a report field, and a diagnostic is scrubbed of it. The owner's own
+  agent home and login are never read, copied or written: a token refreshed in
+  a copy could sign the owner out of the live session.
+- **The agent inherits almost nothing.** A short allow-listed environment, with
+  every home and temporary directory inside the isolated home; its own copy of
+  one commit, extracted from Git objects; the source repository only read.
+- The key's spend limit is a hard project limit at the provider, outside this
+  script, and its enforcement is not instantaneous: the ledger is the second
+  guard, not the first.
+
+`examples/lab-rehearsal-tasks.json` holds six throwaway tasks on this
+repository. They were written by the author, belong to no population and are
+excluded from any protocol. The tests drive the launcher with a stub standing
+in for the agent CLI: no real session runs in the test suite or in CI, and
+**the rehearsal itself has not run**.
+
 ## Non-claims
 
 The lab cannot authenticate the host. A tool identity, a Git identity, a check
