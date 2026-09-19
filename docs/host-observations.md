@@ -232,33 +232,67 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
     --tasks examples/lab-rehearsal-tasks.json --out <directory outside this repository>
 ```
 
-- **It keeps durations and token usage, never an outcome.** The agent's events
-  are read for their `type` and their `usage` and dropped; nothing the agent
-  said or did is written anywhere. A rehearsal that kept it would be a look at
-  results before the freeze. It counts tokens and fabricates no money cost.
-- **Its ceilings are constants, not defaults.** Six sessions ever for one
-  output directory — each written to a ledger before its process starts, so a
-  crash still counts — and fifteen minutes each, the process tree killed on
-  overrun. Flags lower them and never raise them. A mistyped commit or a
-  refused key is refused before it can cost a session.
-- **No key file, nothing starts.** The dedicated key travels on standard input
-  to `codex login --with-api-key`, into a `CODEX_HOME` created for the run and
-  deleted after it; it is never an argument, an environment variable, a log
-  line or a report field, and a diagnostic is scrubbed of it. The owner's own
-  agent home and login are never read, copied or written: a token refreshed in
-  a copy could sign the owner out of the live session.
-- **The agent inherits almost nothing.** A short allow-listed environment, with
-  every home and temporary directory inside the isolated home; its own copy of
-  one commit, extracted from Git objects; the source repository only read.
-- The key's spend limit is a hard project limit at the provider, outside this
-  script, and its enforcement is not instantaneous: the ledger is the second
-  guard, not the first.
+- **It keeps durations and token usage, never an outcome and never text.** The
+  agent's events are read for their `type` and their `usage` and dropped. A
+  session record holds a harness status (completed, failed turn, timed out,
+  failed to start) and a diagnostic **label** from a fixed vocabulary: whatever
+  the CLI wrote on its error stream is classified and dropped, because that
+  stream can carry the agent's last message. A rehearsal that kept any of it
+  would be a look at results before the freeze. A harness status is still a
+  fact about a task, which is why rehearsal tasks belong to no population. It
+  counts tokens and fabricates no money cost.
+- **Its ceilings are constants, not defaults.** Six sessions **per dedicated
+  key file**: the ledger lies beside the key, so another output directory does
+  not give the allowance back, and a lock beside the key refuses a second run
+  at the same time. A session is counted once its copy is ready and before its
+  process starts: a crash still counts, a copy that could not be made does not.
+  Fifteen minutes each: on overrun the process tree is killed and the pipes get
+  a bounded time to drain — an orphan that keeps them open is abandoned, not
+  awaited — and an interruption of the launcher kills the session before it
+  propagates. Flags lower both ceilings and never raise them. A mistyped commit
+  or a refused key is refused before it can cost a session.
+- **The ledger is not a spend limit.** It guards against mistakes, not against
+  its owner, who can delete it. The money bound is the hard limit set on the
+  key's project at the provider — outside this script, and not instantaneous.
+- **No key file, nothing starts.** A key file holding more than one token is
+  refused. The key travels on standard input to `codex login --with-api-key`,
+  into a `CODEX_HOME` created beside the key file for the run and deleted after
+  it; it is never an argument, an environment value, a log line or a report
+  field. That home's configuration pins the CLI's credential store to a file
+  inside it, and the run stops before any session unless the login really left
+  its credentials there: a CLI that put the key where the launcher cannot
+  delete it — an OS keyring — is refused, with the instruction to revoke the
+  key. The pin is the setting the CLI documents; it was not exercised against
+  the installed CLI, which is why the check after the login exists.
+  Whether that deletion succeeded is printed on every path, a run that
+  dies included, written in the report, and is the command line's exit code
+  (`3`). The CLI that receives the key is resolved from an absolute path or an
+  absolute `PATH` entry, never from the current directory. The launcher never
+  reads, copies or writes the owner's own agent home or login: a token
+  refreshed in a copy could sign the owner out of the live session.
+- **The agent inherits almost nothing — and that is not a jail.** An
+  allow-listed environment: every home and temporary directory and Git's global
+  configuration inside the isolated home, Git's system configuration and
+  credential prompts off, a `PATH` rebuilt from the few tools it needs; its own
+  copy of one commit, extracted from Git objects; the source repository only
+  read. The launcher does **not** control, and does not claim to: what the
+  agent can read on the machine under the CLI's `workspace-write` sandbox, what
+  the CLI writes outside `CODEX_HOME`, and the network. Do not run it under a
+  harness that prints local variables in tracebacks: the key is one of them.
+
+An independent security review of the first version of this launcher found
+five serious defects, all on error paths (a killed session awaited without a
+bound, an interruption that left the session running, a removal reported
+without looking, the CLI resolved from the current directory, an allowance
+tied to the output directory). This version is the corrected one. The
+corrections are covered by tests; they have **not** been reviewed again.
 
 `examples/lab-rehearsal-tasks.json` holds six throwaway tasks on this
 repository. They were written by the author, belong to no population and are
 excluded from any protocol. The tests drive the launcher with a stub standing
-in for the agent CLI: no real session runs in the test suite or in CI, and
-**the rehearsal itself has not run**.
+in for the agent CLI — a real process, which can overrun, leave a child or an
+orphan behind, fail and write on its error stream: no real session runs in the
+test suite or in CI, and **the rehearsal itself has not run**.
 
 ## Non-claims
 
