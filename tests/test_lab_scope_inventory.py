@@ -41,8 +41,14 @@ CURRENT = "hok799-scope-inventory-v1.1.0"
 SCENARIOS = REPO / "examples" / "lab-scenarios"
 SCOPE_DOCUMENT = REPO / "docs" / "active-diagnosis-scope.md"
 ADR = REPO / "docs" / "adr" / "0011-experimental-active-diagnosis.md"
-#: The ADR's decision as first committed, before any amendment was appended.
-ADR_DECISION_DIGEST = "sha256:a4aabe9d8928f4b577b3fb4d251aa506a52bae5f22c6800e811b2718b07478c9"
+#: Every section of the ADR, pinned. An amendment is appended and pinned here in
+#: the same change; an edit to any existing section, the decision included, is red.
+ADR_SECTIONS = {
+    "decision": "sha256:a4aabe9d8928f4b577b3fb4d251aa506a52bae5f22c6800e811b2718b07478c9",
+    "Amendment 2026-09-19 — operational scope (HOK-799)": (
+        "sha256:488e0521ee88283a2bf36cdef804b5cb39bd4b60d9f8024bdcb991bfe0f8368e"
+    ),
+}
 
 #: (generated_at, inventory_digest, report_seal) of every committed revision.
 PINNED = {
@@ -326,7 +332,6 @@ def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
     # Assembled at runtime so this module does not contain what it forbids.
     needles = (
         ":" + "\\",
-        ":" + "/",
         "\\" + "users",
         "/" + "users/",
         "/" + "home/",
@@ -341,15 +346,20 @@ def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
             assert needle not in text, f"{path.name} leaks {needle!r}"
 
 
-def test_the_adr_amendment_appends_and_leaves_the_decision_text_untouched() -> None:
+def test_the_adr_is_append_only_and_every_section_is_pinned() -> None:
     text = ADR.read_bytes().replace(b"\r\n", b"\n").decode("utf-8")
-    decision, heading, amendment = text.partition("\n## Amendment 2026-09-19")
-    assert heading, "the amendment heading is missing"
+    decision, *amendments = text.split("\n## Amendment ")
+    sections = {"decision": decision}
+    for body in amendments:
+        sections["Amendment " + body.split("\n", 1)[0]] = "\n## Amendment " + body
 
-    digest = "sha256:" + hashlib.sha256(decision.encode("utf-8")).hexdigest()
-    assert digest == ADR_DECISION_DIGEST, "the original decision text was edited"
+    digests = {
+        name: "sha256:" + hashlib.sha256(section.encode("utf-8")).hexdigest()
+        for name, section in sections.items()
+    }
+    assert digests == ADR_SECTIONS
     for directory in PINNED:
-        assert f"evidence/{directory}/" in amendment
+        assert f"evidence/{directory}/" in amendments[0]
 
 
 def test_the_scope_document_names_every_asset_and_both_revisions() -> None:

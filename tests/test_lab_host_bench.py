@@ -256,7 +256,9 @@ def test_a_host_that_ignores_the_advisor_runs_nothing_and_still_decides(tmp_path
     )
     assert [step["host_decision"] for step in ignored["steps"]] == ["IGNORED"]
     assert all("execution" not in step for step in ignored["steps"])
-    assert ignored["executor_child_processes"] == 0
+    # Building the repository did run git; that is counted, and counted apart.
+    assert ignored["setup_child_processes"] >= 4
+    assert ignored["probe_child_processes"] == 0
     assert ignored["remaining_budget"] == ignored["total_budget"]
     assert ignored["final_state_revision"] == 0
     assert ignored["final_decision_id"] == "hold-and-fix"
@@ -279,7 +281,7 @@ def test_without_advice_the_loop_takes_the_native_path_and_executes_nothing(
     assert (step["routing"]["verdict"], step["routing"]["reason"]) == ("ABSTAIN", reason)
     assert step["host_decision"] == "NOT_ADVISED"
     assert "execution" not in step
-    assert trace["executor_child_processes"] == 0
+    assert trace["probe_child_processes"] == 0
     assert trace["final_state_revision"] == 0
 
 
@@ -314,7 +316,7 @@ def test_expired_conflicting_or_ungated_advice_executes_nothing(
     assert (step["routing"]["verdict"], step["routing"]["reason"]) == (verdict, reason)
     assert step["host_decision"] == host_decision
     assert "execution" not in step
-    assert trace["executor_child_processes"] == 0
+    assert trace["probe_child_processes"] == 0
     assert trace["remaining_budget"] == trace["total_budget"]
     assert trace["final_state_revision"] == 0
     # The native path still ends on the best admissible decision of the prior.
@@ -361,7 +363,7 @@ def test_an_unobtainable_probe_is_not_retried_and_no_other_provider_stands_in(
     assert "execution" not in stopped
     # The failed attempt is still paid for, at its reserved ceiling; nothing else ran.
     assert trace["remaining_budget"] == 4
-    assert trace["executor_child_processes"] == 0
+    assert trace["probe_child_processes"] == 0
     assert trace["final_state_revision"] == 0
     assert trace["final_decision_id"] == "hold-and-fix"
 

@@ -14,8 +14,11 @@ more than it deserves:
 - `latent_compass.lab.host_session` — the bridge from a verified observation to
   one outcome of the finite model, or to `UNKNOWN`.
 
-`tests/test_lab_boundary.py` parses every lab module and refuses any import or
-call that would launch a process or reach the network.
+`tests/test_lab_boundary.py` parses every lab module **and every first-party
+module the lab can import**, and refuses any import or call that would launch a
+process or reach the network. One exception is named there, and only there: the
+confined reader loads a system library through `ctypes` to open files without
+following reparse points.
 
 ## One envelope, five kinds
 
@@ -31,8 +34,9 @@ Every `HostObservation` states, in the same fields whatever its kind: the
 question (as a digest, never as text), the declared coverage, the evidence, the
 **tool identity and version**, the providers that contributed, duration,
 observed cost, resource accounting (child processes, files read, repeated
-reads, internal index, cache) and its limits. `None` means *not observed* —
-never zero.
+reads, internal index, cache) and its limits. The three counts are mandatory: a
+host that cannot count cannot produce an admissible record. For duration, cost
+and the two flags, `None` means *not observed* — never zero or false.
 
 ### Status is not success or failure
 
@@ -74,11 +78,16 @@ conclusive observation covers, and refuses when:
 - an `EMPTY` literal search is contradicted by the covered source — the one
   emptiness the lab can check, since it holds both the bytes and the query;
 - a **retired provider** contributed: there is no hidden fallback;
+- the host declares a Git `HEAD` other than the snapshot's — both are
+  declarations, and one that names a change is still believed;
 - the record's mode is not the session's, or the scope or chronology is wrong.
 
 `SOURCE_ONLY` is the witness mode: it admits no symbol navigation and requires
 `internal_index_used` to be `false`, not unknown. `SOURCE_AND_SYMBOLIC` admits
-all five kinds and counts the language server's internal index.
+all five kinds and counts the language server's internal index: a symbolic
+observation that leaves `internal_index_used` unknown is refused.
+`worktree_dirty` is recorded for the reader and never consulted; the content
+digests decide.
 
 A non-conclusive observation passes the scope and policy checks and **reads
 nothing**.

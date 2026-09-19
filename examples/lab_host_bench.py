@@ -750,7 +750,10 @@ def run_episode(
         "final_decision_id": final.stopping_decision_id,
         "total_budget": total_budget,
         "remaining_budget": pool.available(),
-        "executor_child_processes": executor.child_processes,
+        # Building the throwaway repository runs git too; it is counted apart
+        # so that "no probe ran" is never read as "no process ran".
+        "setup_child_processes": setup.child_processes,
+        "probe_child_processes": executor.child_processes,
         "steps": steps,
     }
 

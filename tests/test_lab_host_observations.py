@@ -380,6 +380,24 @@ def test_source_only_mode_admits_no_symbolic_tool_and_no_unaccounted_index() -> 
     assert "requires internal_index_used to be false" in str(unknown_index.value.detail)
 
 
+def test_a_symbolic_observation_must_say_whether_its_tool_used_an_internal_index() -> None:
+    resources = record()["resources"]
+    assert isinstance(resources, dict)
+    unknown = dict(resources, internal_index_used=None)
+    limits = [*BASE_LIMITS, "DIRECT_RELATIONS_ONLY"]
+
+    # Live trap: the same record with the flag declared, either way, is admitted.
+    declared = record(resources=dict(resources, internal_index_used=False), limits=limits)
+    assert admit_host_observation(declared).resources.internal_index_used is False
+    with pytest.raises(HostObservationViolation) as refusal:
+        admit_host_observation(record(resources=unknown, limits=limits))
+    assert "must say whether its tool used an internal index" in str(refusal.value.detail)
+
+    # Only the symbolic kind carries that duty outside the witness mode.
+    check = check_record(mode="SOURCE_AND_SYMBOLIC", resources=unknown)
+    assert admit_host_observation(check).resources.internal_index_used is None
+
+
 def test_an_interpreted_outcome_is_a_flagged_host_reading_of_a_file_and_nothing_else() -> None:
     interpreted = admit_host_observation(file_read_record())
     assert interpreted.interpreted_outcome_id == "handler-retries"
@@ -443,6 +461,22 @@ def test_a_mutation_between_observation_and_consumption_invalidates_it(tmp_path:
     write(root, "module_b.py", MODULE_B + "# edited after the observation\n")
     assert refusal_reason(root, observation, snapshot=snapshot) == "drift_since_snapshot"
     assert observation.declared_git_head == snapshot.declared_git_head
+
+
+def test_a_declared_head_change_refuses_even_when_every_byte_still_matches(tmp_path: Path) -> None:
+    """The converse of the test above: the bytes never change here; only the HEAD does."""
+    root = source_root(tmp_path)
+    snapshot = capture(root)
+    assert snapshot.declared_git_head == GIT_HEAD
+    # Live trap: with the snapshot's own HEAD, the very same record verifies.
+    assert verify(root, admit_host_observation(record()), snapshot=snapshot).verified_paths
+
+    moved = admit_host_observation(record(declared_git_head="b" * 40))
+    assert refusal_reason(root, moved, snapshot=snapshot) == "declared_head_changed"
+
+    # An undeclared HEAD is unknown, not a change: the content decides alone.
+    undeclared = admit_host_observation(record(declared_git_head=None))
+    assert verify(root, undeclared, snapshot=snapshot).conclusiveness is Conclusiveness.FULL
 
 
 def test_evidence_the_tool_read_from_other_bytes_is_refused(tmp_path: Path) -> None:

@@ -26,7 +26,9 @@ line does not exist, or when the declared anchor does not occur in the cited
 lines — so an external mutation or a branch change between observation and
 consumption invalidates the observation even when the declared Git ``HEAD`` is
 identical. It refuses a retired provider, a symbolic observation in
-``SOURCE_ONLY`` mode, and any unaccounted internal index.
+``SOURCE_ONLY`` mode, a symbolic observation that does not say whether its tool
+used an internal index, and a declared Git ``HEAD`` other than the snapshot's.
+``worktree_dirty`` is recorded for the reader and never consulted.
 
 It cannot authenticate the host. A tool identity, a Git identity, a check
 verdict, a duration, a cost and the list of providers used are declarations
@@ -324,7 +326,12 @@ class CheckDetail(StrictModel):
 
 
 class ResourceAccounting(StrictModel):
-    """What the acquisition used. ``None`` means not observed, never zero."""
+    """What the acquisition used.
+
+    The three counts are mandatory: a host that cannot count cannot produce an
+    admissible record. For the two flags, ``None`` means not observed, never
+    ``False``.
+    """
 
     child_processes: int = Field(ge=0, le=MAX_CHILD_PROCESSES)
     files_read: int = Field(ge=0)
@@ -488,6 +495,13 @@ class HostObservation(StrictModel):
                 raise ValueError("SOURCE_ONLY mode admits no symbol navigation")
             if self.resources.internal_index_used is not False:
                 raise ValueError("SOURCE_ONLY mode requires internal_index_used to be false")
+        if (
+            self.kind is ObservationKind.SYMBOL_NAVIGATION
+            and self.resources.internal_index_used is None
+        ):
+            raise ValueError(
+                "a symbolic observation must say whether its tool used an internal index"
+            )
 
     def observation_seal(self) -> str:
         """Reproducible seal over the whole observation, in its own domain."""
@@ -741,6 +755,16 @@ def verify_host_observation(
             expected_root_id=expected_root_id,
         )
     _require_policy(observation, policy)
+    if (
+        observation.declared_git_head is not None
+        and snapshot.declared_git_head is not None
+        and observation.declared_git_head != snapshot.declared_git_head
+    ):
+        # Both are host declarations. One that names a change is still believed.
+        raise _refuse(
+            "the host declares a Git HEAD other than the one the snapshot was captured at",
+            "declared_head_changed",
+        )
     # Canonical ``YYYY-MM-DDTHH:MM:SSZ`` timestamps order lexicographically.
     verified_at = validate_contract(
         _Instant, {"value": verified_at}, error=HostObservationViolation, context="verified_at"
