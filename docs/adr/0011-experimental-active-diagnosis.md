@@ -183,3 +183,26 @@ lab checks that the id names a probe of the model, not that the tool is absent,
 and the record says so. And the restricted plan is exact for the restricted
 problem only; it may be worse than the unrestricted one when the declaration
 was wrong. The lab still launches nothing and gains no authority.
+
+## Amendment 2026-09-19 — a second pilot repository (HOK-799, U1)
+
+The decision above is unchanged, and a test pins its text. The scope amendment
+said that no other repository joins the pilot, and that a CCC verdict needs a
+second named pilot repository — an owner decision, recorded as unknown U1.
+
+On 2026-09-19 the repository owner took it: one second personal repository,
+with CCC provisioned, joins the pilot. It is named to the operator and travels
+here under the alias `pilot-second-repository`; the alias-to-path mapping is
+operator-held, like every other private detail. Its index artefacts were read
+the same day, without starting, refreshing or reconfiguring anything, and are
+sealed as five more assets in `evidence/hok799-scope-inventory-v1.2.0/`, beside
+the two earlier revisions, which are unchanged.
+
+What the decision moves, and what it does not. Three index/usage couples of
+that repository — its CCC index and its two Graphify artefacts — become
+candidates: `DISABLE_LATER` with every gate missing, never a permission. Its
+Semctx layer and its symbolic-tool cache are in the perimeter too and stay
+kept, by their classification alone: joining a pilot removes the scope lock.
+Every other personal repository stays unassessed, the professional environment
+and the vault stay excluded, and the workstation-wide CCC machinery stays
+outside any pilot. Nothing was activated, disabled, deleted or measured.

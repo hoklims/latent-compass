@@ -113,9 +113,26 @@ report_seal       sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e9
 It reproduces the same way, from its own directory and with
 `generated_at="2026-09-18T23:47:51Z"`.
 
+`hok799-scope-inventory-v1.2.0/` carries an owner decision, not a correction:
+on 2026-09-19 a second personal repository, with CCC provisioned, joined the
+pilot. It is revision 1.1.0 asset for asset, in the same order, plus the five
+index artefacts found in that repository, read the same day at 12:56 UTC
+without starting, refreshing or reconfiguring anything. The repository travels
+under the alias `pilot-second-repository`:
+
+```text
+inventory_digest  sha256:8b0468fc231cd5f6720a2a688c4e08b0cf3a9ee0325144d27096a24640d17a67
+report_seal       sha256:df4c53db79580da7f186e0fc9ef4aeaa9d9efc7d0f9dd70145b6ad586f9121a9
+```
+
+It reproduces the same way, with `generated_at="2026-09-19T12:57:30Z"`. Three of
+the five new assets leave `KEEP` — for `DISABLE_LATER`, with all seven gates
+missing; the two earlier revisions stay exactly as committed.
+
 Each `configuration_digest` is the SHA-256 of one named configuration source
-as read at observation time. The label-to-path mapping is operator-held: this
-repository refuses private host paths, and the professional environment is
+as read at observation time. The label-to-path mapping is operator-held, and so
+is the second pilot's alias-to-path mapping: this repository refuses private
+host paths and private repository names, and the professional environment is
 recorded as an excluded class, never by name. The files prove deterministic
 replay of a declared inventory. They do not prove that the inventory is
 complete, that an index is unused, or that anything may be removed. Scope and

@@ -1,8 +1,9 @@
 # Active-diagnosis operational scope (HOK-799)
 
 - Status: **experimental framing**
-- Revision: 2, 2026-09-18 (UTC) — corrected after an independent read-only
-  review of revision 1, written the same day
+- Revision: 3, 2026-09-19 (UTC) — records the owner's decision U1: a second
+  personal repository joins the pilot. Revision 2 (2026-09-18) corrected
+  revision 1 after an independent read-only review, written the same day
 
 A read-only inventory, a contract mapping and
 six acceptance scenarios. Nothing here activates, disables, deletes, trains or
@@ -20,30 +21,35 @@ considered for retirement, and which constraints stay mandatory.**
 | --- | --- | --- |
 | Host | One personal workstation, recorded under the operator-chosen label `personal-workstation` (a label, never a hostname, account or address — see `GOVERNANCE.md`) | Any other machine |
 | Agent families | Claude Code and Codex, each with its own host receipt store; one shared control-plane store | Any merged or cross-family store |
-| Pilot repository | This repository, `latent-compass`, and its Git worktrees — the only scope declared `PERSONAL_LAB` | Every other personal repository: **unassessed**, excluded from any verdict |
+| Pilot repositories | This repository, `latent-compass`, and its Git worktrees; and, by the owner's decision of 2026-09-19 (U1), one second personal repository, named to the operator and recorded here under the alias `pilot-second-repository`. These are the only two scopes declared `PERSONAL_LAB` | Every other personal repository: **unassessed**, excluded from any verdict |
 | Professional environment | Excluded **as a class** and never named here | No professional asset is ever eligible |
 | Obsidian vault | Excluded: authored memory and its two indexes are protected | No vault artefact is a candidate |
 
 The observation was read on 2026-09-18, ending at 22:38 UTC (2026-09-19 local
 time), with control-plane controller `2.5.0`, Git `2.50.1` and uv `0.12.5`. It
 is a dated read, not a standing fact; every size below is as of that read.
+The second pilot repository was read separately, on 2026-09-19 at 12:56 UTC,
+the same way; its sizes are as of that second read.
 
 ## 2. Inventory
 
-The machine-readable inventory is 25 assets in the
-`latent_compass.lab.migration` `1.0.0` contract, committed in two revisions.
+The machine-readable inventory is 30 assets in the
+`latent_compass.lab.migration` `1.0.0` contract, committed in three revisions.
 Each directory holds `inventory.json` and its sealed `dry-run-report.json`.
 
 | Revision | Directory | Report `generated_at` |
 | --- | --- | --- |
 | 1.0.0 — superseded, kept exactly as committed | `evidence/hok799-scope-inventory/` | `2026-09-19T00:00:00Z` |
-| 1.1.0 — **current** | `evidence/hok799-scope-inventory-v1.1.0/` | `2026-09-18T23:47:51Z` |
+| 1.1.0 — superseded, kept exactly as committed | `evidence/hok799-scope-inventory-v1.1.0/` | `2026-09-18T23:47:51Z` |
+| 1.2.0 — **current** | `evidence/hok799-scope-inventory-v1.2.0/` | `2026-09-19T12:57:30Z` |
 
 ```text
 1.0.0  inventory_digest  sha256:e139cfb224264d341c6206a21d9b444d804aeb17deb955e3acb97adf575a0fea
 1.0.0  report_seal       sha256:853172528179fafafba2616a7ca128c79d0405c43c7e8fb443ff8b71211f3249
 1.1.0  inventory_digest  sha256:b7d494805b10ad1b2f08151de84bdd8ecd36371bb06bb95f2f16982cb6e38887
 1.1.0  report_seal       sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e95fb7fcb31
+1.2.0  inventory_digest  sha256:8b0468fc231cd5f6720a2a688c4e08b0cf3a9ee0325144d27096a24640d17a67
+1.2.0  report_seal       sha256:df4c53db79580da7f186e0fc9ef4aeaa9d9efc7d0f9dd70145b6ad586f9121a9
 ```
 
 Revision 1.1.0 is the same read: the same 25 assets and the same configuration
@@ -53,7 +59,13 @@ assets that were recorded but never assessed — the two professional ones and
 only class that can ever leave `KEEP`; they are now `UNKNOWN`. And 1.0.0's
 `generated_at` is a placeholder later than the commit that carries it, where
 1.1.0 states the instant its report was really built. Corrections append: 1.0.0
-is never edited, and a test pins both revisions' seals.
+is never edited, and a test pins every revision's seals.
+
+Revision 1.2.0 carries the owner's decision U1. It is revision 1.1.0 asset for
+asset, in the same order, plus five assets: the index artefacts found in the
+second pilot repository. Nothing that was read before changed class or scope,
+and a test says so. The second read started, refreshed and reconfigured
+nothing, and left that repository's working tree exactly as it found it.
 
 Each asset falls in exactly one of three classes. **Candidate** means
 `DISABLE_LATER` with every gate still missing — never a permission. The
@@ -71,7 +83,29 @@ lab dereferences.
 
 For the pilot worktree the control plane reports Graphify configured and
 **CCC and Semctx not configured**. The Graphify code graph is therefore the
-only index the pilot can produce evidence about.
+only index the first pilot can produce evidence about.
+
+### Candidates — the second pilot repository (owner decision U1)
+
+| Asset | What it is |
+| --- | --- |
+| `ccc-semantic-index.pilot-second-repository` | The CCC semantic index kept inside that checkout, with its own settings file (about 461 MiB at the read) |
+| `graphify-code-graph.pilot-second-repository` | Derived structural graph artefacts kept for that repository in the shared store (one entry, about 52 MiB at the read) |
+| `graphify-worktree-cache.pilot-second-repository` | The git-ignored `graphify-out/` cache directory inside that checkout (under 1 MiB) |
+
+That repository tracked 1,671 files at the read, 939 of them code in five
+languages, on a single checkout: well above the 150-file, two-language
+admission threshold the first pilot stays under. Its newest index artefact was
+about 23 days old, and so were both hosts' route caches for it: **configured,
+and not recently visited**. That is a dated observation, not a measurement of
+use (U2).
+
+### Kept inside the second pilot — by classification alone
+
+| Asset | What it is |
+| --- | --- |
+| `semctx-semantic-layer.pilot-second-repository` | That repository's authored semantic layer (about 125 MiB at the read): required evidence, whose gates stay mandatory |
+| `serena-symbolic-cache.pilot-second-repository` | That repository's symbolic-tool cache and project settings (about 69 MiB at the read) |
 
 ### Kept — shared wiring, symbolic tools and required evidence
 
@@ -102,7 +136,7 @@ professional alike, so none can be retired from inside the pilot perimeter.
 
 | Asset | Why |
 | --- | --- |
-| `ccc-semantic-index.workstation` | Not provisioned for the pilot repository; present only in unassessed or excluded scopes |
+| `ccc-semantic-index.workstation` | The workstation-wide CCC machinery, shared by every repository it serves. The second pilot's own index is a separate asset; this one stays outside any pilot |
 | `personal-unassessed.worktree-artefacts` | Artefacts of personal repositories no pilot names; recorded, never assessed |
 | `professional.code-index-servers` | Professional scope; recorded as a class, never assessed |
 | `professional.worktree-artefacts` | Professional scope; recorded as a class, never assessed |
@@ -115,18 +149,26 @@ professional alike, so none can be retired from inside the pilot perimeter.
   vault, unassessed and ambiguous assets are protected by their classification
   *and* by their scope. The ten identified workstation-wide index assets — hooks,
   worker, sweep, stores and CCC — are `CANDIDATE_INDEX` and hold by their
-  `UNSCOPED` scope alone. Re-scoping one of them into the pilot is exactly U1's
-  owner decision: it turns a pinned exact-set test red, and it yields
-  `DISABLE_LATER` with all seven gates missing, never a permission.
+  `UNSCOPED` scope alone. Re-scoping one of them into a pilot would turn a
+  pinned exact-set test red and yield `DISABLE_LATER` with all seven gates
+  missing, never a permission. The owner's U1 decision did **not** do that: it
+  added the second repository's own assets and left the workstation-wide
+  machinery where it was.
+- **Inside a pilot perimeter a kept asset holds by one lock.** Joining a pilot
+  removes the scope lock. The second pilot's Semctx layer and symbolic-tool
+  cache are kept by their classification alone, and a test shows that this
+  classification is the only thing holding them.
 - **The shared store has no personal/professional separation.** Its admission
   gate denies the vault, agent memory and session folders, temporary and
   dependency directories; no rule separates personal from professional roots.
   Any retirement must therefore be decided per *(provider, worktree)* couple
   and never for the store as a whole.
-- **CCC cannot be judged on the pilot.** The admission policy provisions CCC
-  only from 150 code files in at least two languages; this repository tracked
-  about 90 at the read, all Python, and carries no CCC settings. A CCC verdict needs a
-  second named pilot repository — an owner decision (U1).
+- **CCC can be judged on the second pilot only.** The admission policy
+  provisions CCC only from 150 code files in at least two languages; this
+  repository tracked about 90 at the read, all Python, and carries no CCC
+  settings. A CCC verdict needed a second named pilot repository — the owner
+  decision U1, taken on 2026-09-19. One repository is one subject: whatever
+  HOK-804 finds there says nothing about any other repository.
 - **Hidden indexes are declared, not denied.** Language servers keep their own
   index, and the lab's justification memory is itself a specialised lookup
   structure. Both count as residual cost; neither supports a “zero index”
@@ -237,8 +279,8 @@ HOK-806.
 
 | Id | Unknown | Owner — resolved in |
 | --- | --- | --- |
-| U1 | Whether a second personal repository, with CCC provisioned, joins the pilot. Without it CCC receives no verdict | Repository owner — HOK-804 protocol freeze |
-| U2 | How often either host actually consumes the pilot's Graphify graph | HOK-804 baseline measurement |
+| U1 | Whether a second personal repository, with CCC provisioned, joins the pilot — **closed on 2026-09-19 by the repository owner: yes**, one repository, recorded under the alias `pilot-second-repository` (inventory revision 1.2.0) | Repository owner — decided before the HOK-804 protocol freeze |
+| U2 | How often either host actually consumes either pilot's indexes. At the second read the second pilot's artefacts and route caches were about 23 days old; that dates them and measures nothing | HOK-804 baseline measurement |
 | U3 | Owners and command lines of the resident index processes (observed by image name only) | Operator — HOK-806 dry-run |
 | U4 | Purpose and consumers of the autocommit task and of the unregistered advisor script | Operator — HOK-806 dry-run |
 | U5 | Which part of the Codex harness adapter is index-related | HOK-803 bench |
