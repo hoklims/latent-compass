@@ -71,6 +71,8 @@ SCOPE_DOCUMENT_DIGEST = "sha256:be0ec9d83f807380238379d6aebb289f66b3c313fa98652c
 #: pinned whole for the same reason.
 EVIDENCE_README = REPO / "evidence" / "README.md"
 EVIDENCE_README_DIGEST = "sha256:18aafd01b98db05483aade622753968b65ab35b135827df2f04c548e51b7f35a"
+#: Not pinned: the owner fills it in. It is only scanned for host details.
+PREREGISTRATION_SKELETON = REPO / "docs" / "active-diagnosis-preregistration.md"
 
 #: (generated_at, inventory_digest, report_seal) of every committed revision.
 PINNED = {
@@ -557,7 +559,8 @@ def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
     )
     paths = sorted(SCENARIOS.glob("*.json")) + sorted(REPO.glob("evidence/hok799-*/*.json"))
     assert len(paths) == 11
-    paths += [SCOPE_DOCUMENT, ADR, EVIDENCE_README]
+    # The HOK-804 skeleton names the second pilot's couples too, so it is read the same way.
+    paths += [SCOPE_DOCUMENT, ADR, EVIDENCE_README, PREREGISTRATION_SKELETON]
     for path in paths:
         text = path.read_text(encoding="utf-8").lower()
         for needle in needles:
