@@ -1244,7 +1244,10 @@ def test_the_command_line_refuses_with_its_own_exit_code(
     assert "not the expected version" in capsys.readouterr().err
     absent = str(rig.source.parent / "absent.json")
     unreadable = [absent if item.endswith("tasks.json") else item for item in arguments]
-    assert launcher.main(unreadable) == launcher.EXIT_REFUSED
+    try:
+        assert launcher.main(unreadable) == launcher.EXIT_REFUSED
+    except OSError as error:
+        pytest.fail(f"an absent task file surfaced as {type(error).__name__}, not an exit code")
     assert "cannot be read as JSON" in capsys.readouterr().err
     rig.key_file.unlink()
     assert launcher.main(arguments) == launcher.EXIT_REFUSED
@@ -1269,12 +1272,15 @@ def test_a_malformed_task_file_is_refused(tmp_path: Path) -> None:
     with pytest.raises(launcher.RehearsalRefusedError, match="repeat"):
         launcher.load_tasks(path)
     # A file that is not JSON, or is not there, is a refusal like any other, not a traceback.
-    for content in ("not json", ""):
-        path.write_text(content, encoding="utf-8")
+    try:
+        for content in ("not json", ""):
+            path.write_text(content, encoding="utf-8")
+            with pytest.raises(launcher.RehearsalRefusedError, match="cannot be read as JSON"):
+                launcher.load_tasks(path)
         with pytest.raises(launcher.RehearsalRefusedError, match="cannot be read as JSON"):
-            launcher.load_tasks(path)
-    with pytest.raises(launcher.RehearsalRefusedError, match="cannot be read as JSON"):
-        launcher.load_tasks(tmp_path / "absent.json")
+            launcher.load_tasks(tmp_path / "absent.json")
+    except (OSError, ValueError) as error:
+        pytest.fail(f"an unreadable task file surfaced as {type(error).__name__}, not a refusal")
 
 
 def test_the_committed_throwaway_tasks_load_and_fit_the_allowance() -> None:
@@ -1290,12 +1296,17 @@ def test_an_interpreter_too_old_to_tell_a_junction_is_refused_at_once(
 ) -> None:
     older = namedtuple("older", ["major", "minor", "micro", "releaselevel", "serial"])
     monkeypatch.setattr(sys, "version_info", older(3, 11, 9, "final", 0))
-    spec = importlib.util.spec_from_file_location("launcher_under_an_older_python", LAUNCHER_PATH)
+    name = "launcher_under_an_older_python"
+    spec = importlib.util.spec_from_file_location(name, LAUNCHER_PATH)
     assert spec is not None
     assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Registered as an import would register it: a launcher that did not refuse would load
+    # whole, and the verdict has to be this test's, not an accident of how it was loaded.
+    monkeypatch.setitem(sys.modules, name, module)
     # Before anything else of the module runs: nothing of it guesses what a junction is.
     with pytest.raises(SystemExit, match=r"Python 3\.12 or later"):
-        spec.loader.exec_module(importlib.util.module_from_spec(spec))
+        spec.loader.exec_module(module)
 
 
 def test_the_launcher_and_its_tasks_name_no_private_location() -> None:
