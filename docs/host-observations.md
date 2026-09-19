@@ -228,7 +228,7 @@ pair count, which cannot be chosen blind. It is not a trial runner and emits no
 
 ```text
 python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated key> \
-    --source <repository to copy> --ref <commit> \
+    --source <repository to copy> --ref <commit> --cli-version <the CLI version expected> \
     --tasks examples/lab-rehearsal-tasks.json --out <directory outside this repository>
 ```
 
@@ -237,62 +237,103 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   session record holds a harness status (completed, failed turn, timed out,
   failed to start) and a diagnostic **label** from a fixed vocabulary: whatever
   the CLI wrote on its error stream is classified and dropped, because that
-  stream can carry the agent's last message. A rehearsal that kept any of it
-  would be a look at results before the freeze. A harness status is still a
-  fact about a task, which is why rehearsal tasks belong to no population. It
-  counts tokens and fabricates no money cost.
-- **Its ceilings are constants, not defaults.** Six sessions **per dedicated
-  key file**: the ledger lies beside the key, so another output directory does
-  not give the allowance back, and a lock beside the key refuses a second run
-  at the same time. A session is counted once its copy is ready and before its
-  process starts: a crash still counts, a copy that could not be made does not.
-  Fifteen minutes each: on overrun the process tree is killed and the pipes get
-  a bounded time to drain — an orphan that keeps them open is abandoned, not
-  awaited — and an interruption of the launcher kills the session before it
-  propagates. Flags lower both ceilings and never raise them. A mistyped commit
+  stream can carry the agent's last message. The one string of the CLI's that
+  is kept is its version, and only when it has the shape of a version — a key
+  cannot pass for one. A rehearsal that kept more would be a look at results
+  before the freeze. A harness status is still a fact about a task, which is
+  why rehearsal tasks belong to no population. It counts tokens and fabricates
+  no money cost; the report's ranges cover completed sessions only, beside a
+  count per status, because a session that failed or timed out says nothing
+  about what a session costs.
+- **Its ceilings are constants, not defaults.** Six sessions **per directory
+  holding the key file**: the ledger lies beside the key under a fixed name, so
+  neither another output directory nor a copy of the key file beside it gives
+  the allowance back, and a lock beside the key refuses a second run at the
+  same time. A session is counted once its copy is ready and before its process
+  starts: a crash still counts, a copy that could not be made does not. A run
+  stops at the first session that fails — failed to start, failed turn, error
+  exit: a CLI that rejects a flag or the key would otherwise burn the allowance
+  in seconds. Flags lower both ceilings and never raise them. A mistyped commit
   or a refused key is refused before it can cost a session.
+- **Fifteen minutes per session, while the launcher is alive.** On overrun the
+  process tree is killed — a kill that does not take is printed, with the
+  process id — and the pipes get a bounded time to drain: an orphan that keeps
+  them open is abandoned, which means not awaited and not killed. An
+  interruption of the launcher (Ctrl+C, a termination signal, Ctrl+Break) kills
+  the session before it propagates. A launcher killed outright — its process
+  terminated, the power cut — kills nothing: the session it started runs to its
+  own end. The durable fix on Windows, a job object that dies with the
+  launcher, is not built.
 - **The ledger is not a spend limit.** It guards against mistakes, not against
   its owner, who can delete it. The money bound is the hard limit set on the
   key's project at the provider — outside this script, and not instantaneous.
-- **No key file, nothing starts.** A key file holding more than one token is
-  refused. The key travels on standard input to `codex login --with-api-key`,
-  into a `CODEX_HOME` created beside the key file for the run and deleted after
-  it; it is never an argument, an environment value, a log line or a report
-  field. That home's configuration pins the CLI's credential store to a file
-  inside it, and the run stops before any session unless the login really left
-  its credentials there: a CLI that put the key where the launcher cannot
-  delete it — an OS keyring — is refused, with the instruction to revoke the
-  key. The pin is the setting the CLI documents; it was not exercised against
-  the installed CLI, which is why the check after the login exists.
-  Whether that deletion succeeded is printed on every path, a run that
-  dies included, written in the report, and is the command line's exit code
-  (`3`). The CLI that receives the key is resolved from an absolute path or an
-  absolute `PATH` entry, never from the current directory. The launcher never
-  reads, copies or writes the owner's own agent home or login: a token
-  refreshed in a copy could sign the owner out of the live session.
+- **No key file, nothing starts.** A file that does not hold exactly one API
+  key — several tokens, too long, not the provider's prefix — is refused: a
+  wrong file is not sent to the CLI. The CLI that receives the key is resolved
+  from an absolute path or an absolute `PATH` entry, never from the current
+  directory; it has to state a version before the key is handed to it, and
+  `--cli-version` pins that version. The key travels on standard input to
+  `codex login --with-api-key`, into a `CODEX_HOME` created beside the key file
+  for the run and deleted after it; it is never an argument, an environment
+  value, a log line or a report field. That home's configuration pins the CLI's
+  credential store to a file inside it, and the run stops before any session
+  unless the login really left its credentials there: a CLI that put the key
+  where the launcher cannot delete it — an OS keyring — is refused, with the
+  instruction to revoke the key. The pin is the setting the CLI documents; it
+  was not exercised against the installed CLI, which is why the check after the
+  login exists.
+- **Whether the key copy is gone is said, as far as the launcher still runs.**
+  It is printed on every path on which the launcher still runs — an
+  interruption included, and a second one while the copy is being deleted; it
+  is written in the report, and is the command line's exit code (`3`), when the
+  run reaches its end. A run that died without unwinding leaves that home, and
+  the key in it, behind: the next run looks for it first, deletes it, says so,
+  and refuses once. If the home cannot be deleted, do not read what else it
+  holds: the CLI is asked not to persist session files (`--ephemeral`), and
+  that is a request, not something the launcher checks.
 - **The agent inherits almost nothing — and that is not a jail.** An
   allow-listed environment: every home and temporary directory and Git's global
   configuration inside the isolated home, Git's system configuration and
   credential prompts off, a `PATH` rebuilt from the few tools it needs; its own
   copy of one commit, extracted from Git objects; the source repository only
-  read. The launcher does **not** control, and does not claim to: what the
-  agent can read on the machine under the CLI's `workspace-write` sandbox, what
-  the CLI writes outside `CODEX_HOME`, and the network. Do not run it under a
-  harness that prints local variables in tracebacks: the key is one of them.
+  read. The launcher never reads, copies or writes the owner's own agent home
+  or login — **the agent it starts is another matter**. The CLI's
+  `workspace-write` policy lets the agent **read the whole file system** by
+  design. What stops it from **writing** outside its copy is the platform's
+  sandbox: documented for Linux and macOS; on native Windows it is a
+  restricted-token sandbox whose enforcement the launcher cannot verify. On
+  Windows, assume the agent can read and write whatever the account running the
+  launcher can, the owner's own agent home included — and two of the six tasks
+  ask it to edit files and run commands. Nor does the launcher control what the
+  CLI writes outside `CODEX_HOME`, or the network. Do not run it under a harness
+  that prints local variables in tracebacks: the key is one of them until the
+  login is done, and Python does not erase it from memory.
 
-An independent security review of the first version of this launcher found
-five serious defects, all on error paths (a killed session awaited without a
-bound, an interruption that left the session running, a removal reported
-without looking, the CLI resolved from the current directory, an allowance
-tied to the output directory). This version is the corrected one. The
-corrections are covered by tests; they have **not** been reviewed again.
+Two independent security reviews preceded any real run, and both returned
+"fix before the first real run". The first found five serious defects, all on
+error paths (a killed session awaited without a bound, an interruption that
+left the session running, a removal reported without looking, the CLI resolved
+from the current directory, an allowance tied to the output directory). The
+second, on the corrected version, found two: a run that dies without unwinding
+left the key on disk and no later run noticed; and the text disclaimed what the
+agent can read under the sandbox, never what it can write, on the one platform
+where the sandbox is not established. It also found seven lesser defects —
+among them a failed session that did not stop the run, a version shape a key
+could pass, an allowance tied to the key file's name, a removal that could walk
+through a junction. This version closes what code can close. **It has not been
+reviewed a third time, and what the sandbox enforces on Windows is not a
+defect that a commit can close: it is a condition of the first real run, for
+the owner to decide.**
 
 `examples/lab-rehearsal-tasks.json` holds six throwaway tasks on this
 repository. They were written by the author, belong to no population and are
 excluded from any protocol. The tests drive the launcher with a stub standing
 in for the agent CLI — a real process, which can overrun, leave a child or an
-orphan behind, fail and write on its error stream: no real session runs in the
-test suite or in CI, and **the rehearsal itself has not run**.
+orphan behind, fail, write on its error stream, lie about its version and keep
+the key elsewhere; on Windows one test runs it behind a batch shim, the shape
+the real CLI has on the author's host. No real session runs in the test suite
+or in CI, no test delivers a real termination signal, and **the rehearsal
+itself has not run**.
 
 ## Non-claims
 
