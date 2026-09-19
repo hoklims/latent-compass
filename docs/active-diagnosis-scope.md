@@ -31,12 +31,15 @@ is a dated read, not a standing fact; every size below is as of that read.
 The second pilot repository was read separately, on 2026-09-19 at 12:56 UTC,
 the same way; its sizes are as of that second read.
 
-Every size, file count and age in this document is an **operator declaration**.
-The committed inventory carries none of them — the `1.0.0` asset contract has
-no size, count or age field — and no test or artefact in this repository
-supports them. The reads they come from are operator-held, because they name
-repositories and host paths this repository refuses. They explain a decision;
-they prove nothing, and nobody outside the workstation can check them.
+Every size, file count, language count and age in this document is an
+**operator declaration**, and so is every statement about how a read was made
+— that it started, refreshed or reconfigured nothing, here and where the ADR
+or `evidence/README.md` repeat it. The committed inventory carries none of
+them — the `1.0.0` asset contract has no size, count or age field — and no
+test or artefact in this repository supports them. The reads they come from
+are operator-held, because they name repositories and host paths this
+repository refuses. They explain a decision; they prove nothing, and nobody
+outside the workstation can check them.
 
 ## 2. Inventory
 
@@ -71,8 +74,9 @@ is never edited, and a test pins every revision's seals.
 Revision 1.2.0 carries the owner's decision U1. It is revision 1.1.0 asset for
 asset, in the same order, plus five assets: the index artefacts found in the
 second pilot repository. Nothing that was read before changed class or scope,
-and a test says so. The second read started, refreshed and reconfigured
-nothing, and left that repository's working tree exactly as it found it.
+and a test says so. By the operator's account, the second read started,
+refreshed and reconfigured nothing, and left that repository's working tree as
+it found it.
 
 Each asset falls in exactly one of three classes. **Candidate** means
 `DISABLE_LATER` with every gate still missing — never a permission. The
@@ -81,7 +85,7 @@ inventory: it needs backup, restore and stability references, and those three
 gates close **by declaration** — a digest the operator supplies, never one the
 lab dereferences.
 
-### Candidates — the pilot perimeter only
+### Candidates — the first pilot perimeter
 
 | Asset | What it is |
 | --- | --- |
@@ -117,7 +121,7 @@ before the read. A file date is not a freshness verdict and measures no use
 ### Kept — shared wiring, symbolic tools and required evidence
 
 These serve every enrolled worktree on the workstation, personal and
-professional alike, so none can be retired from inside the pilot perimeter.
+professional alike, so none can be retired from inside a pilot perimeter.
 
 | Asset | What it is |
 | --- | --- |
@@ -143,7 +147,7 @@ professional alike, so none can be retired from inside the pilot perimeter.
 
 | Asset | Why |
 | --- | --- |
-| `ccc-semantic-index.workstation` | The workstation-wide CCC machinery, shared by every repository it serves. The second pilot's own index is a separate asset; this one stays outside any pilot |
+| `ccc-semantic-index.workstation` | Recorded under the `personal-unassessed` scope, outside both pilots. The second pilot's own CCC index is a separate asset, recorded under that pilot's scope |
 | `personal-unassessed.worktree-artefacts` | Artefacts of personal repositories no pilot names; recorded, never assessed |
 | `professional.code-index-servers` | Professional scope; recorded as a class, never assessed |
 | `professional.worktree-artefacts` | Professional scope; recorded as a class, never assessed |
@@ -296,7 +300,7 @@ HOK-806.
 | U6 | Tool identity (Git, language servers, test runners) bound to each observation — **closed in the contract** by the host session; the identity stays a host declaration | HOK-803 bench, on observed tool versions |
 | U7 | Cost of language-server indexes and caches | HOK-804 cost accounting |
 | U8 | Every numeric budget, margin and threshold of the real experiment | Repository owner — HOK-804 preregistration |
-| U9 | Whether the pilot repository must be enrolled in Semctx before HOK-805 | Repository owner — HOK-805 entry conditions |
+| U9 | Whether the first pilot repository must be enrolled in Semctx before HOK-805; the inventory records a Semctx layer for the second pilot and none for the first | Repository owner — HOK-805 entry conditions |
 
 ## 9. Non-claims
 

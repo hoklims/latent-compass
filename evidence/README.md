@@ -116,9 +116,9 @@ It reproduces the same way, from its own directory and with
 `hok799-scope-inventory-v1.2.0/` carries an owner decision, not a correction:
 on 2026-09-19 a second personal repository, with CCC provisioned, joined the
 pilot. It is revision 1.1.0 asset for asset, in the same order, plus the five
-index artefacts found in that repository, read the same day at 12:56 UTC
-without starting, refreshing or reconfiguring anything. The repository travels
-under the alias `pilot-second-repository`:
+index artefacts found in that repository, read the same day at 12:56 UTC — by
+the operator's account, without starting, refreshing or reconfiguring anything.
+The repository travels under the alias `pilot-second-repository`:
 
 ```text
 inventory_digest  sha256:8b0468fc231cd5f6720a2a688c4e08b0cf3a9ee0325144d27096a24640d17a67

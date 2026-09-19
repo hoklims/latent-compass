@@ -6,16 +6,17 @@ never-assessed assets as index candidates, and its report carries a placeholder
 instant later than its own commit. ``evidence/hok799-scope-inventory-v1.1.0``
 corrects both. ``evidence/hok799-scope-inventory-v1.2.0`` carries the owner's
 U1 decision: it appends the index artefacts of a second personal repository,
-under an alias, and changes nothing else. It is the revision every other test
-here reads.
+under an alias, and changes nothing else. It is the revision a test here reads
+unless it names another.
 
-These tests prove that each revision still reproduces seal for seal and is never
-edited in place, that only the two named pilot perimeters are ever eligible for
-anything other than ``KEEP``, which assets hold by one lock and which by two,
-that the vocabulary travelling with the evidence is exactly the declared one,
-and that neither the ADR nor the scope document is reworded without a pin
-changing. They prove nothing about whether any index is useful, and nothing
-about the operator's reads the scope document quotes.
+These tests prove that each revision still reproduces seal for seal and that an
+edit in place cannot pass unless its pin is changed in the same diff, that only
+the two named pilot perimeters are ever eligible for anything other than
+``KEEP``, which assets hold by one lock and which by two, that the vocabulary
+travelling with the evidence is exactly the declared one, and that neither the
+ADR nor the scope document is reworded without a pin changing. They prove
+nothing about whether any index is useful, and nothing about the operator's
+reads the scope document quotes.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ ADR_SECTIONS = {
 }
 #: The scope document is revised in place, so it is pinned whole: a reworded perimeter
 #: shows up as a changed pin in the same diff, never as prose nobody had to look at.
-SCOPE_DOCUMENT_DIGEST = "sha256:6bbdc646bc8f2d36b9bfd98dbd28325f49235c024dec6e3f9015fff3ab89027c"
+SCOPE_DOCUMENT_DIGEST = "sha256:be0ec9d83f807380238379d6aebb289f66b3c313fa98652c82c1a35c5849384a"
 
 #: (generated_at, inventory_digest, report_seal) of every committed revision.
 PINNED = {
@@ -122,6 +123,19 @@ SINGLY_LOCKED = {
     "shared.store.control-plane",
     "shared.task.index-control-sweep",
     "shared.worker.reconcile",
+}
+#: Every other kept asset, named so that no asset identifier travels undeclared.
+OTHER_KEPT_ASSETS = {
+    "claude.hook.unregistered-routing-advisor",
+    "claude.mcp.code-intelligence",
+    "codex.hook.harness-adapter",
+    "codex.mcp.code-intelligence",
+    "native-lsp.claude-plugin",
+    "semctx-semantic-layer.workstation",
+    "serena-symbolic-server.workstation",
+    "shared.task.control-plane-autocommit",
+    "vault-graphify.graph",
+    "vault-semantic.dense-index",
 }
 DECLARED_SCOPES = {
     "personal-unassessed",
@@ -232,6 +246,15 @@ def test_the_inventory_is_not_vacuous_and_every_asset_admits() -> None:
 
 
 @pytest.mark.parametrize("directory", sorted(PINNED))
+def test_no_revision_declares_an_evidence_reference(directory: str) -> None:
+    # No backup, restore or stability evidence exists yet, so a declared reference would be
+    # a claim nobody backed. On a protected asset no disposition would show it: the dry-run
+    # answers KEEP before it reads the references.
+    declared = [asset.asset_id for asset in inventory(directory) if asset.evidence_references]
+    assert not declared, f"{directory} declares evidence references: {declared}"
+
+
+@pytest.mark.parametrize("directory", sorted(PINNED))
 def test_a_committed_revision_reproduces_and_is_never_edited_in_place(directory: str) -> None:
     committed = committed_report(directory)
     rebuilt = build_retirement_dry_run(inventory(directory), generated_at=committed.generated_at)
@@ -276,10 +299,22 @@ def test_the_second_pilot_revision_appends_five_assets_and_changes_nothing_else(
         (SECOND_PILOT_SCOPE, "PERSONAL_LAB")
     }
     assert not [item["asset_id"] for item in corrected if item["scope"] == SECOND_PILOT_SCOPE]
-    assert {item["classification"] for item in appended} == {
-        "CANDIDATE_INDEX",
-        "REQUIRED_EVIDENCE",
-        "SOURCE_OR_SYMBOLIC_TOOL",
+    # What each appended asset is said to be, asset by asset: a provider, role or class
+    # swapped for another declared one would leave every vocabulary set unchanged.
+    suffix = "." + SECOND_PILOT_SCOPE
+    assert {
+        item["asset_id"]: (item["provider_id"], item["role"], item["classification"])
+        for item in appended
+    } == {
+        "ccc-semantic-index" + suffix: ("cocoindex-code", "semantic-code-index", "CANDIDATE_INDEX"),
+        "graphify-code-graph" + suffix: ("graphify", "derived-structural-index", "CANDIDATE_INDEX"),
+        "graphify-worktree-cache" + suffix: ("graphify", "worktree-local-cache", "CANDIDATE_INDEX"),
+        "semctx-semantic-layer" + suffix: (
+            "semctx",
+            "authored-semantic-layer",
+            "REQUIRED_EVIDENCE",
+        ),
+        "serena-symbolic-cache" + suffix: ("serena", SECOND_PILOT_ROLE, "SOURCE_OR_SYMBOLIC_TOOL"),
     }
 
 
@@ -441,19 +476,25 @@ def test_forging_the_classification_alone_never_moves_an_excluded_asset(asset_id
 
 
 def test_the_vocabulary_travelling_with_the_evidence_is_exactly_the_declared_one() -> None:
-    # Every text field is an identifier, which cannot hold a path separator: a
+    # Every field an author words freely — asset identifier, scope, provider, role,
+    # consumer, host label — is an identifier, which cannot hold a path separator: a
     # needle scan is inert here. What an identifier can hold is a hostname, an
-    # account, an employer or a private repository name, so the vocabularies an
-    # author words freely — scope, provider, role, consumer — are each pinned to an
-    # exact set that a newcomer has to be added to by hand. The host label is pinned
-    # beside the asset count. Asset identifiers are pinned by name where a perimeter
-    # or a lock is asserted, not here: outside those sets only their number is.
+    # account, an employer or a private repository name, so each of these vocabularies
+    # is pinned to an exact set that a newcomer has to be added to by hand, where a
+    # reviewer reads it as a word and not as a changed digest. The test checks set
+    # membership; that a declared word names nobody is the reviewer's reading.
+    earlier = PILOT_ASSETS | NOT_ASSESSED | SINGLY_LOCKED | OTHER_KEPT_ASSETS
+    assert len(earlier) == 25
     for directory in PINNED:
         assets = inventory(directory)
         assert assets, directory
-        # The second pilot's alias and its one new role are the only newcomers, and only
-        # from the revision that carries the owner's decision. Neither names a repository.
+        # The second pilot's assets, its alias and its one new role are the only
+        # newcomers, and only from the revision that carries the owner's decision.
         current = directory == CURRENT
+        assert {asset.asset_id for asset in assets} == earlier | (
+            SECOND_PILOT_CANDIDATES | SECOND_PILOT_KEPT if current else set()
+        ), directory
+        assert {asset.host_id for asset in assets} == {"personal-workstation"}, directory
         assert {asset.scope for asset in assets} == DECLARED_SCOPES | (
             {SECOND_PILOT_SCOPE} if current else set()
         ), directory
@@ -469,15 +510,24 @@ def test_the_vocabulary_travelling_with_the_evidence_is_exactly_the_declared_one
 def test_no_private_host_detail_travels_with_the_free_text_fixtures() -> None:
     # The scenario fixtures carry free text, where these needles can really fire, and so do
     # the documents written beside the evidence: a pin stops a silent rewording, never an
-    # author who rewords and re-pins.
+    # author who rewords and re-pins. The needles see the shapes of a host detail — a path,
+    # an address, a link, a code host. They cannot see a bare name: in an identifier the
+    # pinned vocabulary carries that, and in prose only whoever reads the changed pin does.
     # Assembled at runtime so this module does not contain what it forbids.
     needles = (
-        ":" + "\\",
-        "\\" + "users",
+        "\\",
         "/" + "users/",
         "/" + "home/",
+        "/" + "root/",
+        "/" + "mnt/",
+        "~" + "/",
         "app" + "data",
         "@",
+        ":" + "//",
+        "www" + ".",
+        "github" + ".com",
+        "gitlab" + ".com",
+        "bitbucket" + ".org",
     )
     paths = sorted(SCENARIOS.glob("*.json")) + sorted(REPO.glob("evidence/hok799-*/*.json"))
     assert len(paths) == 11
