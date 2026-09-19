@@ -38,10 +38,13 @@ What bounds it:
   amounts to, or the power cut — kills nothing: the session it started runs to its own
   end;
 * flags may lower both ceilings and never raise them. The session always gets
-  ``--sandbox workspace-write`` and ``--ephemeral``; no flag of this script changes that.
+  ``--sandbox workspace-write`` and ``--ephemeral``, and nothing here takes them away.
+  ``--codex-command`` is the operator's own: what is put there comes before ``exec``, and
+  whether a configuration override placed there could outweigh the explicit flag was not
+  verified on the installed CLI.
 
-It needs Python 3.12 or later: what it relies on to tell a junction from a directory does
-not exist before, and it fails loudly rather than guess.
+It needs Python 3.12 or later and refuses to start on an older one: what tells a junction
+from a directory does not exist before.
 
 **The ledger is not a spend limit.** It guards against mistakes — not against its owner,
 who can delete it, and not against the agent this script starts, which on a platform
@@ -124,6 +127,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
+if sys.version_info < (3, 12):  # noqa: UP036 - a script is run by whatever interpreter is at hand
+    # What tells a junction from a directory does not exist before: refuse, do not guess.
+    raise SystemExit("this launcher needs Python 3.12 or later")
+
 APPROVED_MAX_SESSIONS: Final = 6
 APPROVED_SESSION_SECONDS: Final = 900
 HOUSEKEEPING_SECONDS: Final = 60
@@ -150,7 +157,9 @@ COPY_PREFIX: Final = "lc-rehearsal-copy-"
 CREDENTIALS: Final = "auth.json"
 KEY_PREFIX: Final = b"sk-"
 MAX_KEY_BYTES: Final = 512
-MAX_PROMPT_BYTES: Final = 32 * 1024
+# Writing to a child that never reads has no timeout on Windows. Measured on the author's
+# host: such a pipe took 4096 bytes and blocked at 4097. The system promises no size.
+MAX_PROMPT_BYTES: Final = 4096
 # What asks this script to stop. Ctrl+C already unwinds; without a handler these would not —
 # a closed terminal (SIGHUP) least of all, and the session, in its own session, would not die.
 UNWOUND_SIGNALS: Final = ("SIGTERM", "SIGBREAK", "SIGHUP", "SIGQUIT")
@@ -738,14 +747,12 @@ def run_rehearsal(
             "an argument, or the temporary directory's path, holds a character a batch shim "
             "would read as a command"
         )
-    if Path(git).suffix.lower() in BATCH_SUFFIXES and any(
-        BATCH_UNSAFE.search(argument) for argument in (str(source), ref)
-    ):
-        raise RehearsalRefusedError(
-            "the source or the commit holds a character a batch shim of git would read as a command"
-        )
+    if Path(git).suffix.lower() in BATCH_SUFFIXES:
+        # Git is handed the source, the commit, and an argument built here that always holds a
+        # character the shell reads again ("^"): behind a batch shim none of it arrives as sent.
+        raise RehearsalRefusedError("git resolves to a batch shim: put a real git first on PATH")
     if any(len(task.prompt.encode("utf-8")) > MAX_PROMPT_BYTES for task in tasks):
-        # Writing a prompt to a CLI that does not read it has no timeout on every platform.
+        # The write of a prompt has no timeout on Windows: its size is what is bounded instead.
         raise RehearsalRefusedError("a prompt is longer than a rehearsal task has any use for")
     command = [resolved, *codex[1:]]
     # Records that cannot be read are found now, not once the sessions have been paid for.
@@ -765,6 +772,7 @@ def run_rehearsal(
         out.mkdir(parents=True, exist_ok=True)
         home = Path(tempfile.mkdtemp(prefix=HOME_PREFIX, dir=key_file.parent))
         version, key_copy_removed, stopped = "unknown", False, False
+        refusal: RehearsalRefusedError | None = None
         try:
             environment = child_environment(home, tool_path(resolved))
             # Before the key leaves: which CLI is about to receive it.
@@ -853,6 +861,11 @@ def run_rehearsal(
                     # session is started while something of the last one may still be alive.
                     stopped = True
                     break
+        except RehearsalRefusedError as error:
+            # Kept by name: what the interpreter holds as "the current exception" further down
+            # may be a caller's, and have nothing to do with this run.
+            refusal = error
+            raise
         finally:
             # On every path this script still runs, an interruption included — and a second
             # one while the key copy is being deleted.
@@ -871,9 +884,8 @@ def run_rehearsal(
             if held_back:
                 # The operator asked to stop while the key copy was being deleted: now it is.
                 # A refusal on its way out would be lost behind the interruption: it is said.
-                pending = sys.exc_info()[1]
-                if isinstance(pending, RehearsalRefusedError):
-                    print(f"refused: {pending}", file=sys.stderr)
+                if refusal is not None:
+                    print(f"refused: {refusal}", file=sys.stderr)
                 raise KeyboardInterrupt
         # Under the lock still: the count it reports is this run's, not a later one's.
         return write_report(out, key_file, version, model, key_copy_removed, stopped)
@@ -918,8 +930,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"refused: {refusal}", file=sys.stderr)
         return EXIT_REFUSED
     except KeyboardInterrupt:
+        # True wherever the interruption landed — before any session, too.
         print(
-            "interrupted: the session was killed; what was launched stays counted", file=sys.stderr
+            "interrupted: if a session was running it was killed — a kill that failed is said "
+            "above; what was launched stays counted",
+            file=sys.stderr,
         )
         return EXIT_INTERRUPTED
     finally:

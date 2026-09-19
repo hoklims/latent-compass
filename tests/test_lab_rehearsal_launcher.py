@@ -9,6 +9,7 @@ about the experiment, which has not run.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
@@ -20,6 +21,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import namedtuple
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
@@ -768,6 +770,30 @@ def test_an_interruption_held_back_hides_neither_a_refusal_nor_what_the_sweep_fo
     assert not launcher.lock_path(rig.key_file).exists()
 
 
+def test_a_refusal_that_is_not_this_runs_is_never_said_in_its_name(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real = vars(launcher)["_discard"]
+    interrupted: list[Path] = []
+
+    def impatient(directory: Path) -> bool:
+        if directory.name.startswith("lc-rehearsal-home-") and directory not in interrupted:
+            interrupted.append(directory)
+            raise KeyboardInterrupt
+        return bool(real(directory))
+
+    monkeypatch.setattr(launcher, "_discard", impatient)
+    # A caller busy with a refusal of its own — a retry loop, say — while this run, which was
+    # refused nothing, is interrupted during the deletion of its key copy.
+    try:
+        raise launcher.RehearsalRefusedError("what an earlier run was refused")
+    except launcher.RehearsalRefusedError:
+        with pytest.raises(KeyboardInterrupt):
+            rig.run(["look around"])
+    assert "refused" not in capsys.readouterr().err
+    assert rig.key_copies() == []
+
+
 def test_a_directory_is_reported_removed_only_when_it_is_gone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -865,7 +891,7 @@ def test_a_batch_shim_is_refused_when_the_shell_could_read_the_copy_path_as_a_co
         assert launcher.resolve_command(str(shim)) is None
 
 
-def test_a_batch_shim_of_git_is_held_to_the_same_rule_as_one_of_the_cli(
+def test_a_git_that_is_a_batch_shim_is_refused_outright(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     shim = tmp_path / "git.cmd"
@@ -876,11 +902,10 @@ def test_a_batch_shim_of_git_is_held_to_the_same_rule_as_one_of_the_cli(
         return str(shim) if name == "git" else resolve(name)
 
     monkeypatch.setattr(launcher, "resolve_command", git_behind_a_shim)
-    # The commit and the source are the operator's, and git is handed both as arguments.
-    with pytest.raises(launcher.RehearsalRefusedError, match="batch shim of git"):
-        rig.run(["look around"], ref="100%")
-    with pytest.raises(launcher.RehearsalRefusedError, match="batch shim of git"):
-        rig.run(["look around"], source=rig.source.with_name("a%b"))
+    # Git is handed the source, the commit, and an argument the launcher builds that always
+    # holds a character the shell reads again: no argument of the operator's has to be unsafe.
+    with pytest.raises(launcher.RehearsalRefusedError, match="git resolves to a batch shim"):
+        rig.run(["look around"])
     assert rig.calls() == []
     assert rig.key_copies() == []
 
@@ -888,8 +913,8 @@ def test_a_batch_shim_of_git_is_held_to_the_same_rule_as_one_of_the_cli(
 def test_a_prompt_too_long_to_be_written_under_a_bound_is_refused_before_anything_starts(
     rig: Rig,
 ) -> None:
-    # Writing a prompt to a CLI that never reads it has no timeout on every platform. The bound
-    # is counted in bytes, as the pipe counts them.
+    # Writing a prompt to a CLI that never reads it has no timeout on Windows: the size is what
+    # is bounded instead, and counted in bytes, as the pipe counts them.
     for prompt in (
         "x" * (launcher.MAX_PROMPT_BYTES + 1),
         "é" * (launcher.MAX_PROMPT_BYTES // 2 + 1),
@@ -899,6 +924,36 @@ def test_a_prompt_too_long_to_be_written_under_a_bound_is_refused_before_anythin
     assert rig.calls() == []
     assert rig.launched() == 0
     assert rig.run(["x" * launcher.MAX_PROMPT_BYTES])["sessions_launched"] == 1
+
+
+def test_a_prompt_within_the_bound_is_written_even_to_a_cli_that_never_reads_it() -> None:
+    # The bound stands in for a timeout the write does not have: it has to fit what a pipe
+    # takes while nobody reads it, on the platform the suite runs on.
+    idle = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"], stdin=subprocess.PIPE
+    )
+    written = threading.Event()
+
+    def write() -> None:
+        assert idle.stdin is not None
+        try:
+            idle.stdin.write(b"x" * launcher.MAX_PROMPT_BYTES)
+            idle.stdin.flush()
+        except OSError:
+            return
+        written.set()
+
+    thread = threading.Thread(target=write, daemon=True)
+    thread.start()
+    try:
+        assert written.wait(timeout=10), "a prompt within the bound blocked on a pipe nobody reads"
+    finally:
+        idle.kill()
+        idle.wait()
+        thread.join(timeout=10)
+        if idle.stdin is not None:
+            with contextlib.suppress(OSError):
+                idle.stdin.close()
 
 
 def test_a_lock_that_cannot_be_taken_is_a_refusal_and_is_left_where_it_lies(rig: Rig) -> None:
@@ -1226,6 +1281,21 @@ def test_the_committed_throwaway_tasks_load_and_fit_the_allowance() -> None:
     tasks = launcher.load_tasks(LAUNCHER_PATH.with_name("lab-rehearsal-tasks.json"))
     assert len(tasks) == launcher.APPROVED_MAX_SESSIONS
     assert all(task.task_id.startswith("rehearsal-") for task in tasks)
+    # Or the real run would be refused at its first step.
+    assert all(len(task.prompt.encode("utf-8")) <= launcher.MAX_PROMPT_BYTES for task in tasks)
+
+
+def test_an_interpreter_too_old_to_tell_a_junction_is_refused_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    older = namedtuple("older", ["major", "minor", "micro", "releaselevel", "serial"])
+    monkeypatch.setattr(sys, "version_info", older(3, 11, 9, "final", 0))
+    spec = importlib.util.spec_from_file_location("launcher_under_an_older_python", LAUNCHER_PATH)
+    assert spec is not None
+    assert spec.loader is not None
+    # Before anything else of the module runs: nothing of it guesses what a junction is.
+    with pytest.raises(SystemExit, match=r"Python 3\.12 or later"):
+        spec.loader.exec_module(importlib.util.module_from_spec(spec))
 
 
 def test_the_launcher_and_its_tasks_name_no_private_location() -> None:

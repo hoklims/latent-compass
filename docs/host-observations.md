@@ -257,13 +257,17 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   key would otherwise burn the allowance in seconds. A run that stopped early
   says so in the command line's exit code (`4`). Flags lower both ceilings and
   never raise them. A mistyped commit, a refused key, a task file that cannot
-  be read, a prompt too long to be written under a bound, an argument that a
-  batch shim — the CLI's or Git's — would hand back to the shell as a command,
-  or an output directory whose records cannot be read is refused before it can
-  cost a session.
+  be read, a prompt of more than 4096 bytes, an argument that a batch shim of
+  the CLI would hand back to the shell as a command, a Git that is itself a
+  batch shim, or an output directory whose records cannot be read is refused
+  before it can cost a session.
 - **Fifteen minutes per session, while the launcher is alive** — plus at most
-  some forty seconds to kill it and drain its pipes. On overrun the process
-  tree is killed. A kill that does not take is printed with the process id,
+  some forty seconds to kill it and drain its pipes. The write of the prompt
+  itself has no timeout on Windows; what stands in for one is the bound on its
+  size — on the author's host a pipe that is never read took 4096 bytes and
+  blocked at 4097, and the system promises no size: a test writes a prompt of
+  the largest size allowed to a process that never reads. On overrun the
+  process tree is killed. A kill that does not take is printed with the process id,
   and so is the proof that it missed something: pipes still held once the tree
   is dead. What holds them is not awaited and not killed — it is recorded, and
   the run stops there: no session is started while something of the last one
@@ -314,9 +318,9 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   agent home least of all. It is named, and the run refuses or reports a
   failure. These are checks, not locks: a name swapped for a link between a
   check and the write or the removal it guards is not caught, and whatever
-  does that is already writing beside the key file. The launcher needs Python
-  3.12 or later: what tells a junction from a directory does not exist before,
-  and it fails loudly rather than guess.
+  does that is already writing beside the key file. The launcher refuses to
+  start on a Python older than 3.12: what tells a junction from a directory
+  does not exist before.
 - **The agent inherits almost nothing — and that is not a jail.** An
   allow-listed environment: every home and temporary directory and Git's global
   configuration inside the isolated home, Git's system configuration and
@@ -324,8 +328,11 @@ python examples/lab_rehearsal_launcher.py --key-file <file holding the dedicated
   copy of one commit, extracted from Git objects; the source repository only
   read. The launcher never reads, copies or writes the owner's own agent home
   or login — **the agent it starts is another matter**. Every session is
-  started with `--sandbox workspace-write` and `--ephemeral`: no flag of the
-  launcher changes that, and a test holds both. The CLI's `workspace-write`
+  started with `--sandbox workspace-write` and `--ephemeral`: nothing in the
+  launcher takes them away, and a test holds both. `--codex-command` is the
+  operator's own: what is put there comes before `exec`, and whether a
+  configuration override placed there could outweigh the explicit flag was
+  not verified on the installed CLI. The CLI's `workspace-write`
   policy lets the agent **read the whole file system** by design. What stops
   it from **writing** outside its copy is the platform's
   sandbox: documented for Linux and macOS. **On native Windows the CLI applies
@@ -359,15 +366,24 @@ unwinding, against what this page claimed, and left a paid session with
 nothing to bound it; a removal could report as removed a name that a link had
 taken meanwhile; the link policy held for what the launcher deletes and not
 for what it writes; and no test held the sandbox flag a session is started
-with. Each review also found lesser defects. This version closes what code can
-close. **The corrections of the fourth review have not themselves been re-read
-at this commit**, and every round of corrections so far has introduced or left
-a defect — the third review's first finding is the proof. The fourth reviewer
-named its conditions for a first run once they are closed: the CLI version
-pinned, a single session first, an output directory outside the repository,
-the provider's hard limit checked to be active, the key revoked at the end.
-**What an agent can do on native Windows is not a defect a commit can close:
-it is a condition of the first real run, for the owner to decide.**
+with. Each review also found lesser defects.
+
+The fourth reviewer then re-read the corrections of its own findings and
+returned "safe to run once the key exists", under conditions: the CLI version
+pinned, a single session first and its report read before any other, an output
+directory outside the repository, the provider's hard limit checked to be
+active, the key revoked at the end — and an exit code of `4`, not `0`, to be
+expected from a first contact that stops at its first session. It also found
+three minor defects **that those corrections had introduced**: a refusal that
+was not this run's could be printed in its name, on a path production does not
+reach; the guard on a batch shim of Git missed the one argument the launcher
+builds itself; and an interrupted sweep was followed by a sentence claiming a
+killed session. They are closed here, with three claims of this page that
+nothing held. Every round of corrections so far has introduced or left a
+defect, and this one has not been re-read at the commit that made it: what was
+re-read afterwards is recorded in `HANDOFF.md`, not here. **What an agent can
+do on native Windows is not a defect a commit can close: it is a condition of
+the first real run, for the owner to decide.**
 
 `examples/lab-rehearsal-tasks.json` holds six throwaway tasks on this
 repository. They were written by the author, belong to no population and are
