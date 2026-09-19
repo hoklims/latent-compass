@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import shutil
+import subprocess
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -20,6 +21,7 @@ import pytest
 from latent_compass.episode import AgentFamily
 from latent_compass.lab.host_observations import (
     HostObservationViolation,
+    LimitCode,
     ObservationStatus,
     admit_observation_policy,
 )
@@ -227,6 +229,269 @@ def test_a_language_the_symbol_tool_cannot_parse_is_reported_not_guessed(tmp_pat
     observation = drill.observe("define-legacy-consumer")
     assert observation.status is ObservationStatus.UNSUPPORTED_LANGUAGE
     assert drill.apply(observation).outcome_id is None
+
+
+# --- a real language server as the symbol tool --------------------------------------------
+
+needs_language_server = pytest.mark.skipif(
+    shutil.which(bench.LANGUAGE_SERVER_TOOL_ID) is None,
+    reason="no pyright-langserver on this host: the real-server paths cannot run here",
+)
+
+#: A method and a function carry the anchor's name. So do a variable (line 1) and a parameter
+#: (line 9), and neither of those is a definition.
+HOMONYMS = (
+    "legacy_total = 0\n"
+    "\n"
+    "\n"
+    "class Ledger:\n"
+    "    def legacy_total(self):\n"
+    "        return 1\n"
+    "\n"
+    "\n"
+    "def scale(legacy_total):\n"
+    "    return legacy_total * 2\n"
+    "\n"
+    "\n"
+    "def legacy_total(quantity):\n"
+    "    return quantity + 1\n"
+)
+
+
+def _served_catalog(
+    tmp_path: Path, *, binary: str = bench.LANGUAGE_SERVER_TOOL_ID, **symbol_overrides: Any
+) -> HostProbeCatalog:
+    """The bench catalog with the language server as its symbol tool."""
+    setup = bench.ReferenceHostExecutor(tmp_path, language_server_binary=binary)
+    git_tool = setup.git_identity()
+    assert git_tool is not None
+    payload = bench.build_catalog(git_tool, setup.language_server_identity()).canonical_payload()
+    assert isinstance(payload["probes"], list)
+    symbol_spec = {**payload["probes"][1], **symbol_overrides}
+    payload["probes"] = [payload["probes"][0], symbol_spec, payload["probes"][2]]
+    return load_host_probe_catalog(payload)
+
+
+@needs_language_server
+def test_a_real_language_server_answers_the_symbol_question_and_declares_its_index(
+    tmp_path: Path,
+) -> None:
+    drill = Drill(tmp_path / "repository", catalog=_served_catalog(tmp_path))
+    observation = drill.observe("define-legacy-consumer")
+
+    assert observation.status is ObservationStatus.OBSERVED
+    assert (observation.tool.tool_id, observation.tool.provider_id) == (
+        "pyright-langserver",
+        "pyright",
+    )
+    assert observation.providers_used == ("pyright",)
+    assert observation.resources.child_processes == 1
+    # The server keeps a model of the workspace: the record says so, and says what it did not
+    # observe rather than answering "no".
+    assert observation.resources.internal_index_used is True
+    assert observation.resources.cache_used is None
+    assert LimitCode.TOOL_INTERNAL_INDEX_USED in observation.limits
+    # The cited line is held against the text itself, not against another parser.
+    expected_line = bench.INVOICE.splitlines().index("def legacy_total(quantity):") + 1
+    assert [
+        (item.relative_path, item.line_start, item.line_end) for item in observation.evidence
+    ] == [("invoice.py", expected_line, expected_line)]
+
+    # The lab re-reads the cited line itself before the model may consume the answer.
+    result = drill.apply(observation)
+    assert result.outcome_id == "defined-in-invoice"
+    assert result.state.revision == 1
+
+
+@needs_language_server
+def test_the_language_server_identity_is_the_one_the_installed_tool_reports(
+    tmp_path: Path,
+) -> None:
+    command_line = shutil.which("pyright")
+    if command_line is None:
+        pytest.skip("the pyright command line is not installed beside its language server")
+    reported = subprocess.run(  # noqa: S603 - resolved binary, fixed argument
+        [command_line, "--version"], capture_output=True, text=True, check=True, timeout=60
+    ).stdout.split()[-1]
+
+    identity = bench.ReferenceHostExecutor(tmp_path).language_server_identity()
+    assert identity == {
+        "tool_id": "pyright-langserver",
+        "version": reported,
+        "provider_id": "pyright",
+    }
+    assert reported != "unknown"
+
+
+@needs_language_server
+def test_a_language_server_that_finds_nothing_says_empty_not_absent(tmp_path: Path) -> None:
+    catalog = _served_catalog(tmp_path, question="no_such_symbol", anchor="no_such_symbol")
+    drill = Drill(tmp_path / "repository", catalog=catalog)
+    observation = drill.observe("define-legacy-consumer")
+
+    assert observation.status is ObservationStatus.EMPTY
+    assert observation.evidence == ()
+    assert LimitCode.EMPTY_IS_NOT_ABSENCE in observation.limits
+    # A real run that found nothing is still a real run, with everything it used.
+    assert observation.resources.child_processes == 1
+    assert observation.resources.internal_index_used is True
+    assert drill.apply(observation).outcome_id == "undefined"
+
+
+@needs_language_server
+def test_the_language_server_and_the_parser_cite_the_same_definitions(tmp_path: Path) -> None:
+    cited: dict[str, list[int]] = {}
+    for tool_id, catalog in (
+        ("python-ast", None),
+        ("pyright-langserver", _served_catalog(tmp_path)),
+    ):
+        drill = Drill(tmp_path / tool_id, catalog=catalog, extra_files={"invoice.py": HOMONYMS})
+        observation = drill.observe("define-legacy-consumer")
+        assert observation.tool.tool_id == tool_id
+        cited[tool_id] = sorted(item.line_start for item in observation.evidence)
+        assert drill.apply(observation).outcome_id == "defined-in-invoice"
+
+    # The method and the function — never the variable on line 1 nor the parameter on line 9.
+    assert cited == {"python-ast": [5, 13], "pyright-langserver": [5, 13]}
+
+
+@needs_language_server
+def test_the_language_server_answers_about_the_bytes_it_is_handed_not_the_file_on_disk(
+    tmp_path: Path,
+) -> None:
+    drill = Drill(tmp_path / "repository", catalog=_served_catalog(tmp_path))
+    spec = drill.catalog.spec_by_id("define-legacy-consumer")
+    assert spec is not None
+    on_disk = (drill.root / "invoice.py").read_bytes()
+    assert on_disk == bench.INVOICE.encode("utf-8")
+
+    # On disk the anchor is defined once, on line 4. The bytes handed over — the ones the
+    # evidence would digest — define it on lines 5 and 13: the answer must be about those.
+    record: dict[str, Any] = {"resources": {}, "limits": []}
+    executor = bench.ReferenceHostExecutor(drill.root)
+    located = executor._served_definition_lines(  # noqa: SLF001 - hand it bytes the disk lacks
+        spec, {"invoice.py": HOMONYMS.encode("utf-8")}, record
+    )
+    assert located == {"invoice.py": [5, 13]}
+    assert (drill.root / "invoice.py").read_bytes() == on_disk
+
+
+@needs_language_server
+def test_a_language_server_that_overruns_is_interrupted_and_reported_as_a_timeout(
+    tmp_path: Path,
+) -> None:
+    drill = Drill(tmp_path / "repository", catalog=_served_catalog(tmp_path))
+    observation = drill.observe("define-legacy-consumer", timeout_seconds=0.001)
+
+    assert observation.status is ObservationStatus.TIMEOUT
+    assert observation.evidence == ()
+    assert observation.resources.child_processes == 1
+    assert observation.duration_ms is not None
+    assert observation.duration_ms < 20_000, "the overrun was waited for, not interrupted"
+
+    result = drill.apply(observation)
+    assert (result.outcome_id, result.unknown_reason) == (
+        None,
+        UnknownReason.NON_CONCLUSIVE_STATUS,
+    )
+    assert result.state.state_seal() == drill.state.state_seal()
+
+
+@needs_language_server
+def test_swapping_in_the_real_server_changes_who_answered_not_what_the_loop_concludes(
+    tmp_path: Path,
+) -> None:
+    parsed = bench.run_episode(tmp_path / "parsed")
+    served = bench.run_episode(tmp_path / "served", symbol_tool="pyright-langserver")
+
+    def conclusions(trace: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            [
+                (step["advice"]["recommended_probe_id"], step.get("result", {}).get("outcome_id"))
+                for step in trace["steps"]
+            ],
+            trace["final_decision_id"],
+            trace["final_state_revision"],
+            trace["remaining_budget"],
+        )
+
+    assert conclusions(served) == conclusions(parsed)
+    assert conclusions(served)[0][0] == ("define-legacy-consumer", "defined-in-invoice")
+    # Who answered differs, and so does what it cost and what it kept in memory to answer.
+    assert [trace["steps"][0]["execution"]["tool"]["tool_id"] for trace in (parsed, served)] == [
+        "python-ast",
+        "pyright-langserver",
+    ]
+    assert [
+        trace["steps"][0]["execution"]["internal_index_used"] for trace in (parsed, served)
+    ] == [
+        False,
+        True,
+    ]
+    assert served["probe_child_processes"] == parsed["probe_child_processes"] + 1
+
+
+def test_a_host_without_the_language_server_meets_tool_absent_and_plans_around_it(
+    tmp_path: Path,
+) -> None:
+    # Runs on every host: the binary is named so that it cannot exist.
+    trace = bench.run_episode(
+        tmp_path / "repository",
+        symbol_tool="pyright-langserver",
+        language_server_binary="language-server-that-does-not-exist",
+    )
+    assert trace["observed_tools"]["symbols"] == {
+        "tool_id": "pyright-langserver",
+        "version": "unknown",
+        "provider_id": "pyright",
+    }
+    assert len(trace["steps"]) == 3, "the loop did not plan around the missing language server"
+    attempted, around, _ = trace["steps"]
+    assert attempted["execution"]["tool"]["tool_id"] == "pyright-langserver"
+    assert attempted["execution"]["status"] == "TOOL_ABSENT"
+    assert attempted["execution"]["child_processes"] == 0
+    # Nothing ran, so the record claims no index for a run that never started.
+    assert attempted["execution"]["internal_index_used"] is False
+    assert (around["advice"]["contract_version"], around["advice"]["recommended_probe_id"]) == (
+        "1.1.0",
+        "run-invoice-check",
+    )
+    assert trace["final_decision_id"] == "hold-and-fix"
+
+
+def test_a_real_binary_that_is_no_language_server_is_a_failure_not_an_outcome(
+    tmp_path: Path,
+) -> None:
+    # Runs on every host, with a real process and no mock: git is launched where a language
+    # server was expected, rejects the arguments and closes its output.
+    drill = Drill(tmp_path / "repository", catalog=_served_catalog(tmp_path, binary="git"))
+    observation = drill.observe("define-legacy-consumer", language_server_binary="git")
+
+    assert observation.status is ObservationStatus.FAILED
+    assert observation.evidence == ()
+    assert observation.resources.child_processes == 1
+    result = drill.apply(observation)
+    assert (result.outcome_id, result.unknown_reason) == (
+        None,
+        UnknownReason.NON_CONCLUSIVE_STATUS,
+    )
+    assert result.state.state_seal() == drill.state.state_seal()
+
+
+def test_an_unknown_symbol_tool_is_refused_before_anything_is_built(tmp_path: Path) -> None:
+    root = tmp_path / "repository"
+    with pytest.raises(ValueError, match="no symbol tool named 'pyright'"):
+        bench.run_episode(root, symbol_tool="pyright")
+    assert not root.exists()
+
+
+def test_the_cli_refuses_a_symbol_tool_it_would_otherwise_ignore(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as refusal:
+        bench.main(["--delegate", "--symbol-tool", "pyright-langserver"])
+    assert refusal.value.code == 2
+    assert "applies to a single episode" in capsys.readouterr().err
 
 
 # --- the loop: who decides what -----------------------------------------------------------

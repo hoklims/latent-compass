@@ -11,13 +11,18 @@ The roles stay separate, and the trace keeps them separate:
 * **router** — :class:`BenchHostRouter`, standing in for the host's own
   already-authorised router: it alone accepts or ignores advice;
 * **executor** — :class:`ReferenceHostExecutor`, the only code here that
-  launches a process (``git``, a Python check) or parses source for symbols;
+  launches a process (``git``, a Python check, a language server) or parses
+  source for symbols;
 * **observation** — what the executor returns, admitted and re-checked by
   ``latent_compass.lab.host_session`` before the model may consume it.
 
 The executor lives in ``examples/`` on purpose: ``tests/test_lab_boundary.py``
 refuses any process launch inside the lab package. Tool identities are
-observed (``git --version``, the running interpreter), never hard-coded. A
+observed (``git --version``, the running interpreter, the version the installed
+language-server package declares), never hard-coded. The symbol question is
+answered by the in-process ``ast`` parser or, with ``--symbol-tool
+pyright-langserver``, by a real language server this host happens to have: it
+is no dependency of the package, and it declares the index it keeps. A
 CODEX or CLAUDE family here is a declared lab identity, not evidence of parity
 between two live hosts. Costs are settled at each reservation's own ceiling:
 the bench measures durations and fabricates no token or money cost. Every
@@ -35,13 +40,16 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import hashlib
 import json
 import platform
+import queue
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -97,6 +105,12 @@ NOW: Final = "2026-09-19T00:00:30Z"
 EXPIRY: Final = "2026-09-19T01:00:00Z"
 COVERAGE_LIMIT: Final = "COVERAGE_IS_DECLARED_PATHS_ONLY"
 GIT_IDENTITY: Final = ["-c", "user.name=lab-bench", "-c", "user.email=lab-bench@example.invalid"]
+AST_TOOL_ID: Final = "python-ast"
+LANGUAGE_SERVER_TOOL_ID: Final = "pyright-langserver"
+SYMBOL_TOOL_IDS: Final = (AST_TOOL_ID, LANGUAGE_SERVER_TOOL_ID)
+#: The LSP ``SymbolKind`` values a ``class`` or ``def`` statement produces: Class, Method,
+#: Constructor, Function. A parameter or a variable of the same name is not a definition.
+DEFINITION_SYMBOL_KINDS: Final = frozenset({5, 6, 9, 12})
 
 PRICING_BASE: Final = "RATE = 10\n\n\ndef price(quantity):\n    return quantity * RATE\n"
 PRICING_CHANGED: Final = "RATE = 12\n\n\ndef price(quantity):\n    return quantity * RATE\n"
@@ -183,6 +197,112 @@ def _digest(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+class LanguageServerError(Exception):
+    """The server refused a request, broke the protocol, or closed its output."""
+
+
+class LanguageServer:
+    """One short-lived language server, spoken to over stdio until ``deadline``.
+
+    Only responses are consumed: notifications and server-side requests are read
+    and dropped, so a server that waits on one of them runs into the deadline
+    and is reported as a timeout. The process never outlives its observation.
+    """
+
+    def __init__(self, argv: list[str], *, cwd: Path, deadline: float, timeout_seconds: float):
+        self._argv = argv
+        self._deadline = deadline
+        self._timeout_seconds = timeout_seconds
+        self._requests = 0
+        self._inbox: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._process = subprocess.Popen(  # noqa: S603 - resolved binary, fixed arguments, no shell
+            argv,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    def __enter__(self) -> LanguageServer:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        try:
+            # A server that will not leave politely is killed below either way; the answer,
+            # if there was one, has already been received.
+            with contextlib.suppress(LanguageServerError, subprocess.TimeoutExpired):
+                if self._process.poll() is None:
+                    self.request("shutdown", None)
+                    self.notify("exit", None)
+                    self._process.wait(timeout=max(0.0, self._deadline - time.monotonic()))
+        finally:
+            self._process.kill()
+            self._process.wait()
+            self._reader.join(timeout=5.0)
+            for stream in (self._process.stdin, self._process.stdout):
+                # Closing flushes, and flushing to a process that is already gone fails.
+                with contextlib.suppress(OSError):
+                    if stream is not None:
+                        stream.close()
+
+    def _pump(self) -> None:
+        stream = self._process.stdout
+        assert stream is not None
+        try:
+            while True:
+                length = 0
+                while (line := stream.readline()) not in (b"\r\n", b""):
+                    name, _, value = line.decode("ascii").partition(":")
+                    if name.strip().lower() == "content-length":
+                        length = int(value)
+                if not line:
+                    break
+                self._inbox.put(json.loads(stream.read(length).decode("utf-8")))
+        except (OSError, ValueError):
+            pass  # a broken stream ends the conversation exactly as a closed one does
+        self._inbox.put(None)
+
+    def _send(self, message: dict[str, Any]) -> None:
+        body = json.dumps({"jsonrpc": "2.0", **message}).encode("utf-8")
+        stream = self._process.stdin
+        assert stream is not None
+        try:
+            stream.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+            stream.flush()
+        except OSError as exc:
+            raise LanguageServerError("the server closed its input") from exc
+
+    def notify(self, method: str, params: dict[str, Any] | None) -> None:
+        self._send({"method": method, "params": params})
+
+    def request(self, method: str, params: dict[str, Any] | None) -> Any:
+        self._requests += 1
+        request_id = self._requests
+        self._send({"id": request_id, "method": method, "params": params})
+        while True:
+            try:
+                message = self._inbox.get(timeout=max(0.0, self._deadline - time.monotonic()))
+            except queue.Empty:
+                raise subprocess.TimeoutExpired(self._argv, self._timeout_seconds) from None
+            if message is None:
+                raise LanguageServerError("the server closed its output")
+            if message.get("id") == request_id and "method" not in message:
+                if "error" in message:
+                    raise LanguageServerError(f"the server refused {method}")
+                return message.get("result")
+
+
+def _served_symbols(symbols: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every symbol of a ``documentSymbol`` answer, nested ones included."""
+    flat: list[dict[str, Any]] = []
+    for symbol in symbols:
+        flat.append(symbol)
+        flat.extend(_served_symbols(symbol.get("children") or []))
+    return flat
+
+
 class ReferenceHostExecutor:
     """The only process-launching code in this bench. Never part of the lab.
 
@@ -197,11 +317,13 @@ class ReferenceHostExecutor:
         root: Path,
         *,
         git_binary: str = "git",
+        language_server_binary: str = LANGUAGE_SERVER_TOOL_ID,
         timeout_seconds: float = 30.0,
         unavailable_tools: frozenset[str] = frozenset(),
     ):
         self.root = root
         self.git_binary = git_binary
+        self.language_server_binary = language_server_binary
         self.timeout_seconds = timeout_seconds
         #: Tool ids this host declares it does not have. A real missing binary is
         #: detected on its own; this lets a loop meet an absent in-process tool too.
@@ -237,6 +359,34 @@ class ReferenceHostExecutor:
             "version": platform.python_version(),
             "provider_id": "python-ast",
         }
+
+    def _language_server_launch(self) -> tuple[list[str], str]:
+        """How to start the server this host has, and the version its own package declares."""
+        found = shutil.which(self.language_server_binary)
+        if found is None:
+            raise FileNotFoundError(self.language_server_binary)
+        shim, node = Path(found), shutil.which("node")
+        # An npm install leaves a shim: the package sits behind it or beside it. The server is
+        # started through node itself, so that interrupting it kills the server and not a shell
+        # that would leave it running behind.
+        for package in (shim.resolve().parent, shim.parent / "node_modules" / "pyright"):
+            entry, manifest = package / "langserver.index.js", package / "package.json"
+            if node is not None and entry.is_file() and manifest.is_file():
+                declared = json.loads(manifest.read_text(encoding="utf-8")).get("version")
+                return [node, str(entry), "--stdio"], str(declared or "unknown")
+        return [found, "--stdio"], "unknown"
+
+    def language_server_identity(self) -> dict[str, str]:
+        """The installed server's identity; ``unknown`` when this host has none.
+
+        Unlike ``git``, without which the bench cannot build its repository, a
+        missing symbol tool is a situation the loop is meant to meet.
+        """
+        try:
+            version = self._language_server_launch()[1]
+        except FileNotFoundError:
+            version = "unknown"
+        return {"tool_id": LANGUAGE_SERVER_TOOL_ID, "version": version, "provider_id": "pyright"}
 
     @staticmethod
     def check_identity() -> dict[str, str]:
@@ -367,25 +517,99 @@ class ReferenceHostExecutor:
         if any(not relative_path.endswith(".py") for relative_path in spec.relative_paths):
             record["status"] = "UNSUPPORTED_LANGUAGE"
             return
-        for relative_path in spec.relative_paths:
-            data = (self.root / relative_path).read_bytes()
-            for node in ast.walk(ast.parse(data.decode("utf-8"))):
-                if isinstance(node, ast.FunctionDef | ast.ClassDef) and node.name == spec.anchor:
-                    record["evidence"].append(
-                        {
-                            "relative_path": relative_path,
-                            "byte_digest": _digest(data),
-                            "size_bytes": len(data),
-                            "line_start": node.lineno,
-                            "line_end": node.lineno,
-                            "generated": False,
-                        }
-                    )
+        sources = {path: (self.root / path).read_bytes() for path in spec.relative_paths}
+        if spec.tool.tool_id == LANGUAGE_SERVER_TOOL_ID:
+            try:
+                located = self._served_definition_lines(spec, sources, record)
+            except LanguageServerError:
+                record["status"] = "FAILED"
+                return
+        else:
+            located = {
+                path: [
+                    node.lineno
+                    for node in ast.walk(ast.parse(data.decode("utf-8")))
+                    if isinstance(node, ast.FunctionDef | ast.ClassDef) and node.name == spec.anchor
+                ]
+                for path, data in sources.items()
+            }
+        for relative_path, data in sources.items():
+            for line in located[relative_path]:
+                record["evidence"].append(
+                    {
+                        "relative_path": relative_path,
+                        "byte_digest": _digest(data),
+                        "size_bytes": len(data),
+                        "line_start": line,
+                        "line_end": line,
+                        "generated": False,
+                    }
+                )
         if record["evidence"]:
             record["status"] = "OBSERVED"
         else:
             record["status"] = "EMPTY"
             record["limits"].append("EMPTY_IS_NOT_ABSENCE")
+
+    def _served_definition_lines(
+        self, spec: HostProbeSpec, sources: dict[str, bytes], record: dict[str, Any]
+    ) -> dict[str, list[int]]:
+        """Ask a real language server where ``spec.anchor`` is defined in each covered file."""
+        argv, _ = self._language_server_launch()
+        deadline = time.monotonic() + self.timeout_seconds
+        with LanguageServer(
+            argv, cwd=self.root, deadline=deadline, timeout_seconds=self.timeout_seconds
+        ) as server:
+            self.child_processes += 1
+            # A language server keeps a model of the workspace in memory, and this executor
+            # cannot see which requests consult it: once one runs, the index is declared used
+            # rather than claimed unused. Whether it used a cache was not observed at all.
+            record["resources"].update(internal_index_used=True, cache_used=None)
+            record["limits"].append("TOOL_INTERNAL_INDEX_USED")
+            root_uri = self.root.resolve().as_uri()
+            server.request(
+                "initialize",
+                {
+                    "processId": None,
+                    "rootUri": root_uri,
+                    "workspaceFolders": [{"uri": root_uri, "name": ROOT_ID}],
+                    "capabilities": {
+                        "textDocument": {
+                            "documentSymbol": {"hierarchicalDocumentSymbolSupport": True}
+                        }
+                    },
+                },
+            )
+            server.notify("initialized", {})
+            located: dict[str, list[int]] = {}
+            for relative_path, data in sources.items():
+                uri = (self.root / relative_path).resolve().as_uri()
+                # The server is handed the very bytes the evidence digests, not a path to re-read.
+                server.notify(
+                    "textDocument/didOpen",
+                    {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "python",
+                            "version": 1,
+                            "text": data.decode("utf-8"),
+                        }
+                    },
+                )
+                answer = server.request(
+                    "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
+                )
+                try:
+                    # LSP lines are zero-based; evidence lines are one-based.
+                    located[relative_path] = sorted(
+                        symbol["selectionRange"]["start"]["line"] + 1
+                        for symbol in _served_symbols(answer or [])
+                        if symbol["kind"] in DEFINITION_SYMBOL_KINDS
+                        and symbol["name"] == spec.anchor
+                    )
+                except (KeyError, TypeError) as exc:
+                    raise LanguageServerError("the answer is not a symbol hierarchy") from exc
+        return located
 
     def _targeted_check(self, spec: HostProbeSpec, record: dict[str, Any]) -> None:
         completed = self._run([sys.executable, spec.relative_paths[0]])
@@ -439,7 +663,10 @@ def build_repository(root: Path, executor: ReferenceHostExecutor) -> None:
     (root / "pricing.py").write_bytes(PRICING_CHANGED.encode("utf-8"))
 
 
-def build_catalog(git_tool: dict[str, str]) -> HostProbeCatalog:
+def build_catalog(
+    git_tool: dict[str, str], symbol_tool: dict[str, str] | None = None
+) -> HostProbeCatalog:
+    """The bench's three probes. ``symbol_tool`` names who answers the symbol question."""
     return load_host_probe_catalog(
         {
             "contract_version": "1.0.0",
@@ -459,7 +686,7 @@ def build_catalog(git_tool: dict[str, str]) -> HostProbeCatalog:
                     "relative_paths": ["invoice.py"],
                     "question": "legacy_total",
                     "anchor": "legacy_total",
-                    "tool": ReferenceHostExecutor.symbol_identity(),
+                    "tool": symbol_tool or ReferenceHostExecutor.symbol_identity(),
                     "symbol_relation": "DEFINITION",
                     "outcome_by_path": {"invoice.py": "defined-in-invoice"},
                     "empty_outcome_id": "undefined",
@@ -565,6 +792,8 @@ def run_episode(
     advisor_present: bool = True,
     kill_switch_engaged: bool = False,
     git_binary: str = "git",
+    symbol_tool: str = AST_TOOL_ID,
+    language_server_binary: str = LANGUAGE_SERVER_TOOL_ID,
     timeout_seconds: float = 30.0,
     withheld_capabilities: frozenset[str] = frozenset(),
     unavailable_tools: frozenset[str] = frozenset(),
@@ -587,7 +816,14 @@ def run_episode(
     nested under. ``stale_budget_view`` is a drill: the episode plans on that
     remainder instead of reading the pool, as a child told once what was left
     would.
+
+    ``symbol_tool`` names who answers the symbol question: the in-process
+    ``python-ast`` parser, or a real ``pyright-langserver`` found on this host.
+    A host without one still runs: the loop meets ``TOOL_ABSENT`` and plans
+    around the probe.
     """
+    if symbol_tool not in SYMBOL_TOOL_IDS:
+        raise ValueError(f"the bench has no symbol tool named {symbol_tool!r}")
     if root.exists():
         raise FileExistsError(f"refusing to reuse existing bench root: {root}")
     root.mkdir(parents=True)
@@ -601,11 +837,17 @@ def run_episode(
     executor = ReferenceHostExecutor(
         root,
         git_binary=git_binary,
+        language_server_binary=language_server_binary,
         timeout_seconds=timeout_seconds,
         unavailable_tools=unavailable_tools,
     )
+    symbol_identity = (
+        executor.language_server_identity()
+        if symbol_tool == LANGUAGE_SERVER_TOOL_ID
+        else ReferenceHostExecutor.symbol_identity()
+    )
     model = load_model(MODEL_PAYLOAD)
-    catalog = build_catalog(git_tool)
+    catalog = build_catalog(git_tool, symbol_identity)
     session_policy = policy or admit_observation_policy(
         {"contract_version": "1.0.0", "mode": "SOURCE_AND_SYMBOLIC", "retired_providers": []}
     )
@@ -729,6 +971,7 @@ def run_episode(
             "tool": observation.tool.canonical_payload(),
             "duration_ms": observation.duration_ms,
             "child_processes": observation.resources.child_processes,
+            "internal_index_used": observation.resources.internal_index_used,
             "planned_cost": probe.cost,
             "observed_cost": observation.observed_cost,
         }
@@ -790,7 +1033,7 @@ def run_episode(
         "agent_family": family.value,
         "observed_tools": {
             "git": git_tool,
-            "symbols": ReferenceHostExecutor.symbol_identity(),
+            "symbols": symbol_identity,
             "check": ReferenceHostExecutor.check_identity(),
         },
         "binding_source_scope_digest": binding.source_scope_digest,
@@ -890,13 +1133,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run two child episodes that share one budget pool instead of one episode",
     )
+    parser.add_argument(
+        "--symbol-tool",
+        choices=SYMBOL_TOOL_IDS,
+        default=AST_TOOL_ID,
+        help="who answers the symbol question: the in-process parser, or a real language "
+        "server found on this host (single episode only)",
+    )
     arguments = parser.parse_args(argv)
+    if arguments.delegate and arguments.symbol_tool != AST_TOOL_ID:
+        parser.error("--symbol-tool applies to a single episode, not to --delegate")
     family = AgentFamily(arguments.family)
     with tempfile.TemporaryDirectory(prefix="lab-host-bench-") as temporary:
         if arguments.delegate:
             trace = run_delegation(Path(temporary) / "delegation", family=family)
         else:
-            trace = run_episode(Path(temporary) / "repository", family=family)
+            trace = run_episode(
+                Path(temporary) / "repository", family=family, symbol_tool=arguments.symbol_tool
+            )
     json.dump(trace, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0

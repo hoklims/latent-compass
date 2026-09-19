@@ -119,11 +119,13 @@ declare. It is refused, never resolved by picking one.
 
 `examples/lab_host_bench.py` runs the whole loop — advice, routing, host
 decision, execution, observation — in a throwaway Git repository, with real
-tools rather than mocks: `git diff` on a dirty working tree, a Python `ast`
-symbol lookup, and a check process whose exit code is the verdict.
+tools rather than mocks: `git diff` on a dirty working tree, a symbol lookup —
+the in-process Python `ast` parser, or a real language server — and a check
+process whose exit code is the verdict.
 
 ```bash
 uv run python examples/lab_host_bench.py --family claude
+uv run python examples/lab_host_bench.py --symbol-tool pyright-langserver
 ```
 
 The executor lives in `examples/` on purpose: `tests/test_lab_boundary.py`
@@ -131,7 +133,30 @@ refuses any process launch inside `latent_compass.lab`. Each executed step
 keeps five separate records — `advice`, `routing`, `host_decision`,
 `execution`, `result` — and the bench's router is the only party that accepts,
 ignores or escalates advice. Tool identities are observed (`git --version`, the
-running interpreter), never hard-coded.
+running interpreter, the version the installed language-server package
+declares), never hard-coded.
+
+**A real language server.** With `--symbol-tool pyright-langserver` the symbol
+question is put to a `pyright-langserver` found on the host's `PATH`, over the
+Language Server Protocol: it is started for the one question, handed the very
+bytes the evidence digests (`textDocument/didOpen`, not a path to re-read),
+asked for the file's symbols, told to shut down, and killed if it has not left
+by the deadline. It is no dependency of this package and nothing installs it.
+The record says what such a tool is: `internal_index_used` is `true` with the
+`TOOL_INTERNAL_INDEX_USED` limit — a language server keeps a model of the
+workspace in memory, and the executor cannot see which requests consult it, so
+it declares the index used rather than claim it was not — and `cache_used` is
+`null`, because that was not observed. The lab then re-reads the cited line
+itself, as it does for any host observation. On the bench sources the parser
+and the server cite the same definitions, and swapping one for the other
+changes who answered, what it cost and what it kept in memory — not what the
+loop concludes.
+
+Those paths run only where the server is installed; elsewhere their tests are
+skipped with that reason. Two paths run on every host: a host without the
+server meets `TOOL_ABSENT` and plans around the probe, and a real binary that
+is no language server — `git`, launched in its place — is a `FAILED`
+observation, never an outcome.
 
 `tests/test_lab_host_bench.py` drives it through the paths that do not end in
 an outcome:
