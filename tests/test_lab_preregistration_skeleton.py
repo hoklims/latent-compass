@@ -25,14 +25,78 @@ VERDICTS = ("RETIRABLE_EN_PILOTE", "CONSERVER", "PREUVE_INSUFFISANTE")
 
 # The one decision that is not a table row.
 STANDALONE = "One protocol, or several"
+# How a record of the 2026-09-19 sitting ends: every one was taken on the author's proposal.
+PROPOSED_2026_09_19 = " — 2026-09-19, repository owner, on the author's proposal"
 # Every decision the repository owner has taken, exactly as the document records it. A new
 # decision is a new entry here in the same diff: the author cannot fill a row silently, and
 # a recorded decision cannot be reworded silently.
 RECORDED = {
-    STANDALONE: (
-        "**grouped first, then per couple only where the grouped result shows a regression**"
-        " — 2026-09-19, repository owner, on the author's proposal"
-    ),
+    name: f"**{value}**{PROPOSED_2026_09_19}"
+    for name, value in {
+        STANDALONE: (
+            "grouped first, then per couple only where the grouped result shows a regression"
+        ),
+        "`task_ids`": (
+            "real past changes of the two pilot repositories, drawn by a rule written before "
+            "the freeze and chosen by hand by nobody; each runs from the state before the change"
+        ),
+        "`origin`": (
+            "REAL_DECLARED: real agent sessions on isolated copies, never on a live checkout"
+        ),
+        "Snapshots — index state": (
+            "indexes rebuilt on the state of the isolated copy before its trials — an index "
+            "built later would hold the answer — so the existing stack runs at its best; "
+            "nothing is said about day-to-day use of older indexes"
+        ),
+        "Strata": (
+            "the six strata HOK-804 names; a task's stratum is fixed with the task list, and a "
+            "stratum with no real example has no trial, which the report says"
+        ),
+        "Exclusions": (
+            "no task or trial is excluded after the freeze; a failed task stays in the denominator"
+        ),
+        "What `SUCCESS` means": (
+            "a mechanical check where one exists; otherwise an agent judge blind to the arm "
+            "and of another family than the runner; the owner audits one trial in five, drawn "
+            "before unblinding"
+        ),
+        "Cost accounting — index build and maintenance": (
+            "reported beside the trials, never amortised into them"
+        ),
+        "Power, or a bounded descriptive study": (
+            "a bounded descriptive study first: a small series fixed in advance, which may "
+            "support CONSERVER or PREUVE_INSUFFISANTE and never RETIRABLE_EN_PILOTE; its "
+            "variance estimate sizes a powered protocol, registered separately"
+        ),
+        "Stopping and reruns": (
+            "the pair count is fixed at the freeze; a harness failure before the agent's first "
+            "action is rerun once, any later failure is MISSING"
+        ),
+        "Memory": (
+            "justification memory off in the controller arm; its effect is not measured here "
+            "and stays with HOK-246"
+        ),
+        "Agent family": (
+            "one agent family for the bounded series: Codex; nothing is said about the other "
+            "family, which a powered protocol has to cover before any retirement"
+        ),
+        "Reuse of the HOK-253/HOK-254 collection": (
+            "no reuse: a separate isolated experiment, nothing collected earlier enters it"
+        ),
+        "Chronology anchor": (
+            "a reviewed commit of the sealed protocols pushed before any trial, and the CI run "
+            "on that commit"
+        ),
+        "Publication": (
+            "results by stratum, with uncertainties and the cases that regress, are published "
+            "whatever the outcome"
+        ),
+        "Rehearsal outside the protocol": (
+            "six real sessions of at most fifteen minutes on a throwaway copy, outside the "
+            "protocol and excluded from the population; only duration and cost are recorded, "
+            "never an outcome; paid through a dedicated key under a 25 USD hard limit"
+        ),
+    }.items()
 }
 # A record holds the value, its date and who took it. Only the repository owner decides.
 RECORD = re.compile(
@@ -63,12 +127,12 @@ def decisions() -> dict[str, str]:
         row for row in rows if len(row) == 4 and row[-1] != "Decided" and set(row[-1]) != {"-"}
     ]
     found = {row[0]: row[-1] for row in table}
-    assert len(found) == len(table) == 28
+    assert len(found) == len(table) == 33
     paragraphs = [" ".join(block.split()) for block in text.split("\n\n")]
     standalone = [block for block in paragraphs if block.startswith("Decided: ")]
     assert len(standalone) == 1
     found[STANDALONE] = standalone[0].removeprefix("Decided: ").removesuffix(".")
-    assert len(found) == 29
+    assert len(found) == 34
     return found
 
 
