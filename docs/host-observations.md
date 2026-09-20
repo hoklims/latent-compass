@@ -191,6 +191,28 @@ does not replace that trust decision. Claude loads the added asynchronous hook
 on its next session. Removing the entries stops collection; the runtime and
 host-local journals are retained for inspection or explicit later deletion.
 
+### Local status and summary
+
+After installation, inspect one project without reading any recorded content:
+
+```text
+latent-compass-status --project-root <repository>
+latent-compass-status --project-root <repository> --json
+```
+
+The command parses only sealed privacy-minimised record files and renders the
+validated fields required for counts and timestamps. Unknown fields, invalid
+seals, oversized files and malformed timestamps/verdicts are counted as invalid
+without being displayed. It never launches Git, a model, a network request or
+an operational recommendation. Its
+states are `NOT_CONFIGURED`, `HOST_CONFIGURATION_INVALID`,
+`SHADOW_CONFIGURATION_INVALID`, `DISABLED`, `PROJECT_NOT_REGISTERED`,
+`HOOKS_MISSING`, `RUNTIME_MISSING`, `NO_OBSERVATIONS`, `OBSERVING` and
+`DEGRADED`. A truncated scan is explicitly `DEGRADED`; its counts are partial.
+Trust is reported
+as `UNKNOWN` because filesystem inspection cannot replace the host's own trust
+review.
+
 ## The isolated bench (HOK-803)
 
 `examples/lab_host_bench.py` runs the whole loop — advice, routing, host

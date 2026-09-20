@@ -191,6 +191,11 @@ not identify the best counterfactual, establish causality, or authorize action.
 
 Requires Python 3.13 and [uv](https://docs.astral.sh/uv/).
 
+This source line is the v0.2.0 candidate. It adds the installed
+`latent-compass-status` command and keeps all observations local, passive and
+non-authoritative. The GitHub release page remains the authority for whether
+that version has actually been published.
+
 The public `v0.1.0` assets are historical artifacts pinned by SHA-256. An
 independent audit found that they were built from a Windows working tree rather
 than uploaded by CI, so they are not claimed as reproducible or
@@ -223,6 +228,25 @@ uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pyt
 
 Each step is independently runnable. `pytest` proves behavioral contracts;
 Ruff and mypy do not.
+
+## See whether Latent Compass is being used
+
+The passive adapter stays silent during normal work. The installed status
+command makes that behavior visible without displaying or retaining prompts,
+tool arguments or tool results:
+
+```bash
+latent-compass-status --project-root .
+latent-compass-status --project-root . --json
+```
+
+For each Codex or Claude host it reports whether all three hooks are present,
+whether the current project is registered, how many privacy-minimised events
+and sessions were observed, the latest observation time, and the counts of
+`ADVICE` and `ABSTAIN` records. `OBSERVING` means records exist; it does not mean
+the host followed the advice. Hook trust remains `UNKNOWN` until reviewed in the
+host itself. The footer always restates that Latent Compass has no execution
+authority, did not influence host routing and recorded no content.
 
 ## Independent proof status
 

@@ -473,7 +473,10 @@ def test_the_authority_boundary_document_states_the_unconditional_invariant() ->
 def test_the_package_declares_the_python_it_was_built_for() -> None:
     metadata = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     assert metadata["project"]["requires-python"] == ">=3.13,<3.14"
-    assert metadata["project"]["scripts"] == {"latent-compass": "latent_compass.cli:main"}
+    assert metadata["project"]["scripts"] == {
+        "latent-compass": "latent_compass.cli:main",
+        "latent-compass-status": "latent_compass.shadow_status:main",
+    }
 
 
 def test_typed_metadata_and_source_distribution_inputs_exist() -> None:
