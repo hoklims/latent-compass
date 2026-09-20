@@ -67,3 +67,73 @@ attestation. Its domain-separated seal is:
 ```text
 sha256:da17854eee708e6ec0e6c647475c222db6829e7a076d3a0219ace8c92c75c51e
 ```
+
+## HOK-799 scope inventory
+
+`hok799-scope-inventory/inventory.json` is a read-only observation, read on
+2026-09-18 and ending at 22:38 UTC, of the index providers, hooks, gateways, stores, scheduled tasks and
+consumers on one personal workstation, as 25 assets in the
+`latent_compass.lab.migration` `1.0.0` contract. No provider was started,
+refreshed or reconfigured to take it. `dry-run-report.json` is the sealed
+dry-run built from it:
+
+```text
+inventory_digest  sha256:e139cfb224264d341c6206a21d9b444d804aeb17deb955e3acb97adf575a0fea
+report_seal       sha256:853172528179fafafba2616a7ca128c79d0405c43c7e8fb443ff8b71211f3249
+```
+
+Reproduce it with:
+
+```python
+import json
+from pathlib import Path
+
+from latent_compass.lab.migration import admit_inventory_asset, build_retirement_dry_run
+
+base = Path("evidence/hok799-scope-inventory")
+assets = tuple(
+    admit_inventory_asset(item)
+    for item in json.loads((base / "inventory.json").read_text(encoding="utf-8"))
+)
+print(build_retirement_dry_run(assets, generated_at="2026-09-19T00:00:00Z").report_seal)
+```
+
+That first revision stays exactly as committed, including two defects found
+by an independent review: three never-assessed assets are declared
+`CANDIDATE_INDEX`, and its `generated_at` is a placeholder later than the
+commit that carries it. `hok799-scope-inventory-v1.1.0/` is the corrected
+revision of the same read — same 25 assets, same configuration digests, those
+three assets now `UNKNOWN`, and the real instant its report was built:
+
+```text
+inventory_digest  sha256:b7d494805b10ad1b2f08151de84bdd8ecd36371bb06bb95f2f16982cb6e38887
+report_seal       sha256:3e2e819e274144f1bf736f71a86cc35e946c412e9f59792c37517e95fb7fcb31
+```
+
+It reproduces the same way, from its own directory and with
+`generated_at="2026-09-18T23:47:51Z"`.
+
+`hok799-scope-inventory-v1.2.0/` carries an owner decision, not a correction:
+on 2026-09-19 a second personal repository, with CCC provisioned, joined the
+pilot. It is revision 1.1.0 asset for asset, in the same order, plus the five
+index artefacts found in that repository, read the same day at 12:56 UTC — by
+the operator's account, without starting, refreshing or reconfiguring anything.
+The repository travels under the alias `pilot-second-repository`:
+
+```text
+inventory_digest  sha256:8b0468fc231cd5f6720a2a688c4e08b0cf3a9ee0325144d27096a24640d17a67
+report_seal       sha256:df4c53db79580da7f186e0fc9ef4aeaa9d9efc7d0f9dd70145b6ad586f9121a9
+```
+
+It reproduces the same way, with `generated_at="2026-09-19T12:57:30Z"`. Three of
+the five new assets leave `KEEP` — for `DISABLE_LATER`, with all seven gates
+missing; the two earlier revisions stay exactly as committed.
+
+Each `configuration_digest` is the SHA-256 of one named configuration source
+as read at observation time. The label-to-path mapping is operator-held, and so
+is the second pilot's alias-to-path mapping: this repository refuses private
+host paths and private repository names, and the professional environment is
+recorded as an excluded class, never by name. The files prove deterministic
+replay of a declared inventory. They do not prove that the inventory is
+complete, that an index is unused, or that anything may be removed. Scope and
+unknowns: [`docs/active-diagnosis-scope.md`](../docs/active-diagnosis-scope.md).

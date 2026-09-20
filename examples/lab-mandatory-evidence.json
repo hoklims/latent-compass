@@ -1,0 +1,32 @@
+{
+  "contract_version": "1.0.0",
+  "model_id": "lab-mandatory-evidence-example",
+  "worlds": [
+    { "id": "world-safe", "weight": 1 },
+    { "id": "world-unsafe", "weight": 1 }
+  ],
+  "probes": [
+    {
+      "id": "probe-approval",
+      "cost": 0,
+      "outcome_space": ["outcome-pass", "outcome-fail"],
+      "outcomes": {
+        "world-safe": "outcome-pass",
+        "world-unsafe": "outcome-fail"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "decide-release",
+      "losses": { "world-safe": 0, "world-unsafe": 0 },
+      "required_evidence": [{ "probe_id": "probe-approval", "outcome_id": "outcome-pass" }]
+    },
+    {
+      "id": "decide-hold",
+      "losses": { "world-safe": 1, "world-unsafe": 1 },
+      "required_evidence": []
+    }
+  ],
+  "abstain_decision_id": "decide-hold"
+}

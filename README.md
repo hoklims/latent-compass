@@ -26,8 +26,24 @@ episodes, validates their contracts, records them in tamper-evident local
 stores, and evaluates fixed policies offline. A deterministic external judge
 remains authoritative. A human remains the only actor allowed to promote.
 
-Latent Compass **validates and records**. It does not steer the agent and emits
-no operational advisory.
+The stable interface **validates and records**. It does not steer the agent and
+emits no operational advisory.
+
+An isolated [active-diagnosis lab](docs/active-diagnosis.md) now computes which
+observation to acquire next from an explicit finite model, budget and horizon.
+It includes [bounded source reads](docs/source-session.md),
+[host-executed observations it admits and re-checks](docs/host-observations.md),
+justification memory, and
+[routing, evaluation and retirement dry-runs](docs/lab-operations.md).
+Run `uv run python examples/lab_source_demo.py` for a synthetic end-to-end example.
+This experimental API has no execution authority. An optional passive hook
+adapter can record non-authoritative routing advice from ordinary Codex and
+Claude tool events without storing prompts, arguments or results and without
+creating another model call; it never changes the route the host takes.
+Removing an index still requires a real comparison, pilot and verified migration;
+local correctness tests do not establish those outcomes. See [ADR 0011](docs/adr/0011-experimental-active-diagnosis.md)
+and the [operational scope](docs/active-diagnosis-scope.md), which names the one
+pilot perimeter, the read-only inventory and every open unknown.
 
 ## The problem it addresses
 

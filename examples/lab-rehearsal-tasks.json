@@ -1,0 +1,26 @@
+[
+  {
+    "task_id": "rehearsal-known-identifier",
+    "prompt": "In this repository, find where `build_evaluation_report` is defined and list every function it calls inside its own module. Answer in a short list; change no file."
+  },
+  {
+    "task_id": "rehearsal-conceptual-need",
+    "prompt": "Explain how this repository makes sure that the lab package never launches a process. Name the test that enforces it and what it inspects. Answer in five sentences at most; change no file."
+  },
+  {
+    "task_id": "rehearsal-architecture-impact",
+    "prompt": "Find every place under src/latent_compass/lab where a seal is computed, and say for each whether the sealed object verifies its own seal when it is loaded. Answer as a table; change no file."
+  },
+  {
+    "task_id": "rehearsal-small-edit",
+    "prompt": "Add a `--version` flag to the `latent_compass.lab` command-line interface that prints the installed package version and exits with code 0. Add one test for it next to the existing CLI tests and run that test file."
+  },
+  {
+    "task_id": "rehearsal-mechanical-edit",
+    "prompt": "In tests/test_lab_preregistration_skeleton.py, rename the local variable `found` of the function `decisions` to `cells`, everywhere inside that function, and run that test file to confirm it still passes."
+  },
+  {
+    "task_id": "rehearsal-broad-read",
+    "prompt": "List every subcommand of the `latent_compass.lab` command-line interface with one line on what it prints and which exit codes it can return. Change no file."
+  }
+]

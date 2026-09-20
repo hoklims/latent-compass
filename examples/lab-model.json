@@ -1,0 +1,67 @@
+{
+  "contract_version": "1.0.0",
+  "model_id": "lab-complementary-probes-example",
+  "worlds": [
+    { "id": "world-lo-lo", "weight": 1 },
+    { "id": "world-lo-hi", "weight": 1 },
+    { "id": "world-hi-lo", "weight": 1 },
+    { "id": "world-hi-hi", "weight": 1 }
+  ],
+  "probes": [
+    {
+      "id": "check-a",
+      "cost": 1,
+      "outcome_space": ["a-lo", "a-hi"],
+      "outcomes": {
+        "world-lo-lo": "a-lo",
+        "world-lo-hi": "a-lo",
+        "world-hi-lo": "a-hi",
+        "world-hi-hi": "a-hi"
+      }
+    },
+    {
+      "id": "check-b",
+      "cost": 1,
+      "outcome_space": ["b-lo", "b-hi"],
+      "outcomes": {
+        "world-lo-lo": "b-lo",
+        "world-hi-lo": "b-lo",
+        "world-lo-hi": "b-hi",
+        "world-hi-hi": "b-hi"
+      }
+    }
+  ],
+  "decisions": [
+    {
+      "id": "decide-equal",
+      "losses": {
+        "world-lo-lo": 0,
+        "world-hi-hi": 0,
+        "world-lo-hi": 10,
+        "world-hi-lo": 10
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "decide-different",
+      "losses": {
+        "world-lo-lo": 10,
+        "world-hi-hi": 10,
+        "world-lo-hi": 0,
+        "world-hi-lo": 0
+      },
+      "required_evidence": []
+    },
+    {
+      "id": "decide-abstain",
+      "losses": {
+        "world-lo-lo": 3,
+        "world-lo-hi": 3,
+        "world-hi-lo": 3,
+        "world-hi-hi": 3
+      },
+      "required_evidence": []
+    }
+  ],
+  "abstain_decision_id": "decide-abstain"
+}

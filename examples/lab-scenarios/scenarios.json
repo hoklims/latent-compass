@@ -1,0 +1,61 @@
+{
+  "manifest_version": "1.0.0",
+  "policy_unit": "cost-point",
+  "non_claim": "Every weight, loss and cost below is an illustrative model hypothesis chosen to make one contract behaviour checkable by hand. None is a measurement, a calibrated probability or an empirical claim about any repository.",
+  "scenarios": [
+    {
+      "kind": "KNOWN_IDENTIFIER",
+      "model": "known-identifier.json",
+      "question": "Which module defines an identifier the agent already knows by name?",
+      "expected_behaviour": "An exact search is cheap and decisive, so it is proposed before any decision; an empty result keeps the residual world alive and ends in abstention, never in a guessed edit."
+    },
+    {
+      "kind": "CONCEPT_WITHOUT_SHARED_TERMS",
+      "model": "concept-without-shared-terms.json",
+      "question": "Where is a behaviour handled when the request and the code share no vocabulary?",
+      "expected_behaviour": "A literal search on the request's own words has a constant outcome and is never proposed; a structural walk is proposed only when the budget affords it, otherwise the controller abstains."
+    },
+    {
+      "kind": "INDIRECT_DEPENDENCY",
+      "model": "indirect-dependency.json",
+      "question": "Is a change safe when a dependent may be wired through a registry instead of a direct reference?",
+      "expected_behaviour": "An empty direct-reference result is not proof of absence; the observation that discriminates the critical omission is proposed first."
+    },
+    {
+      "kind": "REQUIREMENT_ABSENT_FROM_CODE",
+      "model": "requirement-absent-from-code.json",
+      "question": "May a change be applied when the rule that governs it is written nowhere in the source?",
+      "expected_behaviour": "Source reads cannot discriminate the requirement; the change stays inadmissible until the authored requirement is observed, whatever its expected loss."
+    },
+    {
+      "kind": "CONTRADICTION",
+      "model": "known-identifier.json",
+      "question": "What happens when two observations agree with no declared world?",
+      "expected_behaviour": "The second observation is refused outside the model and the prior state is left unchanged; nothing is renormalised across bad options."
+    },
+    {
+      "kind": "BUDGET_EXHAUSTED",
+      "model": "indirect-dependency.json",
+      "question": "What does the controller return when it can afford no observation, or runs out of its own search budget?",
+      "expected_behaviour": "It stops on the best admissible decision, reports every probe as unaffordable without inventing a value, and labels a truncated search as not exact."
+    }
+  ],
+  "probe_capabilities": {
+    "known-identifier.json": {
+      "literal-search-identifier": { "capability": "LITERAL_SEARCH", "adapter": "LAB_EXECUTED" },
+      "symbol-definition-lookup": { "capability": "SYMBOL_NAVIGATION", "adapter": "HOST_EXECUTED" }
+    },
+    "concept-without-shared-terms.json": {
+      "literal-search-user-terms": { "capability": "LITERAL_SEARCH", "adapter": "LAB_EXECUTED" },
+      "symbol-walk-from-entrypoint": { "capability": "SYMBOL_NAVIGATION", "adapter": "HOST_EXECUTED" }
+    },
+    "indirect-dependency.json": {
+      "find-direct-references": { "capability": "SYMBOL_NAVIGATION", "adapter": "HOST_EXECUTED" },
+      "literal-search-registry-key": { "capability": "LITERAL_SEARCH", "adapter": "LAB_EXECUTED" }
+    },
+    "requirement-absent-from-code.json": {
+      "read-implementation": { "capability": "FILE_READ", "adapter": "HOST_EXECUTED" },
+      "authored-requirement-lookup": { "capability": "AUTHORED_REQUIREMENT", "adapter": "EXTERNAL_TO_SOURCE" }
+    }
+  }
+}
