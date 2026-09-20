@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
+from pathlib import Path
+from runpy import run_path
+from typing import Any, cast
 
 import pytest
-from tools.independent_audit import AuditError, gate
+
+_TOOL = run_path(str(Path(__file__).resolve().parents[1] / "tools" / "independent_audit.py"))
+AuditError = cast(type[ValueError], _TOOL["AuditError"])
+gate = cast(Callable[[dict[str, Any], dict[str, Any]], dict[str, object]], _TOOL["gate"])
 
 
 def _epoch() -> dict[str, object]:
