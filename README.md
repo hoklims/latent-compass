@@ -191,6 +191,12 @@ not identify the best counterfactual, establish causality, or authorize action.
 
 Requires Python 3.13 and [uv](https://docs.astral.sh/uv/).
 
+The public `v0.1.0` assets are historical artifacts pinned by SHA-256. An
+independent audit found that they were built from a Windows working tree rather
+than uploaded by CI, so they are not claimed as reproducible or
+provenance-attested builds. Future tags use the attested release workflow and
+test the extracted source distribution before publication.
+
 ```bash
 git clone https://github.com/hoklims/latent-compass
 cd latent-compass
@@ -217,6 +223,16 @@ uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pyt
 
 Each step is independently runnable. `pytest` proves behavioral contracts;
 Ruff and mypy do not.
+
+## Independent proof status
+
+The current status remains **`PROOF_WEAK/BLOCK`**. The first independent audit
+verified six high-impact invariants with red/green mutants and found no foreign
+release payload, but it also found material release and proof-contract defects.
+The public [independent-audit protocol](docs/independent-audit.md) now replaces
+the unreachable private gate. Only a fresh independent receipt accepted by that
+gate with `ALLOW` can change the formal proof status. It does not authorize a
+pilot, hook execution, or index removal.
 
 ## Record and replay an episode
 
