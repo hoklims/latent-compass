@@ -1,0 +1,9 @@
+FAILED tests/test_benchmark_cli.py::test_run_refuses_a_destination_outside_the_root
+FAILED tests/test_benchmark_cli.py::test_holdout_plan_refuses_a_destination_outside_its_root
+FAILED tests/test_cli.py::test_pairwise_capture_refuses_overwrite_and_escape
+FAILED tests/test_p2_regressions.py::test_export_out_cannot_escape_the_ledger_root[traversal]
+FAILED tests/test_p2_regressions.py::test_export_out_cannot_escape_the_ledger_root[absolute]
+FAILED tests/test_p2_regressions.py::test_export_out_cannot_escape_the_ledger_root[sibling]
+FAILED tests/test_p2_regressions.py::test_a_holdout_ledger_outside_the_declared_root_is_refused
+FAILED tests/test_prospective_collection_cli.py::test_cli_lifecycle_can_close_insufficient_but_cannot_publish_while_collecting
+8 failed, 1395 passed, 33 skipped in 95.55s (0:01:35)
