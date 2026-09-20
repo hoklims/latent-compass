@@ -1,0 +1,2 @@
+FAILED tests/test_independent_audit.py::test_gate_fails_closed[path2-value2]
+1 failed, 6 passed in 0.03s

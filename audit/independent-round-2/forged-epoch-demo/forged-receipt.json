@@ -1,0 +1,34 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "epoch_digest": "sha256:not-a-real-epoch-digest",
+  "policy_digest": "sha256:not-a-real-policy-digest",
+  "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+  "independence": {
+    "not_candidate_author": true,
+    "read_only_candidate": true,
+    "fresh_session": true,
+    "distinct_harness": true,
+    "distinct_account": true,
+    "distinct_environment": true,
+    "distinct_evidence_store": true,
+    "first_pass_before_author_narrative": true
+  },
+  "claims": [
+    {
+      "claim": "nothing was actually audited",
+      "invocation_paths": [
+        "none"
+      ],
+      "witness": {
+        "mutation": "none",
+        "command": "none",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "x",
+        "green_output_digest": "y"
+      }
+    }
+  ],
+  "unresolved_blockers": [],
+  "verdict": "PROOF_ADEQUATE"
+}

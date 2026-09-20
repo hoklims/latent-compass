@@ -1,0 +1,1 @@
+{"decision": "BLOCK", "error": "first_pass_before_author_narrative must be true"}
