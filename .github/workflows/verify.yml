@@ -27,6 +27,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -46,6 +47,8 @@ jobs:
         run: uv run --frozen mypy
       - name: Test complete source tree
         run: uv run --frozen pytest -o addopts='' -q
+      - name: Exercise independent audit gate fail-closed tests
+        run: uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py
       - name: Build distributions
         run: uv build --no-sources
       - name: Test extracted source distribution
