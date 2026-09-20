@@ -10,9 +10,13 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from re import fullmatch
 from typing import Any
 
 SCHEMA = "hoklims/latent-compass:independent-audit/2"
+REPOSITORY = "hoklims/latent-compass"
+SHA256_PATTERN = r"sha256:[0-9a-f]{64}"
+GIT_SHA_PATTERN = r"[0-9a-f]{40}"
 POLICY_FILES = (
     "docs/independent-audit.md",
     "tools/independent_audit.py",
@@ -56,6 +60,11 @@ def _policy_digest(root: Path) -> str:
     return _digest(_canonical(material))
 
 
+def _epoch_digest(epoch: dict[str, Any]) -> str:
+    material = {key: value for key, value in epoch.items() if key != "epoch_digest"}
+    return _digest(_canonical(material))
+
+
 def create_epoch(repository: Path, base: str, head: str) -> dict[str, object]:
     root = _root(repository)
     base_sha = str(_git(root, "rev-parse", base))
@@ -67,19 +76,25 @@ def create_epoch(repository: Path, base: str, head: str) -> dict[str, object]:
         try:
             content = _git(root, "show", f"{head_sha}:{relative}", binary=True)
             assert isinstance(content, bytes)
-            files.append({"path": relative, "digest": _digest(content)})
+            files.append({"path": relative, "kind": "file", "digest": _digest(content)})
         except subprocess.CalledProcessError:
-            files.append({"path": relative, "digest": _digest(b"")})
+            files.append(
+                {
+                    "path": relative,
+                    "kind": "deleted",
+                    "digest": _digest(b"latent-compass:deleted:v1"),
+                }
+            )
     epoch: dict[str, object] = {
         "schema": SCHEMA,
-        "repository": str(_git(root, "config", "--get", "remote.origin.url")),
+        "repository": REPOSITORY,
         "base_sha": base_sha,
         "head_sha": head_sha,
         "head_tree": str(_git(root, "rev-parse", f"{head_sha}^{{tree}}")),
         "policy_digest": _policy_digest(root),
         "files": files,
     }
-    epoch["epoch_digest"] = _digest(_canonical(epoch))
+    epoch["epoch_digest"] = _epoch_digest(epoch)
     return epoch
 
 
@@ -91,6 +106,38 @@ def _required_bool(mapping: dict[str, Any], key: str) -> None:
 def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
     if epoch.get("schema") != SCHEMA or receipt.get("schema") != SCHEMA:
         raise AuditError(f"schema must be {SCHEMA}")
+    if epoch.get("repository") != REPOSITORY:
+        raise AuditError(f"repository must be {REPOSITORY}")
+    for key in ("base_sha", "head_sha", "head_tree"):
+        if not isinstance(epoch.get(key), str) or fullmatch(GIT_SHA_PATTERN, epoch[key]) is None:
+            raise AuditError(f"epoch {key} must be a full lowercase Git SHA")
+    if (
+        not isinstance(epoch.get("policy_digest"), str)
+        or fullmatch(SHA256_PATTERN, epoch["policy_digest"]) is None
+    ):
+        raise AuditError("epoch policy_digest must be a SHA-256 digest")
+    files = epoch.get("files")
+    if not isinstance(files, list) or not files:
+        raise AuditError("epoch files must be a non-empty array")
+    paths: list[str] = []
+    for index, item in enumerate(files):
+        if not isinstance(item, dict) or set(item) != {"path", "kind", "digest"}:
+            raise AuditError(f"epoch file {index} is malformed")
+        path = item.get("path")
+        kind = item.get("kind")
+        digest = item.get("digest")
+        if not isinstance(path, str) or not path or path.startswith(("/", "../")):
+            raise AuditError(f"epoch file {index} has an invalid path")
+        if kind not in {"file", "deleted"}:
+            raise AuditError(f"epoch file {index} has an invalid kind")
+        if not isinstance(digest, str) or fullmatch(SHA256_PATTERN, digest) is None:
+            raise AuditError(f"epoch file {index} has an invalid digest")
+        paths.append(path)
+    if paths != sorted(set(paths)):
+        raise AuditError("epoch file paths must be unique and sorted")
+    expected_epoch_digest = _epoch_digest(epoch)
+    if epoch.get("epoch_digest") != expected_epoch_digest:
+        raise AuditError("epoch_digest does not match the canonical epoch contents")
     for key in ("epoch_digest", "policy_digest", "head_sha"):
         if receipt.get(key) != epoch.get(key):
             raise AuditError(f"receipt {key} does not match the epoch")
@@ -114,8 +161,8 @@ def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
     for index, claim in enumerate(claims):
         if not isinstance(claim, dict) or not claim.get("claim"):
             raise AuditError(f"claim {index} is malformed")
-        paths = claim.get("invocation_paths")
-        if not isinstance(paths, list) or not paths:
+        invocation_paths = claim.get("invocation_paths")
+        if not isinstance(invocation_paths, list) or not invocation_paths:
             raise AuditError(f"claim {index} has no invocation paths")
         witness = claim.get("witness")
         if not isinstance(witness, dict):
@@ -127,6 +174,9 @@ def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
         for key in ("mutation", "command", "red_output_digest", "green_output_digest"):
             if not isinstance(witness.get(key), str) or not witness[key]:
                 raise AuditError(f"claim {index} witness is missing {key}")
+        for key in ("red_output_digest", "green_output_digest"):
+            if fullmatch(SHA256_PATTERN, witness[key]) is None:
+                raise AuditError(f"claim {index} witness {key} must be a SHA-256 digest")
     if receipt.get("unresolved_blockers") != []:
         raise AuditError("unresolved_blockers must be an empty array")
     if receipt.get("verdict") != "PROOF_ADEQUATE":

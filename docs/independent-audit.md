@@ -11,6 +11,11 @@ python tools/independent_audit.py epoch \
   --repository . --base <base-sha> --head <candidate-sha> --output epoch.json
 ```
 
+The epoch uses the stable logical repository identity `hoklims/latent-compass`,
+independent of whether the clone remote uses HTTPS or SSH. The gate recomputes
+the canonical epoch digest and validates its Git identities and complete changed
+file inventory before considering the receipt.
+
 The receipt uses schema `hoklims/latent-compass:independent-audit/2` and copies
 the epoch's `epoch_digest`, `policy_digest`, and `head_sha`. It records all eight
 independence booleans enforced by the gate, a non-empty `claims` array, an empty

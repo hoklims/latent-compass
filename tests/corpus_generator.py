@@ -806,9 +806,7 @@ def write(target: Path = CORPUS_DIR) -> None:
     # The manifest is derived from the split files on disk, so the splits are
     # written first and the derived documents second.
     for split, (name, prefix, table) in sorted(SPLIT_FILES.items()):
-        (target / name).write_text(
-            dumps(split_payload(split, prefix, table)), encoding="utf-8", newline="\n"
-        )
+        (target / name).write_text(dumps(split_payload(split, prefix, table)), encoding="utf-8")
     for name, text in generate(target).items():
         (target / name).write_text(text, encoding="utf-8", newline="\n")
 
