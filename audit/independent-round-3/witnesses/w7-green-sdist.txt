@@ -1,0 +1,5 @@
+$ uv build --no-sources python tools/verify_sdist.py dist/latent_compass-*.tar.gz
+exit=0
+full_output_sha256=sha256:5d5e4afdb4c912d10320a403e7039caecbd0a518965cfe1a5b51cecf1703a742
+--- trimmed ---
+1412 passed, 33 skipped in 97.69s (0:01:37)

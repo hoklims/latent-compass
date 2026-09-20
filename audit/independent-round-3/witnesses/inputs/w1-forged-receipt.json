@@ -1,0 +1,44 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "repository": "hoklims/latent-compass",
+  "base_sha": "0000000000000000000000000000000000000001",
+  "head_sha": "0000000000000000000000000000000000000002",
+  "head_tree": "0000000000000000000000000000000000000003",
+  "policy_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "files": [
+    {
+      "path": "totally/invented.py",
+      "kind": "file",
+      "digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "epoch_digest": "sha256:29e627bafc27dd48b4e7d56aca356c1a06c2edbb69cbc04b181e8f7effffcfb9",
+  "independence": {
+    "not_candidate_author": true,
+    "read_only_candidate": true,
+    "fresh_session": true,
+    "distinct_harness": true,
+    "distinct_account": true,
+    "distinct_environment": true,
+    "distinct_evidence_store": true,
+    "first_pass_before_author_narrative": true
+  },
+  "claims": [
+    {
+      "claim": "no audit work was performed at all",
+      "invocation_paths": [
+        "manual"
+      ],
+      "witness": {
+        "mutation": "none",
+        "command": "none",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "green_output_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  ],
+  "unresolved_blockers": [],
+  "verdict": "PROOF_ADEQUATE"
+}

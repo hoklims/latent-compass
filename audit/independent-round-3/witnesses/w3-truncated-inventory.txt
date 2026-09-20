@@ -1,0 +1,5 @@
+$ <SCRATCH>/.venv/bin/python3 tools/independent_audit.py gate --epoch <SCRATCH>/scratch/w3-truncated-epoch.json --receipt <SCRATCH>/scratch/w3-truncated-receipt.json
+exit=0
+full_output_sha256=sha256:8d8976e7736cb15377d53f3d012406d704fb094af2237296b6006a5e70a60842
+--- trimmed ---
+  "decision": "ALLOW",

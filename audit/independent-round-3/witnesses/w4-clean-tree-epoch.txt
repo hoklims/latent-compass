@@ -1,0 +1,5 @@
+$ <SCRATCH>/.venv/bin/python3 tools/independent_audit.py epoch --repository . --base f652690f29420b5d4ae4f37b22caa5e98df102a2 --head 45078dcc10d228326f410df76f7af15ff2133e0b
+exit=0
+full_output_sha256=sha256:85d55f57b96169a1bf4b571fd047ca7931319ed3a9fd2565ee0a5714ae6a316c
+--- trimmed ---
+
