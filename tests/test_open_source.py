@@ -22,6 +22,7 @@ REQUIRED_FILES = (
     "NOTICE",
     "README.md",
     "README.fr.md",
+    "CHANGELOG.md",
     "CONTRIBUTING.md",
     "CODE_OF_CONDUCT.md",
     "SECURITY.md",
@@ -157,10 +158,16 @@ def test_the_readme_documents_install_and_validation() -> None:
         assert command in readme
 
 
-def test_the_readme_carries_no_unearned_badge() -> None:
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-    badges = re.findall(r"!\[[^\]]*\]\([^)]*(?:shields\.io|badge|travis|circleci)[^)]*\)", readme)
-    assert badges == [], f"unearned badges present: {badges}"
+def test_the_readme_carries_only_workflow_backed_badges() -> None:
+    expected = [
+        "[![Verify](https://github.com/hoklims/latent-compass/actions/workflows/verify.yml/badge.svg)](https://github.com/hoklims/latent-compass/actions/workflows/verify.yml)",
+        "[![Build attested release](https://github.com/hoklims/latent-compass/actions/workflows/release.yml/badge.svg)](https://github.com/hoklims/latent-compass/actions/workflows/release.yml)",
+    ]
+    for relative in ("README.md", "README.fr.md"):
+        lines = (REPO / relative).read_text(encoding="utf-8").splitlines()
+        assert [line for line in lines if "![" in line] == expected
+    assert (REPO / ".github" / "workflows" / "verify.yml").is_file()
+    assert (REPO / ".github" / "workflows" / "release.yml").is_file()
 
 
 def test_the_honest_limit_appears_in_every_document_that_relies_on_it() -> None:
@@ -483,4 +490,4 @@ def test_typed_metadata_and_source_distribution_inputs_exist() -> None:
     metadata = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))
     included = set(metadata["tool"]["hatch"]["build"]["targets"]["sdist"]["include"])
     assert (REPO / "src" / "latent_compass" / "py.typed").is_file()
-    assert {"/examples", "/evidence"} <= included
+    assert {"/examples", "/evidence", "/CHANGELOG.md"} <= included

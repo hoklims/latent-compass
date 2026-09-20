@@ -1,9 +1,14 @@
 # Latent Compass
 
+[![Verify](https://github.com/hoklims/latent-compass/actions/workflows/verify.yml/badge.svg)](https://github.com/hoklims/latent-compass/actions/workflows/verify.yml)
+[![Build attested release](https://github.com/hoklims/latent-compass/actions/workflows/release.yml/badge.svg)](https://github.com/hoklims/latent-compass/actions/workflows/release.yml)
+
 > La boîte noire et le banc d’essai hors ligne des décisions stratégiques prises
 > par les agents de développement.
 
 [English](README.md) · [Français](README.fr.md)
+
+Historique des releases : [CHANGELOG.md](CHANGELOG.md).
 
 Les agents de développement prennent sans cesse des décisions lourdes de
 conséquences : quelle hypothèse tester, quel fichier modifier, quelle erreur
@@ -418,5 +423,6 @@ documentée et testée.
 
 Apache-2.0. Voir [LICENSE](LICENSE) et [NOTICE](NOTICE).
 
-Ce README n’affiche aucun badge de build, de couverture ou de qualité. Aucune
-exécution publique et reproductible ne les a encore mérités.
+Les deux badges de workflow ci-dessus reposent sur des runs GitHub Actions
+publics liés à des SHA exacts. Aucun pourcentage de couverture ni score agrégé
+de qualité n’est revendiqué.

@@ -1,9 +1,14 @@
 # Latent Compass
 
+[![Verify](https://github.com/hoklims/latent-compass/actions/workflows/verify.yml/badge.svg)](https://github.com/hoklims/latent-compass/actions/workflows/verify.yml)
+[![Build attested release](https://github.com/hoklims/latent-compass/actions/workflows/release.yml/badge.svg)](https://github.com/hoklims/latent-compass/actions/workflows/release.yml)
+
 > A flight recorder and offline proving ground for strategic decisions made by
 > coding agents.
 
 [English](README.md) · [Français](README.fr.md)
+
+Release history: [CHANGELOG.md](CHANGELOG.md).
 
 Coding agents make consequential choices all day: which hypothesis to test,
 which file to change, which failure to pursue, when to stop, and when to ask for
@@ -366,5 +371,5 @@ package does not have. The limitation is documented and tested.
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-There are no build, coverage, or quality badges here. No public reproducible run
-has earned them yet.
+The two workflow badges above are backed by public exact-SHA GitHub Actions
+runs. No coverage percentage or aggregate quality-score badge is claimed.

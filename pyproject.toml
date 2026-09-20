@@ -50,6 +50,7 @@ packages = ["src/latent_compass"]
 [tool.hatch.build.targets.sdist]
 include = [
   "/.github/workflows/verify.yml",
+  "/.github/workflows/release.yml",
   "/src",
   "/tests",
   "/docs",
@@ -62,6 +63,7 @@ include = [
   "/corpus",
   "/README.md",
   "/README.fr.md",
+  "/CHANGELOG.md",
   "/LICENSE",
   "/NOTICE",
   "/SECURITY.md",
