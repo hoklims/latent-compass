@@ -1,0 +1,6 @@
+$ python tools/independent_audit.py gate --epoch epoch.json --receipt probe-a-independence-waived.json
+exit=1
+full_output_sha256=sha256:1a2d35d0a7bc105416f7f3c2fac9dd5ec11814b9bb8434804c277710b9fe865e
+--- stdout ---
+--- stderr ---
+{"decision": "BLOCK", "error": "unresolved_blockers must be an empty array"}

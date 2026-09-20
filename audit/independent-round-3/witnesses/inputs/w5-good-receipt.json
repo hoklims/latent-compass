@@ -1,0 +1,104 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "repository": "hoklims/latent-compass",
+  "base_sha": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+  "head_sha": "45078dcc10d228326f410df76f7af15ff2133e0b",
+  "head_tree": "497312722bbc3a5602a4e95a56b7240f6a2ba61a",
+  "policy_digest": "sha256:22575e6533a7ea2b4d9b2b5c92ee58489b6f8145c8dc387d04763af100a35061",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "kind": "file",
+      "digest": "sha256:489fb811f97deb0befb181e8eda6330bd155b6e1a3d7cc4b717391c31cf870f0"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "kind": "file",
+      "digest": "sha256:ba65275c069a12c7fb000ccd2e78946fc71b0d16d559a21ae7b4cee1126f35f0"
+    },
+    {
+      "path": ".github/workflows/verify.yml",
+      "kind": "file",
+      "digest": "sha256:0bb92ca25ba07982ded7e846e1c3a1ccc2869d1b2ab341e752de4d54559486c5"
+    },
+    {
+      "path": "HANDOFF.md",
+      "kind": "file",
+      "digest": "sha256:e7932c13b47ea438fe64c52f96c8828c740a27443ef88cb5f1e6466398124a08"
+    },
+    {
+      "path": "README.fr.md",
+      "kind": "file",
+      "digest": "sha256:fd9fb7e542965944e8d32342c5019f74bc0e127cec0830f6692fecb35ae0aee2"
+    },
+    {
+      "path": "README.md",
+      "kind": "file",
+      "digest": "sha256:07ae0781209e45eef0e03469b76d41be8c05d12c186b442be7a21ce9d4d8d198"
+    },
+    {
+      "path": "docs/independent-audit.md",
+      "kind": "file",
+      "digest": "sha256:2d3f09e6631ebde5a1e5307092e1adc1fd517f6032de43b64ff959701daa3e53"
+    },
+    {
+      "path": "pyproject.toml",
+      "kind": "file",
+      "digest": "sha256:bebc1ed050a0a366ffeffc60e9ae7d73eabc11422016932638cf1fad7d8033c2"
+    },
+    {
+      "path": "tests/corpus_generator.py",
+      "kind": "file",
+      "digest": "sha256:18d9ace3c28c09d0a7ba0b626f40d4185c6bd939469a56f5a7c8895c5fad4a39"
+    },
+    {
+      "path": "tests/test_independent_audit.py",
+      "kind": "file",
+      "digest": "sha256:5b738536009f2ad0c49299266dfa86b96167333cbe1efdbc80be851750801a48"
+    },
+    {
+      "path": "tools/__init__.py",
+      "kind": "file",
+      "digest": "sha256:68f4a2935fa7c30030951acad518f9f4ca39030d147022d78fc972ca63dd4e44"
+    },
+    {
+      "path": "tools/independent_audit.py",
+      "kind": "file",
+      "digest": "sha256:c0765bd10fd24e6ff7c1bd70010a365e97b159de167b6f93b6e10b2f992171d5"
+    },
+    {
+      "path": "tools/verify_sdist.py",
+      "kind": "file",
+      "digest": "sha256:90e6e843a4b426b8c78c63fa789e5c915de26acafdd63eb7d2094b04ba13b82c"
+    }
+  ],
+  "epoch_digest": "sha256:8d53dfe9e297ea4b57bc5dd528050d21d8b1f86490a996936d5dd1d86605994e",
+  "independence": {
+    "not_candidate_author": true,
+    "read_only_candidate": true,
+    "fresh_session": true,
+    "distinct_harness": true,
+    "distinct_account": true,
+    "distinct_environment": true,
+    "distinct_evidence_store": true,
+    "first_pass_before_author_narrative": true
+  },
+  "claims": [
+    {
+      "claim": "canonical epoch",
+      "invocation_paths": [
+        "manual"
+      ],
+      "witness": {
+        "mutation": "none",
+        "command": "none",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "green_output_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  ],
+  "unresolved_blockers": [],
+  "verdict": "PROOF_ADEQUATE"
+}

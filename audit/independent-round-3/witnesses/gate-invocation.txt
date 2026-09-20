@@ -1,0 +1,6 @@
+$ python tools/independent_audit.py gate --epoch epoch.json --receipt receipt.json
+exit=1
+full_output_sha256=sha256:eb7ab08df1f83f3b9e4c804e5dbe85c1200923deceff301b446f7eb75ecfbcf5
+--- stdout ---
+--- stderr ---
+{"decision": "BLOCK", "error": "distinct_harness must be true"}

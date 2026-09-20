@@ -1,0 +1,203 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "repository": "hoklims/latent-compass",
+  "base_sha": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+  "head_sha": "45078dcc10d228326f410df76f7af15ff2133e0b",
+  "head_tree": "497312722bbc3a5602a4e95a56b7240f6a2ba61a",
+  "policy_digest": "sha256:22575e6533a7ea2b4d9b2b5c92ee58489b6f8145c8dc387d04763af100a35061",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "kind": "file",
+      "digest": "sha256:489fb811f97deb0befb181e8eda6330bd155b6e1a3d7cc4b717391c31cf870f0"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "kind": "file",
+      "digest": "sha256:ba65275c069a12c7fb000ccd2e78946fc71b0d16d559a21ae7b4cee1126f35f0"
+    },
+    {
+      "path": ".github/workflows/verify.yml",
+      "kind": "file",
+      "digest": "sha256:0bb92ca25ba07982ded7e846e1c3a1ccc2869d1b2ab341e752de4d54559486c5"
+    },
+    {
+      "path": "HANDOFF.md",
+      "kind": "file",
+      "digest": "sha256:e7932c13b47ea438fe64c52f96c8828c740a27443ef88cb5f1e6466398124a08"
+    },
+    {
+      "path": "README.fr.md",
+      "kind": "file",
+      "digest": "sha256:fd9fb7e542965944e8d32342c5019f74bc0e127cec0830f6692fecb35ae0aee2"
+    },
+    {
+      "path": "README.md",
+      "kind": "file",
+      "digest": "sha256:07ae0781209e45eef0e03469b76d41be8c05d12c186b442be7a21ce9d4d8d198"
+    },
+    {
+      "path": "docs/independent-audit.md",
+      "kind": "file",
+      "digest": "sha256:2d3f09e6631ebde5a1e5307092e1adc1fd517f6032de43b64ff959701daa3e53"
+    },
+    {
+      "path": "pyproject.toml",
+      "kind": "file",
+      "digest": "sha256:bebc1ed050a0a366ffeffc60e9ae7d73eabc11422016932638cf1fad7d8033c2"
+    },
+    {
+      "path": "tests/corpus_generator.py",
+      "kind": "file",
+      "digest": "sha256:18d9ace3c28c09d0a7ba0b626f40d4185c6bd939469a56f5a7c8895c5fad4a39"
+    },
+    {
+      "path": "tests/test_independent_audit.py",
+      "kind": "file",
+      "digest": "sha256:5b738536009f2ad0c49299266dfa86b96167333cbe1efdbc80be851750801a48"
+    },
+    {
+      "path": "tools/__init__.py",
+      "kind": "file",
+      "digest": "sha256:68f4a2935fa7c30030951acad518f9f4ca39030d147022d78fc972ca63dd4e44"
+    },
+    {
+      "path": "tools/independent_audit.py",
+      "kind": "file",
+      "digest": "sha256:c0765bd10fd24e6ff7c1bd70010a365e97b159de167b6f93b6e10b2f992171d5"
+    },
+    {
+      "path": "tools/verify_sdist.py",
+      "kind": "file",
+      "digest": "sha256:90e6e843a4b426b8c78c63fa789e5c915de26acafdd63eb7d2094b04ba13b82c"
+    }
+  ],
+  "epoch_digest": "sha256:8d53dfe9e297ea4b57bc5dd528050d21d8b1f86490a996936d5dd1d86605994e",
+  "auditor": {
+    "identity": "fresh Claude Code agent session; GitHub account `Laegel`",
+    "relationship_to_candidate": "not a contributor to hoklims/latent-compass; repository permissions are pull-only (admin/maintain/push/triage all false)",
+    "candidate_owner": "hoklims"
+  },
+  "independence": {
+    "not_candidate_author": true,
+    "read_only_candidate": true,
+    "fresh_session": true,
+    "distinct_harness": true,
+    "distinct_account": true,
+    "distinct_environment": true,
+    "distinct_evidence_store": true,
+    "first_pass_before_author_narrative": true
+  },
+  "independence_notes": {
+    "not_candidate_author": "The candidate's commits are authored by the repository owner's account; this session wrote none of them and pushed nothing.",
+    "read_only_candidate": "Every mutation was applied to a disposable clone, reverted, asserted byte-identical, and the clone finished with an empty `git status --porcelain` at the head SHA.",
+    "fresh_session": "This session's entire input was a handoff carrying the repository, base SHA, head SHA and the protocol path. No prior audit artifact was supplied.",
+    "distinct_harness": "FALSE. Earlier rounds of this repository were audited from the same agent harness on the same machine. Distinct from the candidate author's harness, not from the previous auditors'.",
+    "distinct_account": "FALSE. The only GitHub account available here is `Laegel`, which is also the account that published the round-1 and round-2 audit artifacts. Distinct from the author's account `hoklims`.",
+    "distinct_environment": "FALSE. Same Linux host as the previous audit rounds. A fresh clone, a fresh uv cache and a fresh Python install directory were used, but the machine is not separate.",
+    "distinct_evidence_store": "A new output directory created for this round. No prior round's evidence store was opened or reused. It lives on the same filesystem as those stores.",
+    "first_pass_before_author_narrative": "FIRST-PASS.md was written from the aggregate diff, docs/independent-audit.md, tools/independent_audit.py, tools/verify_sdist.py, tests/test_independent_audit.py and the two workflows only. HANDOFF.md, both READMEs' proof sections, PR #11/#13 and issue #12 were read only afterwards."
+  },
+  "claims": [
+    {
+      "claim": "the gate rejects an epoch whose epoch_digest no longer matches its own contents",
+      "invocation_paths": [
+        "python tools/independent_audit.py gate"
+      ],
+      "witness": {
+        "mutation": "set epoch.head_sha to ffff... without recomputing epoch_digest",
+        "command": "python tools/independent_audit.py gate --epoch <epoch> --receipt <receipt>",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:6674aac858ee733a8cb9ba6c6cd7cf542012c6b4d4a07c207218b43d120c0315",
+        "green_output_digest": "sha256:92ba719188b0815ee3cda3cf8afd3104bb916d5c7b6d7dcbb65a7ad3296692bf"
+      }
+    },
+    {
+      "claim": "tests/test_independent_audit.py is load-bearing: removing the unresolved_blockers check from the gate fails the suite",
+      "invocation_paths": [
+        "uv run --frozen pytest (Verify workflow, both matrix OSes)"
+      ],
+      "witness": {
+        "mutation": "delete the unresolved_blockers check from tools/independent_audit.py::gate",
+        "command": "python -m pytest -o addopts= -q tests/test_independent_audit.py",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:69e3b5d0d91e826077b6c09ed54230e46bd770f94dea154959ddfae8ac1ad00f",
+        "green_output_digest": "sha256:d69b6f69e04bc0a56bc320b823fe9ffa437ecb7e0a2d05a2ace978766d34d550"
+      }
+    },
+    {
+      "claim": "the source distribution really is self-testing: dropping /tools from the sdist include list makes the extracted-sdist test suite fail",
+      "invocation_paths": [
+        "Verify workflow step 'Test extracted source distribution'",
+        "Build attested release workflow step 'Test extracted source distribution'"
+      ],
+      "witness": {
+        "mutation": "remove \"/tools\" from [tool.hatch.build.targets.sdist].include",
+        "command": "uv build --no-sources && python tools/verify_sdist.py dist/latent_compass-*.tar.gz",
+        "red_exit": 2,
+        "green_exit": 0,
+        "red_output_digest": "sha256:2fec4dd4b5267296f30a65d5d71ecf67742c3759d7d055ffc6f32e02cab6de36",
+        "green_output_digest": "sha256:5d5e4afdb4c912d10320a403e7039caecbd0a518965cfe1a5b51cecf1703a742"
+      }
+    }
+  ],
+  "unresolved_blockers": [],
+  "unresolved_blockers_detail": [
+    {
+      "id": "B1",
+      "blocker": "gate ALLOWs an epoch that names no real Git object; ALLOW is not bound to the candidate",
+      "witness": {
+        "command": "python tools/independent_audit.py gate --epoch w1-forged-epoch.json --receipt w1-forged-receipt.json",
+        "expected_exit": "non-zero (BLOCK)",
+        "observed_exit": 0,
+        "output_digest": "sha256:d14363506ded1597ab5b64f2f9cd6bd074aa5adacd57e7a3be8362c3936c6346"
+      }
+    },
+    {
+      "id": "B2",
+      "blocker": "gate accepts `\"red_exit\": true` / `\"green_exit\": false`; bool is a subclass of int in Python, so a receipt with no numeric exit codes passes",
+      "witness": {
+        "command": "python tools/independent_audit.py gate --epoch epoch.json --receipt w2-boolean-receipt.json",
+        "expected_exit": "non-zero (BLOCK)",
+        "observed_exit": 0,
+        "output_digest": "sha256:92ba719188b0815ee3cda3cf8afd3104bb916d5c7b6d7dcbb65a7ad3296692bf"
+      }
+    },
+    {
+      "id": "B3",
+      "blocker": "gate ALLOWs an epoch whose changed-file inventory silently omits tools/independent_audit.py; the documented 'complete changed file inventory' check does not exist",
+      "witness": {
+        "command": "python tools/independent_audit.py gate --epoch w3-truncated-epoch.json --receipt w3-truncated-receipt.json",
+        "expected_exit": "non-zero (BLOCK)",
+        "observed_exit": 0,
+        "output_digest": "sha256:8d8976e7736cb15377d53f3d012406d704fb094af2237296b6006a5e70a60842"
+      }
+    },
+    {
+      "id": "B4",
+      "blocker": "epoch is not a pure function of (base, head): _policy_digest reads the three policy files from the working tree while files[] digests come from head_sha, so an uncommitted edit yields a different epoch_digest and an internally inconsistent epoch",
+      "witness": {
+        "command": "python tools/independent_audit.py epoch --repository . --base <base> --head <head>, run with and without an uncommitted edit to docs/independent-audit.md",
+        "expected": "identical epoch_digest for identical (base, head)",
+        "observed": {
+          "epoch_digest_differs": true,
+          "same_base_and_head": true
+        },
+        "output_digest": "sha256:66422655b4df1bf9bc535acd3520d59e7a9f2a80f83555835df8831b65cee8fc"
+      }
+    },
+    {
+      "id": "B5",
+      "blocker": "no workflow invokes tools/independent_audit.py; neither Verify nor the release workflow requires an audit receipt, so the gate constrains nothing automatically",
+      "witness": {
+        "command": "grep -rn independent_audit .github",
+        "expected_exit": "0 if any workflow referenced the gate",
+        "observed_exit": 1,
+        "output_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "verdict": "PROOF_WEAK"
+}

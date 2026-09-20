@@ -1,0 +1,6 @@
+$ python tools/independent_audit.py gate --epoch epoch.json --receipt probe-b-blockers-waived.json
+exit=1
+full_output_sha256=sha256:bc9a0882d7e472281301f4de41f79700952b6926051fe1cc130d2eb5cea7d8b0
+--- stdout ---
+--- stderr ---
+{"decision": "BLOCK", "error": "verdict must be PROOF_ADEQUATE"}
