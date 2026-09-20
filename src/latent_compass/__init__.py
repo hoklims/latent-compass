@@ -135,7 +135,7 @@ from latent_compass.vocabulary import (
     may_issue_direction,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "AUTHORITY_CONTRACT_VERSION",

@@ -2,7 +2,7 @@ name: Build attested release
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v0.2.0']
 
 permissions:
   contents: write
@@ -29,19 +29,23 @@ jobs:
       - name: Build distributions from tag
         run: uv build --no-sources
       - name: Test extracted source distribution
-        run: uv run --frozen python tools/verify_sdist.py dist/latent_compass-*.tar.gz
+        run: uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.2.0.tar.gz
       - name: Verify installed wheel outside checkout
         working-directory: ${{ runner.temp }}
-        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/"*.whl latent-compass shadow --help
+        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-0.2.0-py3-none-any.whl" latent-compass-status --help
       - name: Attest exact release artifacts
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
         with:
-          subject-path: dist/*
+          subject-path: |
+            dist/latent_compass-0.2.0.tar.gz
+            dist/latent_compass-0.2.0-py3-none-any.whl
       - name: Retain exact release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ github.ref_name }}
-          path: dist/*
+          path: |
+            dist/latent_compass-0.2.0.tar.gz
+            dist/latent_compass-0.2.0-py3-none-any.whl
           if-no-files-found: error
       - name: Publish exact attested artifacts
         env:
@@ -49,4 +53,6 @@ jobs:
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          gh release upload "$GITHUB_REF_NAME" \
+            dist/latent_compass-0.2.0.tar.gz \
+            dist/latent_compass-0.2.0-py3-none-any.whl --clobber

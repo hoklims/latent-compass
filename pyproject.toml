@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "latent-compass"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shadow-mode contracts and an append-only episode ledger for coding agents: validates and records supplied advisories, never executes, promotes or decides."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -32,6 +32,7 @@ Issues = "https://github.com/hoklims/latent-compass/issues"
 
 [project.scripts]
 latent-compass = "latent_compass.cli:main"
+latent-compass-status = "latent_compass.shadow_status:main"
 
 [dependency-groups]
 dev = [
