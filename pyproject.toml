@@ -121,7 +121,7 @@ ban-relative-imports = "parents"
 [tool.mypy]
 python_version = "3.13"
 strict = true
-files = ["src", "tests", "examples"]
+files = ["src", "tests", "examples", "tools"]
 plugins = ["pydantic.mypy"]
 warn_unreachable = true
 disallow_any_unimported = true
