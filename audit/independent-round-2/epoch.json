@@ -1,0 +1,63 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "repository": "https://github.com/hoklims/latent-compass.git",
+  "base_sha": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+  "head_sha": "d5ae2362ff326f2dbece7eacf889f4fd7c8d8dd1",
+  "head_tree": "d3af235b8adc8e660a0bd26f8682e439202c0cd7",
+  "policy_digest": "sha256:9c9e5531cb2366e4d44a8ed4529eae99a2ff967af76edb7bb3540cd1d3a372c5",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "digest": "sha256:489fb811f97deb0befb181e8eda6330bd155b6e1a3d7cc4b717391c31cf870f0"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "digest": "sha256:ba65275c069a12c7fb000ccd2e78946fc71b0d16d559a21ae7b4cee1126f35f0"
+    },
+    {
+      "path": ".github/workflows/verify.yml",
+      "digest": "sha256:0bb92ca25ba07982ded7e846e1c3a1ccc2869d1b2ab341e752de4d54559486c5"
+    },
+    {
+      "path": "HANDOFF.md",
+      "digest": "sha256:e7932c13b47ea438fe64c52f96c8828c740a27443ef88cb5f1e6466398124a08"
+    },
+    {
+      "path": "README.fr.md",
+      "digest": "sha256:fd9fb7e542965944e8d32342c5019f74bc0e127cec0830f6692fecb35ae0aee2"
+    },
+    {
+      "path": "README.md",
+      "digest": "sha256:07ae0781209e45eef0e03469b76d41be8c05d12c186b442be7a21ce9d4d8d198"
+    },
+    {
+      "path": "docs/independent-audit.md",
+      "digest": "sha256:67d99c21e5e4adfa4ab603906ac724e9397a592618b4bc2b48cb0eb889a2a103"
+    },
+    {
+      "path": "pyproject.toml",
+      "digest": "sha256:04a8d685b5a40d3f4c34e9c9e104d782be3cd08c1bf732a8a7fa32c2ab7aa86e"
+    },
+    {
+      "path": "tests/corpus_generator.py",
+      "digest": "sha256:6d396b43f42f875878fa6f97875e2fd5f45672c11b7383e4f2ba5b06d1ade4a5"
+    },
+    {
+      "path": "tests/test_independent_audit.py",
+      "digest": "sha256:3fcd63cfa683b9f37133191220c3377a37002e24fd468f2b11a8b4b67cbc8f0a"
+    },
+    {
+      "path": "tools/__init__.py",
+      "digest": "sha256:68f4a2935fa7c30030951acad518f9f4ca39030d147022d78fc972ca63dd4e44"
+    },
+    {
+      "path": "tools/independent_audit.py",
+      "digest": "sha256:676fcb64b5c9cde37d7ce11c1851b571b16c4aa61c9c30eca60d674bd1bc2792"
+    },
+    {
+      "path": "tools/verify_sdist.py",
+      "digest": "sha256:90e6e843a4b426b8c78c63fa789e5c915de26acafdd63eb7d2094b04ba13b82c"
+    }
+  ],
+  "epoch_digest": "sha256:9f4a5daebba2b97119676620c63f8d70ba9ed36eac714bf34aa2257f369938bb"
+}

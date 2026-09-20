@@ -1,0 +1,116 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "epoch_digest": "sha256:9f4a5daebba2b97119676620c63f8d70ba9ed36eac714bf34aa2257f369938bb",
+  "policy_digest": "sha256:9c9e5531cb2366e4d44a8ed4529eae99a2ff967af76edb7bb3540cd1d3a372c5",
+  "head_sha": "d5ae2362ff326f2dbece7eacf889f4fd7c8d8dd1",
+  "base_sha": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+  "auditor": {
+    "account": "Laegel",
+    "candidate_owner": "hoklims",
+    "round": 2,
+    "previous_round": "https://github.com/hoklims/latent-compass/pull/6"
+  },
+  "independence": {
+    "not_candidate_author": true,
+    "read_only_candidate": true,
+    "fresh_session": true,
+    "distinct_harness": true,
+    "distinct_account": true,
+    "distinct_environment": true,
+    "distinct_evidence_store": true,
+    "first_pass_before_author_narrative": false,
+    "first_pass_note": "The author's two comments on PR #6 (2026-09-20T16:24:01Z and 16:31:46Z) were relayed to this session as the task assignment. They enumerate the round-2 fixes and the author's conclusion that they work, and were read before the round-2 first pass was formed. Disclosed rather than asserted away."
+  },
+  "claims": [
+    {
+      "claim": "the public gate refuses a receipt carrying unresolved blockers",
+      "invocation_paths": [
+        "tools/independent_audit.py::gate",
+        "tests/test_independent_audit.py"
+      ],
+      "witness": {
+        "mutation": "tools/independent_audit.py: 'if receipt.get(\"unresolved_blockers\") != []:\\n        raise AuditError(\"unresolved_blockers' -> '<deleted>'",
+        "command": "uv run --frozen pytest tests/test_independent_audit.py -o addopts='' -q",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:ae2d6e7eed8c3ac5c3c41e93675d8643b214437860263a272b9835ca6742972e",
+        "green_output_digest": "sha256:ee09f6debd9f81709cd5af75a47e8b1c6ed9a94b8e82a9b34c00f597199e9c17",
+        "red_summary": "1 failed, 6 passed in 0.03s",
+        "green_summary": "7 passed in 0.02s"
+      }
+    },
+    {
+      "claim": "the public gate refuses any verdict weaker than PROOF_ADEQUATE",
+      "invocation_paths": [
+        "tools/independent_audit.py::gate",
+        "tests/test_independent_audit.py"
+      ],
+      "witness": {
+        "mutation": "tools/independent_audit.py: 'if receipt.get(\"verdict\") != \"PROOF_ADEQUATE\":\\n        raise AuditError(\"verdict must be P' -> '<deleted>'",
+        "command": "uv run --frozen pytest tests/test_independent_audit.py -o addopts='' -q",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:5c7798034abd130b60d157b55e451fb1cfebcce204309808f6e00ad8b3b68792",
+        "green_output_digest": "sha256:ee09f6debd9f81709cd5af75a47e8b1c6ed9a94b8e82a9b34c00f597199e9c17",
+        "red_summary": "1 failed, 6 passed in 0.04s",
+        "green_summary": "7 passed in 0.02s"
+      }
+    },
+    {
+      "claim": "the CI sdist step catches a reintroduced line-ending regression (round-1 F1/F6)",
+      "invocation_paths": [
+        "tools/verify_sdist.py",
+        ".github/workflows/verify.yml::Test extracted source distribution",
+        ".github/workflows/release.yml::Test extracted source distribution"
+      ],
+      "witness": {
+        "mutation": "tests/corpus_generator.py: '(target / name).write_text(text, encoding=\"utf-8\", newline=\"\\\\n\")' -> '(target / name).write_text(text, encoding=\"utf-8\", newline=\"\\\\r\\\\n\")'",
+        "command": "uv build --no-sources && uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.1.0.tar.gz",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:a842dfd061bda7055c1a6444e44721fa21bb5653e2e004569ef964448573f497",
+        "green_output_digest": "sha256:b6ba062d78d7ded992ac6c79262a0cb4f9530d91c85aed777ec94bf2d7919333",
+        "red_summary": "6 failed, 1411 passed, 26 skipped in 100.52s (0:01:40)",
+        "green_summary": "1417 passed, 26 skipped in 100.64s (0:01:40)"
+      }
+    },
+    {
+      "claim": "the real language-server paths re-enabled by round-2 carry live oracles (round-1 F3)",
+      "invocation_paths": [
+        "examples/lab_host_bench.py",
+        "tests/test_lab_host_bench.py"
+      ],
+      "witness": {
+        "mutation": "examples/lab_host_bench.py: '\"text\": data.decode(\"utf-8\"),' -> '\"text\": (self.root / relative_path).read_text(\"utf-8\"),'",
+        "command": "uv run --frozen pytest tests/test_lab_host_bench.py -o addopts='' -q",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:923adb6102f1cbc5e73e7105547a8b51eb884422b304b2e9f170351a74c60cfa",
+        "green_output_digest": "sha256:a928a18c9798566b97917fe184e87d5c7431203a52d1d1fda009825bde053da2",
+        "red_summary": "1 failed, 41 passed in 4.13s",
+        "green_summary": "42 passed in 4.03s"
+      }
+    }
+  ],
+  "unresolved_blockers": [
+    {
+      "id": "R1",
+      "summary": "tools/independent_audit.py gate never recomputes epoch_digest, so a fabricated epoch yields ALLOW",
+      "evidence": "A hand-written epoch.json naming commit ffff...ffff with epoch_digest 'sha256:not-a-real-epoch-digest' and an empty files list, plus a receipt echoing those three values, exits 0 with {\"decision\": \"ALLOW\"}.",
+      "fix": "In gate(), recompute _digest(_canonical(epoch without epoch_digest)) and compare; optionally re-derive the epoch from the repository at gate time and compare head_sha and policy_digest."
+    },
+    {
+      "id": "R2",
+      "summary": "epoch_digest is not reproducible across auditors because it digests the local origin URL",
+      "evidence": "The same base and head in two clones of the same repository yield epoch_digest sha256:9f4a5dae... over an https origin and sha256:9eca0174... over an ssh origin; policy_digest is identical in both.",
+      "fix": "Exclude 'repository' from the digested material, or normalise it to a canonical form before digesting."
+    },
+    {
+      "id": "R3",
+      "summary": "the auditor's first-pass ordering constraint is not met for round 2",
+      "evidence": "See independence.first_pass_note.",
+      "fix": "Have a fresh auditor session form the round-2 first pass from public inputs only, with the task assignment carrying no author narrative."
+    }
+  ],
+  "verdict": "PROOF_WEAK"
+}

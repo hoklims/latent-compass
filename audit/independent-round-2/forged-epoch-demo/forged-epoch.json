@@ -1,0 +1,10 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/2",
+  "repository": "https://example.invalid/not-the-candidate.git",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "head_sha": "ffffffffffffffffffffffffffffffffffffffff",
+  "head_tree": "0000000000000000000000000000000000000000",
+  "policy_digest": "sha256:not-a-real-policy-digest",
+  "files": [],
+  "epoch_digest": "sha256:not-a-real-epoch-digest"
+}
