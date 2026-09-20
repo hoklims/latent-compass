@@ -227,3 +227,24 @@ telemetry, but they are not automatically HOK-804 trials and cannot support an
 index-retirement verdict. If comparative bounds cannot be obtained without new
 calls, they remain unknown; the software does not invent them to complete the
 preregistration.
+
+## Amendment 2026-09-20 — passive host hooks (HOK-803)
+
+The repository owner then authorised the complete no-extra-call integration.
+The host-side adapter is passive: asynchronous `PreToolUse` events already
+produced by Codex or Claude are reduced to bounded, content-free declarations
+and evaluated through the routing contract. The adapter never returns its
+decision to the host, so `ADVICE`, `ABSTAIN` and `ESCALATE` cannot alter a tool
+choice, permission or model call.
+
+The two hosts keep separate configurations and stores. Records carry seals of
+session and turn identifiers, never their raw values, and exclude prompts,
+transcripts, arguments and results. Repository roots are allow-listed outside
+the public repository. Local Git is invoked by the host adapter only to bind a
+source declaration; this does not change the pure laboratory boundary.
+
+Installation is reversible and backs up both hook configurations. Codex still
+requires its own trust review before a changed hook may execute. That host gate
+is not bypassed. Hook smoke tests and ordinary shadow records establish wiring
+and privacy properties only; they do not establish host parity, task quality,
+comparative cost, non-inferiority or permission to retire an index.

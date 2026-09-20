@@ -38,7 +38,10 @@ une mémoire des justifications et des outils de [routage, d’évaluation et de
 préparation du retrait des index](docs/lab-operations.md).
 La commande `uv run python examples/lab_source_demo.py` montre la boucle complète
 sur des fichiers synthétiques. Cette API expérimentale n’a aucune autorité
-d’exécution et n’est pas branchée sur les hôtes réels. Retirer un index demande
+d’exécution. Un adaptateur de hooks passif optionnel peut enregistrer des avis
+de routage non autoritaires à partir des événements d’outils ordinaires de
+Codex et Claude, sans conserver prompts, arguments ou résultats, sans nouvel
+appel modèle et sans changer la route prise par l’hôte. Retirer un index demande
 encore une comparaison réelle, un pilote et une migration vérifiée ; les tests
 locaux ne prouvent pas ces résultats. Voir [l’ADR 0011](docs/adr/0011-experimental-active-diagnosis.md)
 et le [périmètre opérationnel](docs/active-diagnosis-scope.md), qui nomme l’unique

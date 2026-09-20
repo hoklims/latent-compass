@@ -151,6 +151,46 @@ normal work into an HOK-804 trial. It establishes contract compatibility only;
 it does not establish comparative quality, cost, latency or retirement
 readiness.
 
+### Passive Codex and Claude hook adapter
+
+`examples/latent_compass_shadow_hook.py` is the installed host-side wrapper. It
+owns the bounded local Git inspection, then passes a sanitised envelope to
+`python -m latent_compass.shadow_harness`, which writes the local journal. The
+package remains process-free. On an asynchronous `PreToolUse` event the pair:
+
+- accepts only an explicitly allow-listed repository root;
+- seals session and turn identifiers instead of storing them;
+- records the host, project alias, model label, permission mode, tool name and
+  a bounded Git source declaration;
+- evaluates the candidate tool against the capabilities declared for that
+  host; and
+- writes the sealed `ADVICE` or `ABSTAIN` record to the store belonging to that
+  host.
+
+It deliberately ignores prompts, transcripts, tool arguments and tool results.
+It writes nothing to stdout, is fail-open, runs asynchronously and never gives
+its decision back to the model, route or permission system. Codex and Claude
+use physically separate configurations and stores.
+
+The reversible installer edits only the two existing hook configuration files,
+after creating timestamped backups:
+
+```text
+python -m latent_compass.shadow_install install \
+  --runtime-python <isolated-runtime-python> \
+  --hook-script <installed-host-wrapper> \
+  --project-root <allowed-repository-root>
+
+python -m latent_compass.shadow_install remove
+```
+
+Codex binds trust to the current hook definition. A newly installed or changed
+hook therefore remains skipped until an operator reviews it through Codex's
+hook-management interface. Direct smoke execution can verify the adapter, but
+does not replace that trust decision. Claude loads the added asynchronous hook
+on its next session. Removing the entries stops collection; the runtime and
+host-local journals are retained for inspection or explicit later deletion.
+
 ## The isolated bench (HOK-803)
 
 `examples/lab_host_bench.py` runs the whole loop — advice, routing, host

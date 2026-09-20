@@ -66,6 +66,9 @@ ADR_SECTIONS = {
     "Amendment 2026-09-20 — local harness integration without model calls (HOK-803/804)": (
         "sha256:81afcdeea1c30faa547e4c6107d0af157c08216648dc60dc6efebfeeb30444f0"
     ),
+    "Amendment 2026-09-20 — passive host hooks (HOK-803)": (
+        "sha256:ad1e264b5fa22768c9de426cf0e3c5f5cc742be0d29dc946225e0c99a0c69bf1"
+    ),
 }
 #: The scope document is revised in place, so it is pinned whole: a reworded perimeter
 #: shows up as a changed pin in the same diff, never as prose nobody had to look at.

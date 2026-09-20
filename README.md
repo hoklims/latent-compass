@@ -36,7 +36,10 @@ It includes [bounded source reads](docs/source-session.md),
 justification memory, and
 [routing, evaluation and retirement dry-runs](docs/lab-operations.md).
 Run `uv run python examples/lab_source_demo.py` for a synthetic end-to-end example.
-This experimental API has no execution authority or live host integration.
+This experimental API has no execution authority. An optional passive hook
+adapter can record non-authoritative routing advice from ordinary Codex and
+Claude tool events without storing prompts, arguments or results and without
+creating another model call; it never changes the route the host takes.
 Removing an index still requires a real comparison, pilot and verified migration;
 local correctness tests do not establish those outcomes. See [ADR 0011](docs/adr/0011-experimental-active-diagnosis.md)
 and the [operational scope](docs/active-diagnosis-scope.md), which names the one
