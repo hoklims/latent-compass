@@ -1,0 +1,15 @@
+FAILED tests/test_cli.py::test_a_duplicate_append_is_refused - assert 0 == 3
+FAILED tests/test_cli.py::test_tombstone_preserves_the_root_seal - assert 5 == 0
+FAILED tests/test_codex_regressions.py::test_append_cannot_launder_a_truncated_tail
+FAILED tests/test_codex_regressions.py::test_verify_replay_and_tombstone_verify_inside_their_transaction
+FAILED tests/test_codex_regressions.py::test_tombstone_on_an_unredacted_episode_is_an_integrity_finding
+FAILED tests/test_codex_regressions.py::test_invalid_tombstone_contract_is_an_integrity_finding[reason-]
+FAILED tests/test_codex_regressions.py::test_invalid_tombstone_contract_is_an_integrity_finding[mode-STORE_DESTRUCTION]
+FAILED tests/test_ledger.py::test_a_duplicate_episode_is_refused_and_changes_nothing
+FAILED tests/test_ledger.py::test_reordering_two_rows_breaks_the_chain - sqli...
+FAILED tests/test_ledger.py::test_a_deleted_row_breaks_the_sequence - sqlite3...
+FAILED tests/test_ledger.py::test_a_tombstone_redacts_the_payload_without_rewriting_history
+FAILED tests/test_ledger.py::test_a_tombstone_is_not_a_second_deletion_route
+FAILED tests/test_ledger.py::test_a_tombstone_appears_in_the_export - latent_...
+FAILED tests/test_p2_regressions.py::test_deleting_the_last_row_is_detected_by_the_anchor
+14 failed, 1389 passed, 33 skipped in 110.24s (0:01:50)
