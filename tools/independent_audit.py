@@ -6,17 +6,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
+from pathlib import Path, PurePosixPath
 from re import fullmatch
 from typing import Any
 
-SCHEMA = "hoklims/latent-compass:independent-audit/2"
+SCHEMA = "hoklims/latent-compass:independent-audit/3"
 REPOSITORY = "hoklims/latent-compass"
 SHA256_PATTERN = r"sha256:[0-9a-f]{64}"
 GIT_SHA_PATTERN = r"[0-9a-f]{40}"
+MAX_MUTATION_BYTES = 8 * 1024 * 1024
+REQUIRED_INVOCATION_PATHS = ["local", "pull_request", "main"]
+PYTEST_NODE_PATTERN = r"tests/[A-Za-z0-9_./-]+\.py::[A-Za-z0-9_\[\].:-]+"
 POLICY_FILES = (
     "docs/independent-audit.md",
     "tools/independent_audit.py",
@@ -50,13 +55,15 @@ def _root(repository: Path) -> Path:
     return Path(str(_git(repository, "rev-parse", "--show-toplevel"))).resolve()
 
 
-def _policy_digest(root: Path) -> str:
+def _policy_digest(root: Path, revision: str) -> str:
     material = []
     for relative in POLICY_FILES:
-        path = root / relative
-        if not path.is_file():
-            raise AuditError(f"public policy file is missing: {relative}")
-        material.append({"path": relative, "digest": _digest(path.read_bytes())})
+        try:
+            content = _git(root, "show", f"{revision}:{relative}", binary=True)
+        except subprocess.CalledProcessError as exc:
+            raise AuditError(f"public policy file is missing at {revision}: {relative}") from exc
+        assert isinstance(content, bytes)
+        material.append({"path": relative, "digest": _digest(content)})
     return _digest(_canonical(material))
 
 
@@ -65,12 +72,92 @@ def _epoch_digest(epoch: dict[str, Any]) -> str:
     return _digest(_canonical(material))
 
 
+def _changed_paths(root: Path, base_sha: str, head_sha: str) -> list[str]:
+    output = _git(
+        root,
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        f"{base_sha}...{head_sha}",
+        binary=True,
+    )
+    assert isinstance(output, bytes)
+    fields = output.decode("utf-8", errors="strict").split("\0")
+    fields.pop()
+    paths: list[str] = []
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        index += 1
+        if status.startswith(("R", "C")):
+            paths.extend((fields[index], fields[index + 1]))
+            index += 2
+        else:
+            paths.append(fields[index])
+            index += 1
+    return sorted(set(paths))
+
+
+def _run_pytest(root: Path, targets: list[str]) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join((str(root), str(root / "src")))
+    return subprocess.run(  # noqa: S603 - fixed interpreter/module; targets are argv entries
+        [sys.executable, "-m", "pytest", "-q", *targets],
+        cwd=root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        check=False,
+    )
+
+
+def _execute_witness(
+    repository: Path,
+    head_sha: str,
+    targets: list[dict[str, str]],
+    pytest_targets: list[str],
+    expected_failure: str,
+) -> dict[str, object]:
+    def run_variant(*, mutate: bool) -> subprocess.CompletedProcess[str]:
+        temporary = tempfile.mkdtemp(prefix="latent-compass-audit-")
+        worktree = Path(temporary) / "candidate"
+        _git(repository, "worktree", "add", "--quiet", "--detach", str(worktree), head_sha)
+        try:
+            if mutate:
+                for target in targets:
+                    (worktree / target["path"]).write_text(
+                        target["after"], encoding="utf-8", newline=""
+                    )
+            return _run_pytest(worktree, pytest_targets)
+        finally:
+            _git(repository, "worktree", "remove", "--force", str(worktree))
+            shutil.rmtree(temporary, ignore_errors=True)
+
+    red = run_variant(mutate=True)
+    green = run_variant(mutate=False)
+    if red.returncode == 0:
+        raise AuditError("witness mutation did not make its oracle fail")
+    if expected_failure not in (red.stdout + red.stderr):
+        raise AuditError("witness red output lacks the expected failure marker")
+    if green.returncode != 0:
+        raise AuditError("witness restoration did not make its oracle pass")
+    return {
+        "red_exit": red.returncode,
+        "green_exit": green.returncode,
+        "red_output_digest": _digest((red.stdout + red.stderr).encode("utf-8")),
+        "green_output_digest": _digest((green.stdout + green.stderr).encode("utf-8")),
+    }
+
+
 def create_epoch(repository: Path, base: str, head: str) -> dict[str, object]:
     root = _root(repository)
-    base_sha = str(_git(root, "rev-parse", base))
-    head_sha = str(_git(root, "rev-parse", head))
-    changed = str(_git(root, "diff", "--name-only", "--find-renames", f"{base_sha}...{head_sha}"))
-    paths = sorted(line for line in changed.splitlines() if line)
+    base_sha = str(_git(root, "rev-parse", "--verify", f"{base}^{{commit}}"))
+    head_sha = str(_git(root, "rev-parse", "--verify", f"{head}^{{commit}}"))
+    paths = _changed_paths(root, base_sha, head_sha)
     files = []
     for relative in paths:
         try:
@@ -91,7 +178,7 @@ def create_epoch(repository: Path, base: str, head: str) -> dict[str, object]:
         "base_sha": base_sha,
         "head_sha": head_sha,
         "head_tree": str(_git(root, "rev-parse", f"{head_sha}^{{tree}}")),
-        "policy_digest": _policy_digest(root),
+        "policy_digest": _policy_digest(root, head_sha),
         "files": files,
     }
     epoch["epoch_digest"] = _epoch_digest(epoch)
@@ -103,7 +190,8 @@ def _required_bool(mapping: dict[str, Any], key: str) -> None:
         raise AuditError(f"{key} must be true")
 
 
-def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
+def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
+    root = _root(repository)
     if epoch.get("schema") != SCHEMA or receipt.get("schema") != SCHEMA:
         raise AuditError(f"schema must be {SCHEMA}")
     if epoch.get("repository") != REPOSITORY:
@@ -138,13 +226,31 @@ def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
     expected_epoch_digest = _epoch_digest(epoch)
     if epoch.get("epoch_digest") != expected_epoch_digest:
         raise AuditError("epoch_digest does not match the canonical epoch contents")
+    try:
+        derived_epoch = create_epoch(repository, epoch["base_sha"], epoch["head_sha"])
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise AuditError("epoch cannot be derived from the repository objects") from exc
+    if epoch != derived_epoch:
+        raise AuditError("epoch does not match the repository-derived epoch")
     for key in ("epoch_digest", "policy_digest", "head_sha"):
         if receipt.get(key) != epoch.get(key):
             raise AuditError(f"receipt {key} does not match the epoch")
+    required_receipt = {
+        "schema",
+        "epoch_digest",
+        "policy_digest",
+        "head_sha",
+        "independence",
+        "claims",
+        "unresolved_blockers",
+        "verdict",
+    }
+    if set(receipt) != required_receipt:
+        raise AuditError("receipt fields do not match schema 3")
     independence = receipt.get("independence")
     if not isinstance(independence, dict):
         raise AuditError("independence must be an object")
-    for key in (
+    independence_fields = {
         "not_candidate_author",
         "read_only_candidate",
         "fresh_session",
@@ -153,30 +259,102 @@ def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
         "distinct_environment",
         "distinct_evidence_store",
         "first_pass_before_author_narrative",
-    ):
+    }
+    if set(independence) != independence_fields:
+        raise AuditError("independence fields do not match schema 3")
+    for key in independence_fields:
         _required_bool(independence, key)
     claims = receipt.get("claims")
     if not isinstance(claims, list) or not claims:
         raise AuditError("at least one material claim is required")
+    witness_results: list[dict[str, object]] = []
     for index, claim in enumerate(claims):
-        if not isinstance(claim, dict) or not claim.get("claim"):
+        if not isinstance(claim, dict) or set(claim) != {"claim", "invocation_paths", "witness"}:
             raise AuditError(f"claim {index} is malformed")
+        if not isinstance(claim.get("claim"), str) or not claim["claim"]:
+            raise AuditError(f"claim {index} has no claim text")
         invocation_paths = claim.get("invocation_paths")
-        if not isinstance(invocation_paths, list) or not invocation_paths:
-            raise AuditError(f"claim {index} has no invocation paths")
+        if invocation_paths != REQUIRED_INVOCATION_PATHS:
+            raise AuditError(f"claim {index} invocation paths do not match schema 3")
         witness = claim.get("witness")
-        if not isinstance(witness, dict):
+        if not isinstance(witness, dict) or set(witness) != {
+            "expected_failure",
+            "mutation",
+            "pytest_targets",
+            "targets",
+        }:
             raise AuditError(f"claim {index} has no witness")
-        if not isinstance(witness.get("red_exit"), int) or witness["red_exit"] == 0:
-            raise AuditError(f"claim {index} has no observed red result")
-        if witness.get("green_exit") != 0:
-            raise AuditError(f"claim {index} has no observed green result")
-        for key in ("mutation", "command", "red_output_digest", "green_output_digest"):
-            if not isinstance(witness.get(key), str) or not witness[key]:
-                raise AuditError(f"claim {index} witness is missing {key}")
-        for key in ("red_output_digest", "green_output_digest"):
-            if fullmatch(SHA256_PATTERN, witness[key]) is None:
-                raise AuditError(f"claim {index} witness {key} must be a SHA-256 digest")
+        if not isinstance(witness.get("mutation"), str) or not witness["mutation"]:
+            raise AuditError(f"claim {index} witness has no mutation description")
+        expected_failure = witness.get("expected_failure")
+        if (
+            not isinstance(expected_failure, str)
+            or fullmatch(PYTEST_NODE_PATTERN, expected_failure) is None
+        ):
+            raise AuditError(f"claim {index} witness has an invalid expected failure")
+        pytest_targets = witness.get("pytest_targets")
+        if (
+            not isinstance(pytest_targets, list)
+            or not pytest_targets
+            or not all(
+                isinstance(item, str) and fullmatch(PYTEST_NODE_PATTERN, item) is not None
+                for item in pytest_targets
+            )
+        ):
+            raise AuditError(f"claim {index} witness has invalid pytest targets")
+        targets = witness.get("targets")
+        if not isinstance(targets, list) or not targets:
+            raise AuditError(f"claim {index} witness has no mutation targets")
+        if len(targets) > 64:
+            raise AuditError(f"claim {index} witness has too many mutation targets")
+        total_bytes = 0
+        normalized_targets: list[dict[str, str]] = []
+        seen_targets: set[str] = set()
+        for target_index, target in enumerate(targets):
+            required = {"path", "before", "after", "before_digest", "after_digest"}
+            if not isinstance(target, dict) or set(target) != required:
+                raise AuditError(f"claim {index} target {target_index} is malformed")
+            if not all(isinstance(target[key], str) for key in required):
+                raise AuditError(f"claim {index} target {target_index} must contain strings")
+            path = target["path"]
+            normalized_path = PurePosixPath(path).as_posix()
+            if (
+                not path
+                or path != normalized_path
+                or path.startswith("/")
+                or "\\" in path
+                or any(part in {".", ".."} for part in PurePosixPath(path).parts)
+                or path in seen_targets
+            ):
+                raise AuditError(f"claim {index} target {target_index} has an invalid path")
+            seen_targets.add(path)
+            before_bytes = target["before"].encode("utf-8")
+            after_bytes = target["after"].encode("utf-8")
+            total_bytes += len(before_bytes) + len(after_bytes)
+            if before_bytes == after_bytes:
+                raise AuditError(f"claim {index} target {target_index} does not mutate content")
+            if target["before_digest"] != _digest(before_bytes):
+                raise AuditError(f"claim {index} target {target_index} before digest is invalid")
+            if target["after_digest"] != _digest(after_bytes):
+                raise AuditError(f"claim {index} target {target_index} after digest is invalid")
+            try:
+                committed = _git(root, "show", f"{epoch['head_sha']}:{path}", binary=True)
+            except subprocess.CalledProcessError as exc:
+                raise AuditError(
+                    f"claim {index} target {target_index} is absent from the candidate"
+                ) from exc
+            assert isinstance(committed, bytes)
+            if committed != before_bytes:
+                raise AuditError(
+                    f"claim {index} target {target_index} baseline differs from the candidate"
+                )
+            normalized_targets.append({key: target[key] for key in sorted(required)})
+        if total_bytes > MAX_MUTATION_BYTES:
+            raise AuditError(f"claim {index} witness mutation payload is too large")
+        result = _execute_witness(
+            root, epoch["head_sha"], normalized_targets, pytest_targets, expected_failure
+        )
+        witness_results.append({"claim": claim["claim"], **result})
     if receipt.get("unresolved_blockers") != []:
         raise AuditError("unresolved_blockers must be an empty array")
     if receipt.get("verdict") != "PROOF_ADEQUATE":
@@ -186,6 +364,7 @@ def gate(epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
         "decision": "ALLOW",
         "epoch_digest": epoch["epoch_digest"],
         "head_sha": epoch["head_sha"],
+        "witnesses": witness_results,
     }
 
 
@@ -205,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
     epoch_parser.add_argument("--head", required=True)
     epoch_parser.add_argument("--output", type=Path)
     gate_parser = commands.add_parser("gate")
+    gate_parser.add_argument("--repository", type=Path, default=Path.cwd())
     gate_parser.add_argument("--epoch", type=Path, required=True)
     gate_parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -217,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 sys.stdout.write(rendered)
         else:
-            result = gate(_load(args.epoch), _load(args.receipt))
+            result = gate(args.repository, _load(args.epoch), _load(args.receipt))
             sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return 0
     except (AuditError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
