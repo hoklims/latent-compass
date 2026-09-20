@@ -224,6 +224,12 @@ Que ne fait-il pas ?
 
 Nécessite Python 3.13 et [uv](https://docs.astral.sh/uv/).
 
+Les artefacts publics `v0.1.0` sont historiques et épinglés par SHA-256. Un
+audit indépendant a établi qu’ils avaient été construits depuis un worktree
+Windows et non publiés par la CI : ils ne sont donc pas présentés comme des
+builds reproductibles ou attestés en provenance. Les prochains tags utilisent
+le workflow de release attestée et testent le sdist extrait avant publication.
+
 ```bash
 git clone https://github.com/hoklims/latent-compass
 cd latent-compass
@@ -251,6 +257,17 @@ uv run ruff format --check . && uv run ruff check . && uv run mypy && uv run pyt
 
 Chaque étape peut être exécutée séparément. `pytest` prouve les contrats
 comportementaux ; Ruff et mypy ne le font pas.
+
+## État de la preuve indépendante
+
+Le statut reste **`PROOF_WEAK/BLOCK`**. Le premier audit indépendant a vérifié
+six invariants majeurs par mutants rouges/verts et n’a trouvé aucun contenu
+étranger dans la release, mais il a aussi relevé des défauts matériels dans la
+release et le contrat de preuve. Le
+[protocole public d’audit indépendant](docs/independent-audit.md) remplace
+désormais le gate privé inaccessible. Seul un nouveau reçu indépendant accepté
+par ce gate avec `ALLOW` peut changer le statut formel. Il n’autorise ni pilote,
+ni exécution des hooks, ni retrait d’index.
 
 ## Enregistrer et rejouer un épisode
 
