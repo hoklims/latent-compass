@@ -1,22 +1,40 @@
-"""Reversible installer for the passive Codex and Claude shadow hooks."""
+"""Reversible installer for passive Codex and Claude shadow hooks."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
+import shlex
 import shutil
 import sys
 from datetime import UTC, datetime
+from importlib.resources import files
 from pathlib import Path
-from typing import Final
+from typing import Final, TextIO, cast
 
+from latent_compass import __version__
 from latent_compass.canonical import canonical_text, seal
+from latent_compass.shadow_harness import ShadowHarnessConfig, load_shadow_config
+from latent_compass.shadow_status import Host, inspect_hosts, render_text
 
-__all__ = ["install_shadow_hooks", "main", "remove_shadow_hooks"]
+__all__ = [
+    "configure_host_parser",
+    "host_status",
+    "install_shadow_hooks",
+    "main",
+    "plan_install_shadow_hooks",
+    "plan_remove_shadow_hooks",
+    "remove_shadow_hooks",
+    "run_host_namespace",
+]
 
-_HOOK_MARKER: Final = "latent-compass-shadow-hook.py"
-_LEGACY_HOOK_MARKER: Final = "latent_compass.shadow_harness"
+_HOOK_MARKERS: Final = (
+    "latent-compass-shadow-hook.py",
+    "latent_compass.shadow_hook",
+    "latent_compass.shadow_harness",
+)
 _CODEX_CAPABILITIES: Final = (
     "apply_patch",
     "functions.exec",
@@ -69,6 +87,7 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _atomic_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -79,22 +98,57 @@ def _atomic_json(path: Path, payload: object) -> None:
 
 
 def _backup(path: Path, tag: str) -> Path:
-    destination = path.with_name(f"{path.name}.bak-latent-compass-{tag}")
+    destination = _backup_destination(path, tag)
     if destination.exists():
         raise FileExistsError(f"refusing to overwrite backup {destination.name}")
     shutil.copy2(path, destination)
     return destination
 
 
-def _command(host: str, runtime_python: Path, hook_script: Path) -> str:
-    if host == "codex":
-        return f"& '{runtime_python}' '{hook_script}' --host codex"
-    return f'"{runtime_python.as_posix()}" "{hook_script.as_posix()}" --host claude'
+def _backup_destination(path: Path, tag: str) -> Path:
+    return path.with_name(f"{path.name}.bak-latent-compass-{tag}")
+
+
+def _backup_conflicts(plan: dict[str, object], tag: str) -> list[dict[str, str]]:
+    conflicts: list[dict[str, str]] = []
+    for item in cast(list[dict[str, object]], plan["files"]):
+        if item["action"] not in {"update", "delete"}:
+            continue
+        path = Path(str(item["path"]))
+        destination = _backup_destination(path, tag)
+        if destination.exists():
+            conflicts.append({"code": "backup_collision", "path": str(destination)})
+    return conflicts
+
+
+def _command(
+    host: Host, runtime_python: Path, hook_script: Path, *, platform: str = os.name
+) -> str:
+    if platform == "nt" and host == "codex":
+        runtime = str(runtime_python).replace("'", "''")
+        wrapper = str(hook_script).replace("'", "''")
+        return f"& '{runtime}' '{wrapper}' --host codex"
+    if platform == "nt":
+        return f'"{runtime_python.as_posix()}" "{hook_script.as_posix()}" --host {host}'
+    return (
+        f"{shlex.quote(runtime_python.as_posix())} "
+        f"{shlex.quote(hook_script.as_posix())} --host {host}"
+    )
+
+
+def _packaged_hook_text() -> str:
+    resource = files("latent_compass").joinpath("_assets/shadow_hook.py.txt")
+    if resource.is_file():
+        return resource.read_text(encoding="utf-8")
+    source = (
+        Path(__file__).resolve().parents[2] / "examples" / "_latent_compass_shadow_hook_impl.py"
+    )
+    return source.read_text(encoding="utf-8")
 
 
 def _without_shadow_groups(groups: object) -> list[object]:
     if not isinstance(groups, list):
-        raise ValueError("PreToolUse hooks must be an array")
+        raise ValueError("hook event entries must be an array")
     retained: list[object] = []
     for group in groups:
         if not isinstance(group, dict):
@@ -107,20 +161,55 @@ def _without_shadow_groups(groups: object) -> list[object]:
             else []
         )
         if any(
-            _HOOK_MARKER in command or _LEGACY_HOOK_MARKER in command
+            marker in command
             for command in commands
             if isinstance(command, str)
+            for marker in _HOOK_MARKERS
         ):
             continue
         retained.append(group)
     return retained
 
 
-def _install_one(path: Path, *, host: str, command: str, backup_tag: str) -> bool:
+def _validate_existing_shadow_groups(payload: dict[str, object], host: Host) -> None:
+    hooks = cast(dict[str, object], payload["hooks"])
+    for event, groups_raw in hooks.items():
+        if not isinstance(groups_raw, list):
+            raise ValueError(f"{event} hook entries must be an array")
+        for group in groups_raw:
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list):
+                continue
+            marker_handlers = [
+                handler
+                for handler in handlers
+                if isinstance(handler, dict)
+                and isinstance(handler.get("command"), str)
+                and any(marker in str(handler["command"]) for marker in _HOOK_MARKERS)
+            ]
+            if not marker_handlers:
+                continue
+            expected_matcher = _HOOK_EVENTS[host].get(event)
+            valid = (
+                event in _HOOK_EVENTS[host]
+                and len(handlers) == 1
+                and len(marker_handlers) == 1
+                and marker_handlers[0].get("type") == "command"
+                and marker_handlers[0].get("async") is True
+                and marker_handlers[0].get("timeout") == 10
+                and group.get("matcher") == expected_matcher
+                and set(group) <= {"hooks", "matcher"}
+            )
+            if not valid:
+                raise ValueError(f"existing Latent Compass hook marker collides in {event}")
+
+
+def _planned_host_payload(path: Path, *, host: Host, command: str) -> dict[str, object]:
     payload = _read_json(path)
-    hooks = payload["hooks"]
-    assert isinstance(hooks, dict)
-    before = canonical_text(payload)
+    _validate_existing_shadow_groups(payload, host)
+    hooks = cast(dict[str, object], payload["hooks"])
     for event, matcher in _HOOK_EVENTS[host].items():
         groups = _without_shadow_groups(hooks.get(event, []))
         group: dict[str, object] = {
@@ -137,46 +226,220 @@ def _install_one(path: Path, *, host: str, command: str, backup_tag: str) -> boo
             group["matcher"] = matcher
         groups.append(group)
         hooks[event] = groups
-    if canonical_text(payload) == before:
-        return False
-    _backup(path, backup_tag)
-    _atomic_json(path, payload)
-    return True
+    return payload
 
 
-def _remove_one(path: Path, *, backup_tag: str) -> bool:
+def _remove_host_payload(path: Path, *, host: Host) -> dict[str, object]:
     payload = _read_json(path)
-    hooks = payload["hooks"]
-    assert isinstance(hooks, dict)
-    before = canonical_text(payload)
-    for event in _HOOK_EVENTS["codex"]:
+    _validate_existing_shadow_groups(payload, host)
+    hooks = cast(dict[str, object], payload["hooks"])
+    for event in set(_HOOK_EVENTS["codex"]) | set(_HOOK_EVENTS["claude"]):
         if event in hooks:
             hooks[event] = _without_shadow_groups(hooks[event])
-    if canonical_text(payload) == before:
-        return False
-    _backup(path, backup_tag)
-    _atomic_json(path, payload)
-    return True
+    return payload
 
 
-def _host_config(*, host: str, project_root: Path) -> dict[str, object]:
+def _project_payload(*, host: Host, project_root: Path, project_alias: str) -> dict[str, object]:
     capabilities = _CODEX_CAPABILITIES if host == "codex" else _CLAUDE_CAPABILITIES
+    return {
+        "root": str(project_root.resolve()),
+        "alias": project_alias,
+        "capabilities": [
+            {"capability_id": capability, "kind": "TOOL", "cost_ceiling": 0}
+            for capability in capabilities
+        ],
+        "remaining_budget": 0,
+    }
+
+
+def _default_project_alias(project_root: Path) -> str:
+    resolved = project_root.resolve()
+    readable = re.sub(r"[^A-Za-z0-9._:-]+", "-", resolved.name).strip("._:-")
+    if not readable or not readable[0].isalnum():
+        readable = "project"
+    digest = seal("shadow.install.project-alias.v1", str(resolved).casefold())[7:15]
+    return f"{readable[:110]}-{digest}"
+
+
+def _new_host_config(*, host: Host, project: dict[str, object]) -> dict[str, object]:
     return {
         "contract_version": "1.0.0",
         "enabled": True,
         "host_id": f"{host}-local",
         "agent_family": host,
-        "projects": [
-            {
-                "root": str(project_root.resolve()),
-                "alias": "latent-compass-shadow",
-                "capabilities": [
-                    {"capability_id": capability, "kind": "TOOL", "cost_ceiling": 0}
-                    for capability in capabilities
-                ],
-                "remaining_budget": 0,
-            }
+        "projects": [project],
+    }
+
+
+def _merged_host_config(
+    *, path: Path, host: Host, project_root: Path, project_alias: str
+) -> dict[str, object]:
+    project = _project_payload(host=host, project_root=project_root, project_alias=project_alias)
+    if not path.is_file():
+        payload = _new_host_config(host=host, project=project)
+        load_shadow_config(payload)
+        return payload
+    current = load_shadow_config(json.loads(path.read_text(encoding="utf-8"))).canonical_payload()
+    projects = cast(list[object], current["projects"])
+    resolved_root = str(project_root.resolve()).casefold()
+    for existing_raw in projects:
+        existing = cast(dict[str, object], existing_raw)
+        same_root = str(Path(str(existing["root"])).resolve()).casefold() == resolved_root
+        same_alias = existing["alias"] == project_alias
+        if same_root and not same_alias:
+            raise ValueError("project root is already registered under another alias")
+        if same_alias and not same_root:
+            raise ValueError("project alias is already registered for another root")
+        if same_root and same_alias:
+            return current
+    projects.append(project)
+    load_shadow_config(current)
+    return current
+
+
+def _without_project(
+    config: ShadowHarnessConfig,
+    *,
+    project_root: Path | None,
+    project_alias: str | None,
+) -> dict[str, object] | None:
+    current = config.canonical_payload()
+    if project_root is None and project_alias is None:
+        return None
+    resolved_root = str(project_root.resolve()).casefold() if project_root is not None else None
+    projects = cast(list[dict[str, object]], current["projects"])
+    retained = [
+        project
+        for project in projects
+        if not (
+            (
+                resolved_root is None
+                or str(Path(str(project["root"])).resolve()).casefold() == resolved_root
+            )
+            and (project_alias is None or project["alias"] == project_alias)
+        )
+    ]
+    if len(retained) == len(projects):
+        return current
+    if not retained:
+        return None
+    current["projects"] = retained
+    load_shadow_config(current)
+    return current
+
+
+def _target_paths(home: Path, hosts: tuple[Host, ...]) -> dict[Host, tuple[Path, Path]]:
+    return {
+        host: (
+            home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json"),
+            home / f".{host}" / "latent-compass-shadow" / "config.json",
+        )
+        for host in hosts
+    }
+
+
+def _file_plan(path: Path, payload: dict[str, object] | None) -> dict[str, object]:
+    if payload is None:
+        action = "delete" if path.is_file() else "unchanged"
+    else:
+        after = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        before = path.read_text(encoding="utf-8") if path.is_file() else None
+        action = "unchanged" if before == after else ("update" if before is not None else "create")
+    return {"path": str(path), "action": action}
+
+
+def _text_file_plan(path: Path, content: str) -> dict[str, object]:
+    before = path.read_text(encoding="utf-8") if path.is_file() else None
+    action = "unchanged" if before == content else ("update" if before is not None else "create")
+    return {"path": str(path), "action": action}
+
+
+def plan_install_shadow_hooks(
+    *,
+    home: Path,
+    runtime_python: Path,
+    project_root: Path,
+    project_alias: str = "latent-compass-shadow",
+    hosts: tuple[Host, ...],
+    hook_script: Path | None = None,
+) -> dict[str, object]:
+    """Preflight every selected host and return the complete no-write plan."""
+    conflicts: list[dict[str, str]] = []
+    if not runtime_python.is_file():
+        conflicts.append({"code": "runtime_missing", "path": str(runtime_python)})
+    if not project_root.is_dir():
+        conflicts.append({"code": "project_missing", "path": str(project_root)})
+    if hook_script is not None and not hook_script.is_file():
+        conflicts.append({"code": "hook_script_missing", "path": str(hook_script)})
+    if not hosts or len(set(hosts)) != len(hosts):
+        conflicts.append({"code": "invalid_hosts", "path": ""})
+    files: list[dict[str, object]] = []
+    payloads: dict[str, dict[str, object]] = {}
+    packaged_hook: str | None = None
+    if hook_script is None:
+        try:
+            packaged_hook = _packaged_hook_text()
+        except (OSError, UnicodeDecodeError) as exc:
+            conflicts.append({"code": "hook_resource_missing", "path": "", "detail": str(exc)})
+    for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+        if not settings_path.is_file():
+            conflicts.append({"code": "host_configuration_missing", "path": str(settings_path)})
+            continue
+        try:
+            installed_hook = (
+                hook_script
+                if hook_script is not None
+                else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+            )
+            settings = _planned_host_payload(
+                settings_path,
+                host=host,
+                command=_command(host, runtime_python, installed_hook),
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            conflicts.append(
+                {
+                    "code": "configuration_collision",
+                    "path": str(settings_path),
+                    "detail": str(exc),
+                }
+            )
+            continue
+        try:
+            config = _merged_host_config(
+                path=config_path,
+                host=host,
+                project_root=project_root,
+                project_alias=project_alias,
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            conflicts.append(
+                {"code": "configuration_collision", "path": str(config_path), "detail": str(exc)}
+            )
+            continue
+        if packaged_hook is not None:
+            files.append(_text_file_plan(installed_hook, packaged_hook))
+        files.extend((_file_plan(settings_path, settings), _file_plan(config_path, config)))
+        payloads[host] = {"settings": settings, "config": config}
+        if packaged_hook is not None:
+            payloads[host]["wrapper_text"] = packaged_hook
+    changed = any(item["action"] != "unchanged" for item in files)
+    return {
+        "schema_version": 1,
+        "operation": "install",
+        "version": __version__,
+        "dry_run": True,
+        "changed": changed,
+        "hosts": list(hosts),
+        "files": files,
+        "conflicts": conflicts,
+        "states": host_status(home=home, project_root=project_root, hosts=hosts, dry_run=True)[
+            "states"
         ],
+        "next_steps": ["Review and approve the exact Codex hook definition with /hooks before use."]
+        if "codex" in hosts
+        else [],
+        "_payloads": payloads,
     }
 
 
@@ -184,92 +447,285 @@ def install_shadow_hooks(
     *,
     home: Path,
     runtime_python: Path,
-    hook_script: Path,
     project_root: Path,
+    project_alias: str = "latent-compass-shadow",
     backup_tag: str,
+    hosts: tuple[Host, ...] = ("codex", "claude"),
+    hook_script: Path | None = None,
 ) -> dict[str, object]:
-    """Install idempotent async hooks plus separate host-local configurations."""
-    if not runtime_python.is_file():
-        raise FileNotFoundError("runtime Python does not exist")
-    if not hook_script.is_file():
-        raise FileNotFoundError("host hook script does not exist")
-    if not project_root.is_dir():
-        raise FileNotFoundError("project root does not exist")
-    targets = {
-        "codex": home / ".codex" / "hooks.json",
-        "claude": home / ".claude" / "settings.json",
-    }
-    if not all(path.is_file() for path in targets.values()):
-        raise FileNotFoundError("both Codex hooks.json and Claude settings.json must exist")
-    changed: dict[str, bool] = {}
-    for host, path in targets.items():
-        changed[host] = _install_one(
-            path,
-            host=host,
-            command=_command(host, runtime_python, hook_script),
-            backup_tag=backup_tag,
-        )
-        store = home / f".{host}" / "latent-compass-shadow"
-        store.mkdir(parents=True, exist_ok=True)
-        _atomic_json(store / "config.json", _host_config(host=host, project_root=project_root))
-    return {
-        "schema_version": 1,
-        "operation": "install",
-        "changed": any(changed.values()),
-        "hosts": changed,
-        "runtime_digest": seal("shadow.install.runtime.v1", runtime_python.read_bytes().hex()),
-    }
+    """Install only after every selected host passes a shared preflight."""
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=runtime_python,
+        project_root=project_root,
+        project_alias=project_alias,
+        hosts=hosts,
+        hook_script=hook_script,
+    )
+    if plan["conflicts"]:
+        plan["dry_run"] = False
+        return plan
+    backup_conflicts = _backup_conflicts(plan, backup_tag)
+    if backup_conflicts:
+        cast(list[dict[str, str]], plan["conflicts"]).extend(backup_conflicts)
+        plan["dry_run"] = False
+        return plan
+    payloads = cast(dict[str, dict[str, object]], plan.pop("_payloads"))
+    for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+        wrapper_text = payloads[host].get("wrapper_text")
+        if isinstance(wrapper_text, str):
+            wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+            if _text_file_plan(wrapper_path, wrapper_text)["action"] != "unchanged":
+                wrapper_path.parent.mkdir(parents=True, exist_ok=True)
+                if wrapper_path.is_file():
+                    _backup(wrapper_path, backup_tag)
+                wrapper_path.write_text(wrapper_text, encoding="utf-8", newline="\n")
+        for path, key in ((settings_path, "settings"), (config_path, "config")):
+            proposed = cast(dict[str, object], payloads[host][key])
+            if _file_plan(path, proposed)["action"] == "unchanged":
+                continue
+            if path.is_file():
+                _backup(path, backup_tag)
+            _atomic_json(path, proposed)
+    plan["dry_run"] = False
+    plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
+        "states"
+    ]
+    return plan
 
 
-def remove_shadow_hooks(*, home: Path, backup_tag: str) -> dict[str, object]:
-    """Remove only Latent Compass hook groups; retain runtime and evidence stores."""
-    targets = {
-        "codex": home / ".codex" / "hooks.json",
-        "claude": home / ".claude" / "settings.json",
-    }
-    changed = {
-        host: _remove_one(path, backup_tag=backup_tag)
-        for host, path in targets.items()
-        if path.is_file()
-    }
+def plan_remove_shadow_hooks(
+    *,
+    home: Path,
+    hosts: tuple[Host, ...],
+    project_root: Path | None = None,
+    project_alias: str | None = None,
+) -> dict[str, object]:
+    """Plan project-level removal while retaining every unrelated registration."""
+    conflicts: list[dict[str, str]] = []
+    files: list[dict[str, object]] = []
+    payloads: dict[str, dict[str, object] | None] = {}
+    for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+        try:
+            if config_path.is_file():
+                config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
+                next_config = _without_project(
+                    config, project_root=project_root, project_alias=project_alias
+                )
+            else:
+                next_config = None
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            conflicts.append(
+                {"code": "configuration_collision", "path": str(config_path), "detail": str(exc)}
+            )
+            continue
+        remove_hooks = next_config is None
+        try:
+            settings = (
+                _remove_host_payload(settings_path, host=host)
+                if settings_path.is_file() and remove_hooks
+                else None
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            conflicts.append(
+                {
+                    "code": "configuration_collision",
+                    "path": str(settings_path),
+                    "detail": str(exc),
+                }
+            )
+            continue
+        if settings_path.is_file() and remove_hooks:
+            files.append(_file_plan(settings_path, settings))
+            payloads[f"{host}:settings"] = settings
+        files.append(_file_plan(config_path, next_config))
+        payloads[f"{host}:config"] = next_config
     return {
         "schema_version": 1,
         "operation": "remove",
-        "changed": any(changed.values()),
-        "hosts": changed,
+        "version": __version__,
+        "dry_run": True,
+        "changed": any(item["action"] != "unchanged" for item in files),
+        "hosts": list(hosts),
+        "files": files,
+        "conflicts": conflicts,
+        "next_steps": [],
+        "_payloads": payloads,
     }
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install passive Latent Compass shadow hooks")
-    sub = parser.add_subparsers(dest="operation", required=True)
+def remove_shadow_hooks(
+    *,
+    home: Path,
+    backup_tag: str,
+    hosts: tuple[Host, ...] = ("codex", "claude"),
+    project_root: Path | None = None,
+    project_alias: str | None = None,
+) -> dict[str, object]:
+    plan = plan_remove_shadow_hooks(
+        home=home,
+        hosts=hosts,
+        project_root=project_root,
+        project_alias=project_alias,
+    )
+    if plan["conflicts"]:
+        plan["dry_run"] = False
+        return plan
+    backup_conflicts = _backup_conflicts(plan, backup_tag)
+    if backup_conflicts:
+        cast(list[dict[str, str]], plan["conflicts"]).extend(backup_conflicts)
+        plan["dry_run"] = False
+        return plan
+    payloads = cast(dict[str, dict[str, object] | None], plan.pop("_payloads"))
+    for key, payload in payloads.items():
+        host_name, kind = key.split(":", 1)
+        host = cast(Host, host_name)
+        settings_path, config_path = _target_paths(home, (host,))[host]
+        path = settings_path if kind == "settings" else config_path
+        if _file_plan(path, payload)["action"] == "unchanged":
+            continue
+        if path.is_file():
+            _backup(path, backup_tag)
+        if payload is None:
+            if path.is_file():
+                path.unlink()
+        else:
+            _atomic_json(path, payload)
+    plan["dry_run"] = False
+    return plan
+
+
+def host_status(
+    *,
+    home: Path,
+    project_root: Path,
+    hosts: tuple[Host, ...],
+    dry_run: bool = False,
+) -> dict[str, object]:
+    report = inspect_hosts(home=home, project_root=project_root, hosts=hosts)
+    snapshots = cast(list[dict[str, object]], report["hosts"])
+    report["operation"] = "status"
+    report["version"] = __version__
+    report["dry_run"] = dry_run
+    report["states"] = {
+        str(snapshot["host"]): {
+            "installed": True,
+            "configured": snapshot["project_registered"],
+            "loaded": "UNKNOWN",
+            "approved": snapshot["hook_trust"],
+            "observed": bool(snapshot["event_count"]),
+        }
+        for snapshot in snapshots
+    }
+    return report
+
+
+def _public_plan(plan: dict[str, object]) -> dict[str, object]:
+    return {key: value for key, value in plan.items() if not key.startswith("_")}
+
+
+def configure_host_parser(parser: argparse.ArgumentParser) -> None:
+    """Attach the public host command surface to an argparse parser."""
+    sub = parser.add_subparsers(dest="host_operation", required=True)
     install = sub.add_parser("install")
-    install.add_argument("--runtime-python", type=Path, required=True)
-    install.add_argument("--hook-script", type=Path, required=True)
-    install.add_argument("--project-root", type=Path, required=True)
-    install.add_argument("--home", type=Path, default=Path.home())
-    install.add_argument("--backup-tag", default=None)
+    install.add_argument("--runtime-python", type=Path, default=Path(sys.executable))
+    install.add_argument("--hook-script", type=Path, default=None, help=argparse.SUPPRESS)
+    install.add_argument("--project-root", type=Path, default=Path.cwd())
+    install.add_argument("--project-alias")
     remove = sub.add_parser("remove")
-    remove.add_argument("--home", type=Path, default=Path.home())
-    remove.add_argument("--backup-tag", default=None)
+    remove.add_argument("--project-root", type=Path)
+    remove.add_argument("--project-alias")
+    status = sub.add_parser("status")
+    status.add_argument("--project-root", type=Path, default=Path.cwd())
+    for command in (install, remove, status):
+        command.add_argument("--host", action="append", choices=("codex", "claude"))
+        command.add_argument("--home", type=Path, default=Path.home(), help=argparse.SUPPRESS)
+        command.add_argument("--dry-run", action="store_true")
+        command.add_argument("--json", action="store_true")
+    install.add_argument("--backup-tag", default=None, help=argparse.SUPPRESS)
+    remove.add_argument("--backup-tag", default=None, help=argparse.SUPPRESS)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Manage passive Latent Compass host hooks")
+    configure_host_parser(parser)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    tag = args.backup_tag or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
-    if args.operation == "install":
-        result = install_shadow_hooks(
-            home=args.home,
-            runtime_python=args.runtime_python,
-            hook_script=args.hook_script,
-            project_root=args.project_root,
-            backup_tag=tag,
+def run_host_namespace(
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    hosts = cast(tuple[Host, ...], tuple(args.host or ("codex", "claude")))
+    tag = getattr(args, "backup_tag", None) or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+    if args.host_operation == "install":
+        alias = args.project_alias or _default_project_alias(args.project_root)
+        result = (
+            plan_install_shadow_hooks(
+                home=args.home,
+                runtime_python=args.runtime_python,
+                project_root=args.project_root,
+                project_alias=alias,
+                hosts=hosts,
+                hook_script=args.hook_script,
+            )
+            if args.dry_run
+            else install_shadow_hooks(
+                home=args.home,
+                runtime_python=args.runtime_python,
+                project_root=args.project_root,
+                project_alias=alias,
+                backup_tag=tag,
+                hosts=hosts,
+                hook_script=args.hook_script,
+            )
+        )
+    elif args.host_operation == "remove":
+        result = (
+            plan_remove_shadow_hooks(
+                home=args.home,
+                hosts=hosts,
+                project_root=args.project_root,
+                project_alias=args.project_alias,
+            )
+            if args.dry_run
+            else remove_shadow_hooks(
+                home=args.home,
+                backup_tag=tag,
+                hosts=hosts,
+                project_root=args.project_root,
+                project_alias=args.project_alias,
+            )
         )
     else:
-        result = remove_shadow_hooks(home=args.home, backup_tag=tag)
-    sys.stdout.write(canonical_text(result) + "\n")
+        result = host_status(
+            home=args.home,
+            project_root=args.project_root,
+            hosts=hosts,
+            dry_run=args.dry_run,
+        )
+    public = _public_plan(result)
+    if args.json or args.host_operation != "status":
+        stdout.write(canonical_text(public) + "\n")
+    else:
+        stdout.write(render_text(public))
+    conflicts = public.get("conflicts", [])
+    if isinstance(conflicts, list) and conflicts:
+        if not args.json:
+            stderr.write("Latent Compass host preflight refused the operation.\n")
+        return 3
     return 0
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr,
+) -> int:
+    return run_host_namespace(_parser().parse_args(argv), stdout=stdout, stderr=stderr)
 
 
 if __name__ == "__main__":  # pragma: no cover

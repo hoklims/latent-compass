@@ -170,6 +170,28 @@ def test_the_readme_carries_only_workflow_backed_badges() -> None:
     assert (REPO / ".github" / "workflows" / "release.yml").is_file()
 
 
+def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
+    workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    build = workflow.split("  build:", 1)[1].split("  github-release:", 1)[0]
+    github_release = workflow.split("  github-release:", 1)[1].split("  pypi-publish:", 1)[0]
+    pypi = workflow.split("  pypi-publish:", 1)[1]
+
+    assert "attest-build-provenance@" in build
+    assert "contents: write" not in build
+    assert "contents: write" in github_release
+    assert "id-token: write" not in github_release
+    assert "environment:\n      name: pypi" in pypi
+    assert "id-token: write" in pypi
+    assert "contents: write" not in pypi
+    assert "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in pypi
+
+
+def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
+    workflow = (REPO / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
+    assert "os: [ubuntu-latest, windows-latest, macos-latest]" in workflow
+    assert "latent-compass host --help" in workflow
+
+
 def test_the_honest_limit_appears_in_every_document_that_relies_on_it() -> None:
     """The hash-chain limit must not be stated once and quietly dropped elsewhere."""
     for relative in ("README.md", "docs/ledger.md", "SECURITY.md", "docs/authority-boundary.md"):

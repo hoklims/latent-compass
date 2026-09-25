@@ -172,17 +172,33 @@ It writes nothing to stdout, is fail-open, runs asynchronously and never gives
 its decision back to the model, route or permission system. Codex and Claude
 use physically separate configurations and stores.
 
-The reversible installer edits only the two existing hook configuration files,
-after creating timestamped backups:
+The reversible installer preflights every selected host before it changes any
+file, then creates timestamped backups for existing files:
 
 ```text
-python -m latent_compass.shadow_install install \
-  --runtime-python <isolated-runtime-python> \
-  --hook-script <installed-host-wrapper> \
-  --project-root <allowed-repository-root>
+latent-compass host install --host codex \
+  --project-root <allowed-repository-root> \
+  --project-alias <stable-project-alias> --dry-run --json
 
-python -m latent_compass.shadow_install remove
+latent-compass host install --host codex \
+  --project-root <allowed-repository-root> \
+  --project-alias <stable-project-alias> --json
+
+latent-compass host status --host codex \
+  --project-root <allowed-repository-root> --json
+
+latent-compass host remove --host codex \
+  --project-alias <stable-project-alias> --dry-run --json
 ```
+
+The installed tool environment's interpreter runs a packaged wrapper resource
+that the installer materializes in the selected host store, so `uv tool install
+.` provides a persistent runtime without depending on the source checkout. The legacy `python -m
+latent_compass.shadow_install` entry point and its explicit `--runtime-python`
+and `--hook-script` options remain available for controlled deployments.
+Removing one project keeps every other project registration and leaves the
+hooks active. Removing the final registration removes only Latent Compass hook
+groups and the host registration file; observation journals remain available.
 
 Codex binds trust to the current hook definition. A newly installed or changed
 hook therefore remains skipped until an operator reviews it through Codex's

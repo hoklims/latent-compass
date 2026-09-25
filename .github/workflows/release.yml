@@ -1,18 +1,17 @@
-name: Build attested release
+name: Build, attest and publish release
 
 on:
   push:
-    tags: ['v0.2.0']
-
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+    tags: ['v*']
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,33 +25,66 @@ jobs:
           enable-cache: false
       - name: Install locked environment
         run: uv sync --locked --all-groups
+      - name: Bind tag to package version
+        id: package
+        shell: bash
+        run: |
+          version="$(uv run --frozen python -c 'from latent_compass import __version__; print(__version__)')"
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build distributions from tag
         run: uv build --no-sources
       - name: Test extracted source distribution
-        run: uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.2.0.tar.gz
+        run: uv run --frozen python tools/verify_sdist.py "dist/latent_compass-${{ steps.package.outputs.version }}.tar.gz"
       - name: Verify installed wheel outside checkout
         working-directory: ${{ runner.temp }}
-        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-0.2.0-py3-none-any.whl" latent-compass-status --help
+        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-${{ steps.package.outputs.version }}-py3-none-any.whl" latent-compass host --help
       - name: Attest exact release artifacts
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
         with:
-          subject-path: |
-            dist/latent_compass-0.2.0.tar.gz
-            dist/latent_compass-0.2.0-py3-none-any.whl
+          subject-path: dist/*
       - name: Retain exact release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ github.ref_name }}
-          path: |
-            dist/latent_compass-0.2.0.tar.gz
-            dist/latent_compass-0.2.0-py3-none-any.whl
+          path: dist/*
           if-no-files-found: error
-      - name: Publish exact attested artifacts
+          retention-days: 7
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Retrieve exact release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Publish exact attested artifacts to GitHub
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" \
-            dist/latent_compass-0.2.0.tar.gz \
-            dist/latent_compass-0.2.0-py3-none-any.whl --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+
+  pypi-publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/latent-compass/
+    permissions:
+      id-token: write
+    steps:
+      - name: Retrieve exact release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Publish distributions to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

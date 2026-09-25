@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import sys
 from collections import Counter
 from datetime import datetime
@@ -21,7 +22,10 @@ HOSTS: Final[tuple[Host, ...]] = ("codex", "claude")
 EXPECTED_EVENTS: Final = frozenset({"SessionStart", "PreToolUse", "PostToolUse"})
 MAX_EVENT_FILES: Final = 10_000
 MAX_EVENT_BYTES: Final = 1_048_576
-_HOOK_MARKERS: Final = ("latent-compass-shadow-hook.py", "latent_compass.shadow_harness")
+_HOOK_MARKERS: Final = (
+    "latent-compass-shadow-hook.py",
+    "latent_compass.shadow_harness",
+)
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _SEAL = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERDICTS: Final = frozenset({"ADVICE", "ABSTAIN", "ESCALATE"})
@@ -50,15 +54,20 @@ _RECORD_FIELDS: Final = frozenset(
 
 
 def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
-    pattern = (
-        r"^& '([^']+)' '([^']+)' --host codex$"
-        if host == "codex"
-        else r'^"([^"]+)" "([^"]+)" --host claude$'
-    )
-    match = re.fullmatch(pattern, command)
-    if match is None:
+    if host == "codex":
+        match = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex$", command)
+        if match is not None:
+            runtime = Path(match.group(1).replace("''", "'"))
+            wrapper = Path(match.group(2).replace("''", "'"))
+            if wrapper.name == "latent-compass-shadow-hook.py":
+                return runtime, wrapper
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
         return None
-    runtime, wrapper = Path(match.group(1)), Path(match.group(2))
+    if len(arguments) != 4 or arguments[2:] != ["--host", host]:
+        return None
+    runtime, wrapper = Path(arguments[0]), Path(arguments[1])
     if wrapper.name != "latent-compass-shadow-hook.py":
         return None
     return runtime, wrapper

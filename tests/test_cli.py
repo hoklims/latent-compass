@@ -873,6 +873,7 @@ def test_there_is_no_command_that_executes_or_promotes() -> None:
         "memory",
         "reconcile",
         "shadow",
+        "host",
     }
     for forbidden in ("run", "execute", "apply", "promote", "deploy", "sync", "push", "fetch"):
         assert forbidden not in commands

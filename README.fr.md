@@ -229,10 +229,12 @@ Que ne fait-il pas ?
 
 Nécessite Python 3.13 et [uv](https://docs.astral.sh/uv/).
 
-Cette branche source est la candidate v0.2.0. Elle ajoute la commande installée
-`latent-compass-status` tout en conservant des observations locales, passives et
-sans autorité. La page des releases GitHub reste l’autorité pour savoir si cette
-version est effectivement publiée.
+Cette branche source est la candidate v0.3.0. Elle ajoute le parcours
+d’installation `latent-compass host` tout en conservant des observations
+locales, passives et sans autorité. La release GitHub publique v0.2.0 reste un
+artefact historique attaché à son commit d’origine ; la nouvelle candidate PyPI
+ne réutilise pas cette version. La page des releases GitHub et le registre PyPI
+restent les autorités pour savoir si v0.3.0 est effectivement publiée.
 
 Les artefacts publics `v0.1.0` sont historiques et épinglés par SHA-256. Un
 audit indépendant a établi qu’ils avaient été construits depuis un worktree
@@ -245,6 +247,32 @@ git clone https://github.com/hoklims/latent-compass
 cd latent-compass
 uv sync --all-groups
 ```
+
+Installez ce checkout comme outil isolé et persistant, puis prévisualisez
+l’intégration Codex avant toute modification de la configuration de l’hôte :
+
+```bash
+uv tool install .
+latent-compass host install --host codex --project-root . \
+  --project-alias latent-compass --dry-run --json
+latent-compass host install --host codex --project-root . \
+  --project-alias latent-compass --json
+latent-compass host status --host codex --project-root . --json
+```
+
+Répétez `--host` pour cibler les deux hôtes. Tous les hôtes sélectionnés sont
+précontrôlés avant la première écriture. Un fichier malformé ou une collision
+entre alias et racine refuse toute l’opération. Une nouvelle installation est
+idempotente. Pour retirer un seul projet sans toucher aux autres, prévisualisez
+`latent-compass host remove --host codex --project-alias latent-compass
+--dry-run --json`, puis relancez sans `--dry-run`. L’ancien point d’entrée
+`python -m latent_compass.shadow_install ...` reste disponible.
+
+Le workflow de release est configuré pour le Trusted Publishing PyPI. Le nom du
+paquet doit d’abord être lié à ce dépôt, à ce workflow et à l’environnement
+`pypi` dans PyPI. La documentation d’installation ne doit remplacer `.` par le
+nom du paquet sur le registre qu’après la publication d’un tag et une
+installation réussie depuis PyPI.
 
 Exécutez le walkthrough synthétique autonome dans une nouvelle racine :
 
@@ -277,6 +305,7 @@ prompts, arguments d’outils ou résultats :
 ```bash
 latent-compass-status --project-root .
 latent-compass-status --project-root . --json
+latent-compass host status --project-root . --json
 ```
 
 Pour chaque hôte Codex ou Claude, elle indique si les trois hooks sont présents,
