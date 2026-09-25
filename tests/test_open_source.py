@@ -232,6 +232,11 @@ def test_github_release_uses_an_explicit_repository_without_checkout() -> None:
     )
     assert publish["env"]["GH_REPO"] == "${{ github.repository }}"
     assert_required(publish)
+    command = publish["run"]
+    assert "--clobber" not in command
+    assert 'gh release download "$GITHUB_REF_NAME"' in command
+    assert 'cmp -- "$artifact" "$existing/$name"' in command
+    assert 'gh release upload "$GITHUB_REF_NAME" "$artifact"' in command
 
 
 def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:

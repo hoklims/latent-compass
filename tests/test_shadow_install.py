@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
@@ -9,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 import latent_compass.shadow_harness as shadow_harness
+import latent_compass.shadow_install as shadow_install
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _command,
@@ -172,6 +174,7 @@ def test_dry_run_reports_exact_plan_without_writing(tmp_path: Path) -> None:
     report = json.loads(stdout.getvalue())
     assert code == 0
     assert report["dry_run"] is True
+    assert report["project_root"] == str(project.resolve())
     assert report["changed"] is True
     assert [item["action"] for item in report["files"]] == [
         "create",
@@ -351,6 +354,7 @@ def test_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
 
     report = json.loads(stdout.getvalue())
     assert code == 3
+    assert report["project_root"] == str(project.resolve())
     assert report["conflicts"] == [{"code": "backup_collision", "path": str(backup)}]
     assert hooks.read_bytes() == before
     assert not (home / ".codex" / "latent-compass-shadow").exists()
@@ -448,6 +452,92 @@ def test_final_removal_deletes_managed_wrapper_and_allows_reinstall(tmp_path: Pa
     assert wrapper.is_file()
     for event in ("SessionStart", "PreToolUse", "PostToolUse"):
         assert len(_commands(hooks, event)) == 1
+
+
+def test_final_removal_refuses_foreign_reference_to_managed_wrapper(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    foreign_runtime = tmp_path / "foreign" / "python.exe"
+    foreign_runtime.parent.mkdir()
+    foreign_runtime.write_bytes(b"foreign")
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    payload["hooks"]["PreToolUse"].append(
+        {
+            "matcher": "foreign",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": _command("codex", foreign_runtime, wrapper),
+                    "async": True,
+                    "timeout": 10,
+                }
+            ],
+        }
+    )
+    _write(hooks, payload)
+    store = home / ".codex" / "latent-compass-shadow"
+    before = {path: path.read_bytes() for path in (hooks, wrapper, store / "config.json")}
+
+    result = remove_shadow_hooks(home=home, backup_tag="remove", hosts=("codex",))
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts
+    assert "still referenced by a foreign hook" in str(conflicts[0]["detail"])
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_default_backup_tags_allow_rapid_install_remove_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FrozenDatetime:
+        @classmethod
+        def now(cls, *, tz: object) -> datetime:
+            assert tz is UTC
+            return datetime(2026, 9, 25, 12, 0, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(shadow_install, "datetime", FrozenDatetime)
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    install_output = StringIO()
+    remove_output = StringIO()
+
+    install_code = main(
+        [
+            "install",
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--project-root",
+            str(project),
+            "--json",
+        ],
+        stdout=install_output,
+    )
+    remove_code = main(
+        ["remove", "--host", "codex", "--home", str(home), "--json"],
+        stdout=remove_output,
+    )
+
+    assert install_code == 0
+    assert remove_code == 0
+    assert json.loads(install_output.getvalue())["conflicts"] == []
+    assert json.loads(remove_output.getvalue())["conflicts"] == []
 
 
 def test_remove_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:

@@ -64,9 +64,11 @@ def main() -> int:
         ]
         dry_run = json.loads(_run([*install_command, "--dry-run"]).stdout)
         assert dry_run["conflicts"] == []
+        assert dry_run["project_root"] == str(project.resolve())
         assert all(not state["installed"] for state in dry_run["states"].values())
-        installed = json.loads(_run([*install_command, "--backup-tag", "wheel-smoke"]).stdout)
+        installed = json.loads(_run(install_command).stdout)
         assert installed["conflicts"] == []
+        assert installed["project_root"] == str(project.resolve())
         for host, tool_name in (("codex", "apply_patch"), ("claude", "Read")):
             wrapper = (
                 home
@@ -120,8 +122,6 @@ def main() -> int:
                     "remove",
                     "--home",
                     str(home),
-                    "--backup-tag",
-                    "wheel-remove",
                     "--json",
                 ]
             ).stdout
@@ -155,7 +155,7 @@ def main() -> int:
             for host in ("codex", "claude")
         ]
         assert all(not wrapper.exists() for wrapper in wrappers)
-        reinstalled = json.loads(_run([*install_command, "--backup-tag", "wheel-reinstall"]).stdout)
+        reinstalled = json.loads(_run(install_command).stdout)
         assert reinstalled["conflicts"] == []
         assert all(state["installed"] for state in reinstalled["states"].values())
         cleaned = json.loads(
@@ -166,8 +166,6 @@ def main() -> int:
                     "remove",
                     "--home",
                     str(home),
-                    "--backup-tag",
-                    "wheel-cleanup",
                     "--json",
                 ]
             ).stdout

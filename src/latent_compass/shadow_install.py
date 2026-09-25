@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import sys
+import uuid
 from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
@@ -368,8 +369,26 @@ def _remove_host_payload(
     host: Host,
     owned_command: str | None,
     owned_wrapper: Path | None,
+    wrapper_to_delete: Path | None,
 ) -> dict[str, object]:
     payload = _read_json(path)
+    if wrapper_to_delete is not None:
+        hooks = cast(dict[str, object], payload["hooks"])
+        for groups_raw in hooks.values():
+            if not isinstance(groups_raw, list):
+                continue
+            for group in groups_raw:
+                handlers = group.get("hooks") if isinstance(group, dict) else None
+                if not isinstance(handlers, list):
+                    continue
+                for handler in handlers:
+                    command = handler.get("command") if isinstance(handler, dict) else None
+                    if command != owned_command and _owned_command(
+                        command, host=host, wrapper=wrapper_to_delete
+                    ):
+                        raise ValueError(
+                            "managed wrapper is still referenced by a foreign hook command"
+                        )
     if owned_command is None and owned_wrapper is not None:
         discovered = _discover_owned_command(payload, host=host, wrapper=owned_wrapper)
         if discovered is not None:
@@ -629,6 +648,7 @@ def plan_install_shadow_hooks(
         "schema_version": 1,
         "operation": "install",
         "version": __version__,
+        "project_root": str(project_root.resolve()),
         "dry_run": True,
         "changed": changed,
         "hosts": list(hosts),
@@ -740,17 +760,20 @@ def plan_remove_shadow_hooks(
             )
             continue
         remove_hooks = next_config is None
+        managed_wrapper = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+        delete_managed_wrapper = (
+            remove_hooks
+            and owned_wrapper is not None
+            and _path_identity(owned_wrapper) == _path_identity(managed_wrapper)
+        )
         try:
             settings = (
                 _remove_host_payload(
                     settings_path,
                     host=host,
                     owned_command=owned_command,
-                    owned_wrapper=(
-                        config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
-                        if owned_command is None
-                        else None
-                    ),
+                    owned_wrapper=(managed_wrapper if owned_command is None else None),
+                    wrapper_to_delete=managed_wrapper if delete_managed_wrapper else None,
                 )
                 if settings_path.is_file() and remove_hooks
                 else None
@@ -772,10 +795,7 @@ def plan_remove_shadow_hooks(
         if remove_hooks:
             files.append(_file_plan(ownership_path, None))
             payloads[f"{host}:ownership"] = None
-            managed_wrapper = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
-            if owned_wrapper is not None and _path_identity(owned_wrapper) == _path_identity(
-                managed_wrapper
-            ):
+            if delete_managed_wrapper:
                 files.append(_file_plan(managed_wrapper, None))
                 payloads[f"{host}:wrapper"] = None
     plan: dict[str, object] = {
@@ -873,6 +893,11 @@ def _public_plan(plan: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in plan.items() if not key.startswith("_")}
 
 
+def _default_backup_tag() -> str:
+    timestamp = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-%f")
+    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
 def configure_host_parser(parser: argparse.ArgumentParser) -> None:
     """Attach the public host command surface to an argparse parser."""
     sub = parser.add_subparsers(dest="host_operation", required=True)
@@ -908,7 +933,7 @@ def run_host_namespace(
     stderr: TextIO = sys.stderr,
 ) -> int:
     hosts = cast(tuple[Host, ...], tuple(args.host or ("codex", "claude")))
-    tag = getattr(args, "backup_tag", None) or datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S")
+    tag = getattr(args, "backup_tag", None) or _default_backup_tag()
     if args.host_operation == "install":
         alias = args.project_alias or _default_project_alias(args.project_root)
         result = (
