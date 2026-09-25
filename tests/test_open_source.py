@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from latent_compass.canonical import seal
-from workflow_assertions import assert_required, job, needs, step, workflow
+from workflow_assertions import assert_required, assert_run, job, needs, step, workflow
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -212,16 +212,30 @@ def test_github_release_uses_an_explicit_repository_without_checkout() -> None:
 
 def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
     verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
-    smoke = step(verify, "Verify installed wheel outside checkout")
+    assert_run(
+        verify,
+        "Verify installed wheel outside checkout",
+        'uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/'
+        'latent_compass-0.3.0-py3-none-any.whl" python '
+        '"${{ github.workspace }}/tools/verify_installed_wheel.py"',
+    )
 
     assert verify["strategy"]["matrix"]["os"] == [
         "ubuntu-latest",
         "windows-latest",
         "macos-latest",
     ]
-    assert smoke["run"].endswith('python "${{ github.workspace }}/tools/verify_installed_wheel.py"')
     assert_required(verify)
-    assert_required(smoke)
+    assert_run(
+        verify,
+        "Test complete source tree",
+        "uv run --frozen pytest -o addopts='' -q",
+    )
+    assert_run(
+        verify,
+        "Test extracted source distribution",
+        "uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.3.0.tar.gz",
+    )
     names = [candidate["name"] for candidate in verify["steps"]]
     assert names.index("Build distributions") < names.index(
         "Verify installed wheel outside checkout"
@@ -230,11 +244,21 @@ def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() 
 
 def test_release_workflow_exercises_the_installed_wheel_before_attestation() -> None:
     build = job(workflow(REPO / ".github" / "workflows" / "release.yml"), "build")
-    smoke = step(build, "Verify installed wheel outside checkout")
+    assert_run(
+        build,
+        "Verify installed wheel outside checkout",
+        'uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/'
+        'latent_compass-${{ steps.package.outputs.version }}-py3-none-any.whl" python '
+        '"${{ github.workspace }}/tools/verify_installed_wheel.py"',
+    )
     attest = step(build, "Attest exact release artifacts")
 
-    assert smoke["run"].endswith('python "${{ github.workspace }}/tools/verify_installed_wheel.py"')
-    assert_required(smoke)
+    assert_run(
+        build,
+        "Test extracted source distribution",
+        'uv run --frozen python tools/verify_sdist.py "dist/latent_compass-'
+        '${{ steps.package.outputs.version }}.tar.gz"',
+    )
     names = [candidate["name"] for candidate in build["steps"]]
     assert (
         names.index("Build distributions from tag")

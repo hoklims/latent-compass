@@ -22,10 +22,25 @@ HOSTS: Final[tuple[Host, ...]] = ("codex", "claude")
 EXPECTED_EVENTS: Final = frozenset({"SessionStart", "PreToolUse", "PostToolUse"})
 MAX_EVENT_FILES: Final = 10_000
 MAX_EVENT_BYTES: Final = 1_048_576
-_HOOK_MARKERS: Final = (
-    "latent-compass-shadow-hook.py",
-    "latent_compass.shadow_harness",
-)
+_HOOK_EVENTS: Final = {
+    "codex": {
+        "SessionStart": "startup|resume|clear",
+        "PreToolUse": (
+            "^(?:apply_patch|functions\\.exec|functions\\.wait|view_image|web\\.run|write_stdin)$"
+        ),
+        "PostToolUse": (
+            "Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.exec"
+        ),
+    },
+    "claude": {
+        "SessionStart": "startup|resume",
+        "PreToolUse": (
+            "^(?:Agent|Bash|Edit|Glob|Grep|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|Write)$"
+        ),
+        "PostToolUse": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+    },
+}
+_OWNERSHIP_NAME: Final = "ownership.json"
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _SEAL = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERDICTS: Final = frozenset({"ADVICE", "ABSTAIN", "ESCALATE"})
@@ -59,8 +74,7 @@ def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
         if match is not None:
             runtime = Path(match.group(1).replace("''", "'"))
             wrapper = Path(match.group(2).replace("''", "'"))
-            if wrapper.name == "latent-compass-shadow-hook.py":
-                return runtime, wrapper
+            return runtime, wrapper
     try:
         arguments = shlex.split(command)
     except ValueError:
@@ -68,9 +82,36 @@ def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
     if len(arguments) != 4 or arguments[2:] != ["--host", host]:
         return None
     runtime, wrapper = Path(arguments[0]), Path(arguments[1])
-    if wrapper.name != "latent-compass-shadow-hook.py":
-        return None
     return runtime, wrapper
+
+
+def _owned_command(store: Path, host: Host) -> tuple[str | None, bool]:
+    path = store / _OWNERSHIP_NAME
+    if not path.is_file():
+        return None, True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, False
+    valid = (
+        isinstance(payload, dict)
+        and set(payload) == {"schema_version", "host", "command"}
+        and payload.get("schema_version") == 1
+        and payload.get("host") == host
+        and isinstance(payload.get("command"), str)
+        and _parse_hook_command(str(payload.get("command")), host) is not None
+    )
+    return (str(payload["command"]), True) if valid else (None, False)
+
+
+def _expected_group(event: str, host: Host, command: str) -> dict[str, object]:
+    group: dict[str, object] = {
+        "hooks": [{"type": "command", "command": command, "async": True, "timeout": 10}]
+    }
+    matcher = _HOOK_EVENTS[host][event]
+    if matcher is not None:
+        group["matcher"] = matcher
+    return group
 
 
 def _host_settings(home: Path, host: Host) -> Path:
@@ -81,7 +122,7 @@ def _store_root(home: Path, host: Host) -> Path:
     return home / f".{host}" / "latent-compass-shadow"
 
 
-def _hook_state(path: Path, host: Host) -> dict[str, object]:
+def _hook_state(path: Path, host: Host, owned_command: str | None) -> dict[str, object]:
     if not path.is_file():
         return {"configuration_present": False, "events": [], "runtime_present": None}
     try:
@@ -108,26 +149,24 @@ def _hook_state(path: Path, host: Host) -> dict[str, object]:
         if not isinstance(event, str) or not isinstance(groups, list):
             continue
         for group in groups:
-            handlers = group.get("hooks") if isinstance(group, dict) else None
-            if not isinstance(handlers, list):
+            if owned_command is None or event not in _HOOK_EVENTS[host]:
                 continue
-            for handler in handlers:
-                command = handler.get("command") if isinstance(handler, dict) else None
-                if not (
-                    isinstance(handler, dict)
-                    and handler.get("type") == "command"
-                    and handler.get("async") is True
-                    and isinstance(command, str)
-                    and any(marker in command for marker in _HOOK_MARKERS)
-                ):
-                    continue
-                parsed = _parse_hook_command(command, host)
-                if parsed is None:
-                    continue
-                runtime, wrapper = parsed
-                events.add(event)
-                runtime_states.append(runtime.is_file())
-                wrapper_states.append(wrapper.is_file())
+            if group != _expected_group(event, host, owned_command):
+                continue
+            if event in events:
+                return {
+                    "configuration_present": True,
+                    "configuration_valid": False,
+                    "events": [],
+                    "runtime_present": None,
+                    "wrapper_present": None,
+                }
+            parsed = _parse_hook_command(owned_command, host)
+            assert parsed is not None
+            runtime, wrapper = parsed
+            events.add(event)
+            runtime_states.append(runtime.is_file())
+            wrapper_states.append(wrapper.is_file())
     runtime_present = all(runtime_states) if runtime_states else None
     wrapper_present = all(wrapper_states) if wrapper_states else None
     return {
@@ -273,10 +312,11 @@ def _valid_timestamp(value: str) -> bool:
 
 
 def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, object]:
-    settings = _hook_state(_host_settings(home, host), host)
+    store = _store_root(home, host)
+    owned_command, ownership_valid = _owned_command(store, host)
+    settings = _hook_state(_host_settings(home, host), host, owned_command)
     configured_events = settings["events"]
     assert isinstance(configured_events, list)
-    store = _store_root(home, host)
     config_path = store / DEFAULT_CONFIG_NAME
     base: dict[str, object] = {
         "host": host,
@@ -295,7 +335,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         "invalid_event_count": 0,
         "truncated": False,
     }
-    if settings.get("configuration_valid") is False:
+    if not ownership_valid or settings.get("configuration_valid") is False:
         base["status"] = "HOST_CONFIGURATION_INVALID"
         return base
     if not config_path.is_file():

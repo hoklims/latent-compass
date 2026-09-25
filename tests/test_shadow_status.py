@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from io import StringIO
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import latent_compass.shadow_status as shadow_status
 from latent_compass.canonical import seal
-from latent_compass.shadow_status import inspect_host, main, render_text
+from latent_compass.shadow_status import Host, inspect_host, main, render_text
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -16,24 +17,66 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
 
 
-def _install_fixture(home: Path, project: Path, *, host: str = "codex") -> Path:
+def _install_fixture(
+    home: Path,
+    project: Path,
+    *,
+    host: str = "codex",
+    wrapper_path: Path | None = None,
+) -> Path:
     settings = home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
     runtime = home / "runtime" / "python.exe"
-    wrapper = home / "runtime" / "latent-compass-shadow-hook.py"
+    wrapper = wrapper_path or home / "runtime" / "latent-compass-shadow-hook.py"
     command = (
         f"& '{runtime}' '{wrapper}' --host {host}"
         if host == "codex"
         else f'"{runtime}" "{wrapper}" --host {host}'
     )
-    hooks = {
-        event: [{"hooks": [{"type": "command", "command": command, "async": True}]}]
-        for event in ("SessionStart", "PreToolUse", "PostToolUse")
+    matchers = {
+        "codex": {
+            "SessionStart": "startup|resume|clear",
+            "PreToolUse": (
+                "^(?:apply_patch|functions\\.exec|functions\\.wait|"
+                "view_image|web\\.run|write_stdin)$"
+            ),
+            "PostToolUse": (
+                "Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.exec"
+            ),
+        },
+        "claude": {
+            "SessionStart": "startup|resume",
+            "PreToolUse": (
+                "^(?:Agent|Bash|Edit|Glob|Grep|MultiEdit|NotebookEdit|"
+                "Read|WebFetch|WebSearch|Write)$"
+            ),
+            "PostToolUse": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        },
     }
+    hooks = {}
+    for event, matcher in matchers[host].items():
+        hooks[event] = [
+            {
+                "matcher": matcher,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": command,
+                        "async": True,
+                        "timeout": 10,
+                    }
+                ],
+            }
+        ]
     _write_json(settings, {"hooks": hooks})
     runtime.parent.mkdir(parents=True, exist_ok=True)
     runtime.write_bytes(b"fixture")
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
     wrapper.write_text("# fixture\n", encoding="utf-8")
     store = home / f".{host}" / "latent-compass-shadow"
+    _write_json(
+        store / "ownership.json",
+        {"schema_version": 1, "host": host, "command": command},
+    )
     _write_json(
         store / "config.json",
         {
@@ -211,6 +254,41 @@ def test_missing_wrapper_or_host_suffix_cannot_look_active(tmp_path: Path) -> No
     _write_json(settings, payload)
     suffix = inspect_host(home=home, host="codex", project_root=project)
     assert suffix["status"] == "HOOKS_MISSING"
+
+
+@pytest.mark.parametrize("host", ["codex", "claude"])
+def test_status_accepts_exact_owned_custom_wrapper(tmp_path: Path, host: str) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    custom_wrapper = tmp_path / "custom" / f"{host}-observer.py"
+    _install_fixture(home, project, host=host, wrapper_path=custom_wrapper)
+
+    report = inspect_host(home=home, host=cast(Host, host), project_root=project)
+
+    assert report["status"] == "NO_OBSERVATIONS"
+    assert report["hooks_present"] == 3
+    assert report["wrapper_present"] is True
+
+
+def test_status_rejects_foreign_command_with_owned_wrapper_basename(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _install_fixture(home, project)
+    settings = home / ".codex" / "hooks.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    foreign = tmp_path / "foreign" / "latent-compass-shadow-hook.py"
+    foreign.parent.mkdir()
+    foreign.write_text("# foreign\n", encoding="utf-8")
+    for groups in payload["hooks"].values():
+        groups[0]["hooks"][0]["command"] = f"& '{Path(__file__)}' '{foreign}' --host codex"
+    _write_json(settings, payload)
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOOKS_MISSING"
+    assert report["hooks_present"] == 0
 
 
 def test_configuration_and_records_are_bound_to_the_reported_host(tmp_path: Path) -> None:

@@ -8,8 +8,12 @@ from typing import Any, cast
 
 import pytest
 
+import latent_compass.shadow_harness as shadow_harness
+from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _command,
+    _merged_host_config,
+    _without_project,
     host_status,
     install_shadow_hooks,
     main,
@@ -520,3 +524,81 @@ def test_posix_host_commands_quote_paths_for_both_hosts() -> None:
     assert _command("claude", runtime, wrapper, platform="posix") == (
         "'/opt/Latent Compass/bin/python' '/tmp/host wrapper.py' --host claude"
     )
+
+
+def test_posix_project_removal_preserves_case_distinct_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shadow_harness, "_PLATFORM", "posix")
+    upper = tmp_path / "Foo"
+    lower = tmp_path / "foo"
+    config = load_shadow_config(
+        {
+            "contract_version": "1.0.0",
+            "enabled": True,
+            "host_id": "codex-local",
+            "agent_family": "codex",
+            "projects": [
+                {
+                    "root": str(upper),
+                    "alias": "upper",
+                    "capabilities": [{"capability_id": "Read", "kind": "TOOL", "cost_ceiling": 0}],
+                    "remaining_budget": 0,
+                },
+                {
+                    "root": str(lower),
+                    "alias": "lower",
+                    "capabilities": [{"capability_id": "Read", "kind": "TOOL", "cost_ceiling": 0}],
+                    "remaining_budget": 0,
+                },
+            ],
+        }
+    )
+
+    result = _without_project(
+        config,
+        project_root=upper,
+        project_alias=None,
+        platform="posix",
+    )
+
+    assert result is not None
+    projects = cast(list[dict[str, object]], result["projects"])
+    assert [project["alias"] for project in projects] == ["lower"]
+
+
+def test_posix_registration_accepts_case_distinct_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(shadow_harness, "_PLATFORM", "posix")
+    upper = tmp_path / "Foo"
+    lower = tmp_path / "foo"
+    config_path = tmp_path / "config.json"
+    _write(
+        config_path,
+        {
+            "contract_version": "1.0.0",
+            "enabled": True,
+            "host_id": "codex-local",
+            "agent_family": "codex",
+            "projects": [
+                {
+                    "root": str(upper),
+                    "alias": "upper",
+                    "capabilities": [{"capability_id": "Read", "kind": "TOOL", "cost_ceiling": 0}],
+                    "remaining_budget": 0,
+                }
+            ],
+        },
+    )
+
+    result = _merged_host_config(
+        path=config_path,
+        host="codex",
+        project_root=lower,
+        project_alias="lower",
+        platform="posix",
+    )
+
+    projects = cast(list[dict[str, object]], result["projects"])
+    assert [project["alias"] for project in projects] == ["upper", "lower"]

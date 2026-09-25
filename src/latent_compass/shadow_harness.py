@@ -48,6 +48,12 @@ DEFAULT_CONFIG_NAME: Final = "config.json"
 MAX_HOOK_BYTES: Final = 1_048_576
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SEAL = re.compile(r"^sha256:[0-9a-f]{64}$")
+_PLATFORM: Final = os.name
+
+
+def _path_identity(path: Path, *, platform: str = _PLATFORM) -> str:
+    resolved = str(path.resolve(strict=False))
+    return resolved.casefold() if platform == "nt" else resolved
 
 
 class ShadowHarnessViolation(ContractViolation):
@@ -89,7 +95,9 @@ class ShadowHarnessConfig(StrictModel):
     @model_validator(mode="after")
     def _coherent(self) -> ShadowHarnessConfig:
         aliases = [project.alias for project in self.projects]
-        roots = [str(Path(project.root).resolve()).casefold() for project in self.projects]
+        roots = [
+            _path_identity(Path(project.root), platform=_PLATFORM) for project in self.projects
+        ]
         if len(aliases) != len(set(aliases)):
             raise ValueError("project aliases must be unique")
         if len(roots) != len(set(roots)):

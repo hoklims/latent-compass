@@ -36,6 +36,13 @@ def assert_required(mapping: dict[str, Any]) -> None:
     assert mapping.get("continue-on-error", False) is False
 
 
+def assert_run(job_payload: dict[str, Any], name: str, command: str) -> dict[str, Any]:
+    candidate = step(job_payload, name)
+    assert_required(candidate)
+    assert candidate.get("run") == command
+    return candidate
+
+
 def needs(job_payload: dict[str, Any]) -> set[str]:
     raw = job_payload.get("needs", [])
     if isinstance(raw, str):

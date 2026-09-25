@@ -380,6 +380,11 @@ def _project_payload(*, host: Host, project_root: Path, project_alias: str) -> d
     }
 
 
+def _path_identity(path: Path, *, platform: str = os.name) -> str:
+    resolved = str(path.resolve(strict=False))
+    return resolved.casefold() if platform == "nt" else resolved
+
+
 def _default_project_alias(project_root: Path) -> str:
     resolved = project_root.resolve()
     readable = re.sub(r"[^A-Za-z0-9._:-]+", "-", resolved.name).strip("._:-")
@@ -400,7 +405,12 @@ def _new_host_config(*, host: Host, project: dict[str, object]) -> dict[str, obj
 
 
 def _merged_host_config(
-    *, path: Path, host: Host, project_root: Path, project_alias: str
+    *,
+    path: Path,
+    host: Host,
+    project_root: Path,
+    project_alias: str,
+    platform: str = os.name,
 ) -> dict[str, object]:
     project = _project_payload(host=host, project_root=project_root, project_alias=project_alias)
     if not path.is_file():
@@ -409,10 +419,10 @@ def _merged_host_config(
         return payload
     current = load_shadow_config(json.loads(path.read_text(encoding="utf-8"))).canonical_payload()
     projects = cast(list[object], current["projects"])
-    resolved_root = str(project_root.resolve()).casefold()
+    resolved_root = _path_identity(project_root, platform=platform)
     for existing_raw in projects:
         existing = cast(dict[str, object], existing_raw)
-        same_root = str(Path(str(existing["root"])).resolve()).casefold() == resolved_root
+        same_root = _path_identity(Path(str(existing["root"])), platform=platform) == resolved_root
         same_alias = existing["alias"] == project_alias
         if same_root and not same_alias:
             raise ValueError("project root is already registered under another alias")
@@ -430,11 +440,14 @@ def _without_project(
     *,
     project_root: Path | None,
     project_alias: str | None,
+    platform: str = os.name,
 ) -> dict[str, object] | None:
     current = config.canonical_payload()
     if project_root is None and project_alias is None:
         return None
-    resolved_root = str(project_root.resolve()).casefold() if project_root is not None else None
+    resolved_root = (
+        _path_identity(project_root, platform=platform) if project_root is not None else None
+    )
     projects = cast(list[dict[str, object]], current["projects"])
     retained = [
         project
@@ -442,7 +455,7 @@ def _without_project(
         if not (
             (
                 resolved_root is None
-                or str(Path(str(project["root"])).resolve()).casefold() == resolved_root
+                or _path_identity(Path(str(project["root"])), platform=platform) == resolved_root
             )
             and (project_alias is None or project["alias"] == project_alias)
         )

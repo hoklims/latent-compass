@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from workflow_assertions import assert_required, job, step, workflow
+from workflow_assertions import assert_run, job, workflow
 
 ROOT = Path(__file__).resolve().parents[1]
 _TOOL = run_path(str(ROOT / "tools" / "independent_audit.py"))
@@ -387,9 +387,8 @@ def test_cli_gate_blocks_a_forged_epoch(
 
 def test_verify_workflow_explicitly_invokes_the_gate_tests() -> None:
     verify = job(workflow(ROOT / ".github" / "workflows" / "verify.yml"), "verify")
-    audit = step(verify, "Exercise independent audit gate fail-closed tests")
-
-    assert audit["run"] == (
-        "uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py"
+    assert_run(
+        verify,
+        "Exercise independent audit gate fail-closed tests",
+        "uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py",
     )
-    assert_required(audit)
