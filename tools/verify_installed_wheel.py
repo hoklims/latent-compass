@@ -11,14 +11,20 @@ from pathlib import Path
 
 
 def _run(command: list[str], *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 - resolved installed tools and disposable inputs
+    completed = subprocess.run(  # noqa: S603 - resolved installed tools and disposable inputs
         command,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         encoding="utf-8",
         input=input_text,
     )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"command failed ({completed.returncode}): {command!r}\n"
+            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
+        )
+    return completed
 
 
 def _git(repository: Path, *arguments: str) -> None:
@@ -33,7 +39,7 @@ def main() -> int:
     if executable is None:
         raise RuntimeError("the installed latent-compass entry point is unavailable")
     with tempfile.TemporaryDirectory(prefix="latent-compass-wheel-") as temporary:
-        root = Path(temporary)
+        root = Path(temporary).resolve()
         home = root / "home"
         project = root / "project"
         project.mkdir()
