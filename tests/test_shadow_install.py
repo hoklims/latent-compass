@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from io import StringIO
@@ -23,12 +24,15 @@ from latent_compass.shadow_install import (
     _default_project_alias,
     _merged_host_config,
     _packaged_hook_text,
+    _path_entry_exists,
     _transaction_snapshot,
     _without_project,
     host_status,
     install_shadow_hooks,
     main,
     plan_install_shadow_hooks,
+    plan_recover_shadow_hooks,
+    recover_shadow_hooks,
     remove_shadow_hooks,
 )
 from latent_compass.shadow_status import Host
@@ -250,6 +254,70 @@ def test_preflight_refuses_all_hosts_before_any_write(tmp_path: Path) -> None:
     assert not (home / ".codex" / "latent-compass-shadow").exists()
 
 
+@pytest.mark.parametrize("dangling", [False, True])
+def test_install_preview_refuses_symlinked_host_settings(tmp_path: Path, dangling: bool) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = home / ".codex" / "hooks.json"
+    settings.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-hooks.json"
+    if not dangling:
+        _write(outside, {"hooks": {"PreToolUse": []}})
+    try:
+        settings.symlink_to(outside)
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+    outside_before = outside.read_bytes() if outside.is_file() else None
+
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="preview",
+    )
+
+    assert plan["conflicts"]
+    assert settings.is_symlink()
+    assert (outside.read_bytes() if outside.is_file() else None) == outside_before
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "dangling", "directory"])
+def test_install_preview_refuses_non_regular_managed_wrapper(
+    tmp_path: Path, replacement: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    wrapper.parent.mkdir(parents=True)
+    if replacement == "directory":
+        wrapper.mkdir()
+    else:
+        outside = tmp_path / "outside-wrapper.py"
+        if replacement == "symlink":
+            outside.write_text("# foreign\n", encoding="utf-8")
+        try:
+            wrapper.symlink_to(outside)
+        except OSError as exc:
+            pytest.fail(f"file symlink support is required for this security witness: {exc}")
+
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="preview",
+    )
+
+    assert plan["conflicts"]
+    assert _path_entry_exists(wrapper)
+
+
 def test_install_preserves_ownership_shaped_foreign_command(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -330,6 +398,94 @@ def test_apply_refuses_backup_collision_before_any_write(tmp_path: Path) -> None
     assert result["conflicts"] == [{"code": "backup_collision", "path": str(backup)}]
     assert hooks.read_bytes() == before
     assert not (home / ".codex" / "latent-compass-shadow").exists()
+
+
+def test_apply_refuses_dangling_backup_symlink_collision(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    backup = hooks.with_name("hooks.json.bak-latent-compass-fixed")
+    try:
+        backup.symlink_to(tmp_path / "missing-backup.json")
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+    before = hooks.read_bytes()
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="fixed",
+        hosts=("codex",),
+    )
+
+    assert result["conflicts"] == [{"code": "backup_collision", "path": str(backup)}]
+    assert hooks.read_bytes() == before
+    assert backup.is_symlink()
+
+
+def test_backup_race_preserves_third_party_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "hooks.json"
+    source.write_bytes(b"source")
+    destination = source.with_name("hooks.json.bak-latent-compass-race")
+    third_party = b"third-party"
+    real_open = os.open
+    injected = False
+
+    def race_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+        nonlocal injected
+        if Path(path) == destination and not injected:
+            injected = True
+            descriptor = real_open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            os.write(descriptor, third_party)
+            os.close(descriptor)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(os, "open", race_open)
+
+    with pytest.raises(FileExistsError):
+        _backup(source, "race")
+
+    assert destination.read_bytes() == third_party
+
+
+def test_backup_failure_retains_exclusively_created_orphan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "hooks.json"
+    source.write_bytes(b"source")
+    destination = source.with_name("hooks.json.bak-latent-compass-race")
+
+    def fail_after_open(descriptor: int) -> None:
+        raise OSError(f"injected fsync failure for descriptor {descriptor}")
+
+    monkeypatch.setattr(os, "fsync", fail_after_open)
+
+    with pytest.raises(OSError, match="injected fsync failure"):
+        _backup(source, "race")
+
+    assert destination.read_bytes() == b"source"
+
+
+def test_atomic_write_ignores_predictable_symlink_trap(tmp_path: Path) -> None:
+    target = tmp_path / "ownership.json"
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"outside")
+    predictable = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        predictable.symlink_to(outside)
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+
+    _atomic_text(target, "owned\n")
+
+    assert target.read_bytes() == b"owned\n"
+    assert outside.read_bytes() == b"outside"
+    assert predictable.is_symlink()
 
 
 def test_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
@@ -464,9 +620,9 @@ def test_final_removal_deletes_managed_wrapper_and_allows_reinstall(tmp_path: Pa
         assert len(_commands(hooks, event)) == 1
 
 
-@pytest.mark.parametrize("embedded_host", ["codex", "claude"])
+@pytest.mark.parametrize("embedded_host", ["codex", "claude", "other"])
 def test_final_removal_refuses_foreign_reference_to_managed_wrapper(
-    tmp_path: Path, embedded_host: Host
+    tmp_path: Path, embedded_host: str
 ) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -487,16 +643,18 @@ def test_final_removal_refuses_foreign_reference_to_managed_wrapper(
     foreign_runtime.parent.mkdir()
     foreign_runtime.write_bytes(b"foreign")
     payload = json.loads(hooks.read_text(encoding="utf-8"))
+    foreign_command = (
+        _command(cast(Host, embedded_host), foreign_runtime, wrapper, platform="nt")
+        if embedded_host in {"codex", "claude"}
+        else f'"{foreign_runtime}" "{wrapper}" --host other'
+    )
     payload["hooks"]["PreToolUse"].append(
         {
             "matcher": "foreign",
             "hooks": [
                 {
                     "type": "command",
-                    "command": (
-                        _command(embedded_host, foreign_runtime, wrapper, platform="nt")
-                        + f' --home "{home}"'
-                    ),
+                    "command": foreign_command + f' --home "{home}"',
                     "async": True,
                     "timeout": 10,
                 }
@@ -526,9 +684,7 @@ def test_install_refuses_foreign_reference_to_managed_wrapper(tmp_path: Path) ->
     foreign_runtime = tmp_path / "foreign" / "python.exe"
     foreign_runtime.parent.mkdir()
     foreign_runtime.write_bytes(b"foreign")
-    foreign_command = (
-        _command("claude", foreign_runtime, wrapper, platform="nt") + f' --home "{home}"'
-    )
+    foreign_command = f'"{foreign_runtime}" "{wrapper}" --extra'
     _write(
         hooks,
         {
@@ -642,7 +798,8 @@ def test_install_rolls_back_all_files_when_late_atomic_write_fails(
     assert not (store / "config.json").exists()
     assert not (store / "ownership.json").exists()
     assert not (store / "runtime" / "latent-compass-shadow-hook.py").exists()
-    assert not list(home.rglob("*.bak-latent-compass-fault"))
+    backup = hooks.with_name("hooks.json.bak-latent-compass-fault")
+    assert backup.read_bytes() == before
 
 
 def test_remove_rolls_back_all_files_when_late_backup_fails(
@@ -678,7 +835,8 @@ def test_remove_rolls_back_all_files_when_late_backup_fails(
     conflicts = cast(list[dict[str, object]], result["conflicts"])
     assert conflicts[0]["code"] == "apply_failed"
     assert all(path.read_bytes() == content for path, content in before.items())
-    assert not list(home.rglob("*.bak-latent-compass-fault"))
+    backup = hooks.with_name("hooks.json.bak-latent-compass-fault")
+    assert backup.read_bytes() == before[hooks]
 
 
 def test_install_refuses_concurrent_foreign_hook_before_first_write(
@@ -825,6 +983,113 @@ def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path)
     assert not journal.exists()
 
 
+def test_recovery_preflights_all_backups_before_first_mutation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="crash",
+    )
+    snapshots = _transaction_snapshot(plan)
+    journal = _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="crash",
+        plan=plan,
+    )
+    wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
+    _atomic_text(wrapper, _packaged_hook_text())
+    payloads = cast(dict[str, dict[str, object]], plan["_payloads"])
+    _atomic_json(hooks, payloads["codex"]["settings"])
+
+    result = recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "backup is missing" in str(conflicts[0]["detail"])
+    assert wrapper.is_file()
+    assert journal.is_file()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_recovery_refuses_non_regular_target_entry(tmp_path: Path, replacement: str) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="crash",
+    )
+    snapshots = _transaction_snapshot(plan)
+    _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="crash",
+        plan=plan,
+    )
+    wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
+    wrapper.parent.mkdir(parents=True, exist_ok=True)
+    if replacement == "directory":
+        wrapper.mkdir()
+    else:
+        outside = tmp_path / "outside-wrapper.py"
+        outside.write_text(_packaged_hook_text(), encoding="utf-8")
+        try:
+            wrapper.symlink_to(outside)
+        except OSError as exc:
+            pytest.fail(f"file symlink support is required for this security witness: {exc}")
+
+    recovery = plan_recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], recovery["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_invalid"
+    assert _path_entry_exists(wrapper)
+
+
+def test_recovery_refuses_dangling_backup_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="crash",
+    )
+    _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="crash",
+        plan=plan,
+    )
+    payloads = cast(dict[str, dict[str, object]], plan["_payloads"])
+    _atomic_json(hooks, payloads["codex"]["settings"])
+    backup = hooks.with_name("hooks.json.bak-latent-compass-crash")
+    try:
+        backup.symlink_to(tmp_path / "missing-backup.json")
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+
+    recovery = plan_recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], recovery["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_invalid"
+    assert backup.is_symlink()
+
+
 def test_recover_refuses_symlinked_journal_outside_home(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -887,6 +1152,38 @@ def test_recover_refuses_directory_at_journal_path(tmp_path: Path) -> None:
     assert journal.is_dir()
 
 
+def test_malformed_journal_returns_json_conflict_for_every_operation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_text("not-json", encoding="utf-8")
+    commands = (
+        [
+            "install",
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--project-root",
+            str(project),
+            "--dry-run",
+            "--json",
+        ],
+        ["remove", "--host", "codex", "--home", str(home), "--dry-run", "--json"],
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+    )
+
+    for command in commands:
+        stdout = StringIO()
+        code = main(command, stdout=stdout)
+        report = json.loads(stdout.getvalue())
+        assert code == 3
+        assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
+        assert journal.read_text(encoding="utf-8") == "not-json"
+
+
 def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -938,6 +1235,44 @@ def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     assert dry_code == 3
     assert dry_report["conflicts"][0]["code"] == "pending_transaction_conflict"
     assert hooks.read_bytes() == third_party
+
+
+def test_rollback_preserves_symlink_substitution_after_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    outside = tmp_path / "outside-hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    real_atomic_json = _atomic_json
+
+    def fail_after_symlink_substitution(path: Path, payload: object) -> None:
+        if path.name == "config.json":
+            written = hooks.read_bytes()
+            hooks.unlink()
+            outside.write_bytes(written)
+            hooks.symlink_to(outside)
+            raise OSError("injected failure after symlink substitution")
+        real_atomic_json(path, payload)
+
+    monkeypatch.setattr(shadow_install, "_atomic_json", fail_after_symlink_substitution)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="symlink-conflict",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert [item["code"] for item in conflicts] == ["apply_failed", "rollback_conflict"]
+    assert hooks.is_symlink()
+    assert outside.is_file()
+    assert (home / ".latent-compass-shadow.pending.json").is_file()
+    assert hooks.with_name("hooks.json.bak-latent-compass-symlink-conflict").is_file()
 
 
 def test_remove_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
