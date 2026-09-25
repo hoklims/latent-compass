@@ -38,7 +38,7 @@ jobs:
         run: uv run --frozen python tools/verify_sdist.py "dist/latent_compass-${{ steps.package.outputs.version }}.tar.gz"
       - name: Verify installed wheel outside checkout
         working-directory: ${{ runner.temp }}
-        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-${{ steps.package.outputs.version }}-py3-none-any.whl" latent-compass host --help
+        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-${{ steps.package.outputs.version }}-py3-none-any.whl" python "${{ github.workspace }}/tools/verify_installed_wheel.py"
       - name: Attest exact release artifacts
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
         with:

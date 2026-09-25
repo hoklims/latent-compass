@@ -12,6 +12,8 @@ from typing import Any, cast
 
 import pytest
 
+from workflow_assertions import job_lines, step_values
+
 ROOT = Path(__file__).resolve().parents[1]
 _TOOL = run_path(str(ROOT / "tools" / "independent_audit.py"))
 AuditError = cast(type[ValueError], _TOOL["AuditError"])
@@ -384,9 +386,8 @@ def test_cli_gate_blocks_a_forged_epoch(
 
 
 def test_verify_workflow_explicitly_invokes_the_gate_tests() -> None:
-    lines = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8").splitlines()
-    step = "      - name: Exercise independent audit gate fail-closed tests"
-    index = lines.index(step)
-    assert lines[index + 1] == (
-        "        run: uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py"
+    verify = job_lines(ROOT / ".github" / "workflows" / "verify.yml", "verify")
+
+    assert step_values(verify, "run")["Exercise independent audit gate fail-closed tests"] == (
+        "uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py"
     )

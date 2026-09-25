@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from latent_compass.canonical import seal
+from workflow_assertions import active_lines, job_lines, permissions, step_values
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -171,25 +172,54 @@ def test_the_readme_carries_only_workflow_backed_badges() -> None:
 
 
 def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
-    workflow = (REPO / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    build = workflow.split("  build:", 1)[1].split("  github-release:", 1)[0]
-    github_release = workflow.split("  github-release:", 1)[1].split("  pypi-publish:", 1)[0]
-    pypi = workflow.split("  pypi-publish:", 1)[1]
+    path = REPO / ".github" / "workflows" / "release.yml"
+    build = job_lines(path, "build")
+    github_release = job_lines(path, "github-release")
+    pypi = job_lines(path, "pypi-publish")
 
-    assert "attest-build-provenance@" in build
-    assert "contents: write" not in build
-    assert "contents: write" in github_release
-    assert "id-token: write" not in github_release
-    assert "environment:\n      name: pypi" in pypi
-    assert "id-token: write" in pypi
-    assert "contents: write" not in pypi
-    assert "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in pypi
+    assert permissions(build) == {
+        "contents": "read",
+        "id-token": "write",
+        "attestations": "write",
+    }
+    assert permissions(github_release) == {"contents": "write"}
+    assert permissions(pypi) == {"id-token": "write"}
+    assert step_values(build, "uses")["Attest exact release artifacts"].startswith(
+        "actions/attest-build-provenance@"
+    )
+    assert step_values(pypi, "uses")["Publish distributions to PyPI with trusted publishing"] == (
+        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    )
+    assert "    environment:" in pypi
+    assert "      name: pypi" in pypi
 
 
 def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
-    workflow = (REPO / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
-    assert "os: [ubuntu-latest, windows-latest, macos-latest]" in workflow
-    assert "latent-compass host --help" in workflow
+    path = REPO / ".github" / "workflows" / "verify.yml"
+    verify = job_lines(path, "verify")
+    commands = step_values(verify, "run")
+
+    assert "        os: [ubuntu-latest, windows-latest, macos-latest]" in active_lines(path)
+    assert commands["Verify installed wheel outside checkout"].endswith(
+        'python "${{ github.workspace }}/tools/verify_installed_wheel.py"'
+    )
+    assert list(commands).index("Build distributions") < list(commands).index(
+        "Verify installed wheel outside checkout"
+    )
+
+
+def test_release_workflow_exercises_the_installed_wheel_before_attestation() -> None:
+    build = job_lines(REPO / ".github" / "workflows" / "release.yml", "build")
+    commands = step_values(build, "run")
+    uses = step_values(build, "uses")
+
+    assert commands["Verify installed wheel outside checkout"].endswith(
+        'python "${{ github.workspace }}/tools/verify_installed_wheel.py"'
+    )
+    assert list(commands).index("Build distributions from tag") < list(commands).index(
+        "Verify installed wheel outside checkout"
+    )
+    assert "Attest exact release artifacts" in uses
 
 
 def test_the_honest_limit_appears_in_every_document_that_relies_on_it() -> None:

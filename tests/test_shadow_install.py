@@ -110,8 +110,6 @@ def test_removal_only_removes_latent_compass_entries(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime" / "python.exe"
     runtime.parent.mkdir()
     runtime.write_bytes(b"fixture")
-    hook_script = tmp_path / "runtime" / "latent-compass-shadow-hook.py"
-    hook_script.write_text("# fixture\n", encoding="utf-8")
     existing = {
         "hooks": {
             "PreToolUse": [
@@ -124,7 +122,6 @@ def test_removal_only_removes_latent_compass_entries(tmp_path: Path) -> None:
     install_shadow_hooks(
         home=home,
         runtime_python=runtime,
-        hook_script=hook_script,
         project_root=project,
         backup_tag="one",
     )
@@ -228,30 +225,33 @@ def test_preflight_refuses_all_hosts_before_any_write(tmp_path: Path) -> None:
     assert not (home / ".codex" / "latent-compass-shadow").exists()
 
 
-def test_preflight_refuses_unowned_hook_marker_collision(tmp_path: Path) -> None:
+def test_install_preserves_ownership_shaped_foreign_command(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
     hooks = home / ".codex" / "hooks.json"
+    foreign_command = _command(
+        "codex",
+        Path(sys.executable),
+        tmp_path / "foreign" / "latent-compass-shadow-hook.py",
+    )
+    foreign_group = {
+        "matcher": (
+            "^(?:apply_patch|functions\\.exec|functions\\.wait|view_image|web\\.run|write_stdin)$"
+        ),
+        "hooks": [
+            {
+                "type": "command",
+                "command": foreign_command,
+                "async": True,
+                "timeout": 10,
+            }
+        ],
+    }
     _write(
         hooks,
-        {
-            "hooks": {
-                "PreToolUse": [
-                    {
-                        "matcher": "foreign",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": "foreign latent-compass-shadow-hook.py",
-                            }
-                        ],
-                    }
-                ]
-            }
-        },
+        {"hooks": {"PreToolUse": [foreign_group]}},
     )
-    before = hooks.read_bytes()
 
     result = install_shadow_hooks(
         home=home,
@@ -262,14 +262,24 @@ def test_preflight_refuses_unowned_hook_marker_collision(tmp_path: Path) -> None
         hosts=("codex",),
     )
 
-    assert result["conflicts"] == [
-        {
-            "code": "configuration_collision",
-            "path": str(hooks),
-            "detail": "existing Latent Compass hook marker collides in PreToolUse",
-        }
+    assert result["conflicts"] == []
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    assert payload["hooks"]["PreToolUse"][0] == foreign_group
+    assert len(payload["hooks"]["PreToolUse"]) == 2
+    assert _commands(hooks, "PreToolUse") == [
+        foreign_command,
+        payload["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
     ]
-    assert hooks.read_bytes() == before
+
+    removed = remove_shadow_hooks(
+        home=home,
+        backup_tag="remove",
+        hosts=("codex",),
+    )
+
+    assert removed["conflicts"] == []
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    assert payload["hooks"]["PreToolUse"] == [foreign_group]
 
 
 def test_apply_refuses_backup_collision_before_any_write(tmp_path: Path) -> None:
@@ -359,6 +369,24 @@ def test_status_keeps_loading_and_approval_unknown(tmp_path: Path) -> None:
     assert states["codex"] == {
         "installed": True,
         "configured": True,
+        "loaded": "UNKNOWN",
+        "approved": "UNKNOWN",
+        "observed": False,
+    }
+
+
+def test_status_reports_missing_host_paths_as_not_installed_or_configured(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    report = host_status(home=tmp_path / "missing-home", project_root=project, hosts=("codex",))
+
+    states = cast(dict[str, dict[str, Any]], report["states"])
+    assert states["codex"] == {
+        "installed": False,
+        "configured": False,
         "loaded": "UNKNOWN",
         "approved": "UNKNOWN",
         "observed": False,

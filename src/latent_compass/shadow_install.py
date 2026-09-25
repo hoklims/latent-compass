@@ -30,11 +30,6 @@ __all__ = [
     "run_host_namespace",
 ]
 
-_HOOK_MARKERS: Final = (
-    "latent-compass-shadow-hook.py",
-    "latent_compass.shadow_hook",
-    "latent_compass.shadow_harness",
-)
 _CODEX_CAPABILITIES: Final = (
     "apply_patch",
     "functions.exec",
@@ -146,7 +141,55 @@ def _packaged_hook_text() -> str:
     return source.read_text(encoding="utf-8")
 
 
-def _without_shadow_groups(groups: object) -> list[object]:
+def _shadow_group(*, event: str, host: Host, command: str) -> dict[str, object]:
+    group: dict[str, object] = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "async": True,
+                "timeout": 10,
+            }
+        ]
+    }
+    matcher = _HOOK_EVENTS[host][event]
+    if matcher is not None:
+        group["matcher"] = matcher
+    return group
+
+
+def _owned_command(command: object, *, host: Host, wrapper: Path) -> bool:
+    if not isinstance(command, str):
+        return False
+    parsed = _parse_owned_command(command, host)
+    if parsed is None:
+        return False
+    _, candidate_wrapper = parsed
+    return candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False)
+
+
+def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:
+    if host == "codex":
+        match = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex$", command)
+        if match is not None:
+            return Path(match.group(1).replace("''", "'")), Path(match.group(2).replace("''", "'"))
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return None
+    if len(arguments) != 4 or arguments[2:] != ["--host", host]:
+        return None
+    return Path(arguments[0]), Path(arguments[1])
+
+
+def _without_shadow_groups(
+    groups: object,
+    *,
+    event: str,
+    host: Host,
+    command: str | None = None,
+    wrapper: Path | None = None,
+) -> list[object]:
     if not isinstance(groups, list):
         raise ValueError("hook event entries must be an array")
     retained: list[object] = []
@@ -155,23 +198,29 @@ def _without_shadow_groups(groups: object) -> list[object]:
             retained.append(group)
             continue
         handlers = group.get("hooks")
-        commands = (
-            [handler.get("command", "") for handler in handlers if isinstance(handler, dict)]
-            if isinstance(handlers, list)
-            else []
+        candidate_command = (
+            handlers[0].get("command")
+            if isinstance(handlers, list) and len(handlers) == 1 and isinstance(handlers[0], dict)
+            else None
         )
-        if any(
-            marker in command
-            for command in commands
-            if isinstance(command, str)
-            for marker in _HOOK_MARKERS
+        expected_command = command
+        if (
+            expected_command is None
+            and wrapper is not None
+            and _owned_command(candidate_command, host=host, wrapper=wrapper)
+        ):
+            expected_command = cast(str, candidate_command)
+        if expected_command is not None and group == _shadow_group(
+            event=event, host=host, command=expected_command
         ):
             continue
         retained.append(group)
     return retained
 
 
-def _validate_existing_shadow_groups(payload: dict[str, object], host: Host) -> None:
+def _validate_existing_shadow_groups(
+    payload: dict[str, object], host: Host, *, command: str
+) -> None:
     hooks = cast(dict[str, object], payload["hooks"])
     for event, groups_raw in hooks.items():
         if not isinstance(groups_raw, list):
@@ -182,60 +231,40 @@ def _validate_existing_shadow_groups(payload: dict[str, object], host: Host) -> 
             handlers = group.get("hooks")
             if not isinstance(handlers, list):
                 continue
-            marker_handlers = [
+            owned_handlers = [
                 handler
                 for handler in handlers
-                if isinstance(handler, dict)
-                and isinstance(handler.get("command"), str)
-                and any(marker in str(handler["command"]) for marker in _HOOK_MARKERS)
+                if isinstance(handler, dict) and handler.get("command") == command
             ]
-            if not marker_handlers:
+            if not owned_handlers:
                 continue
-            expected_matcher = _HOOK_EVENTS[host].get(event)
-            valid = (
-                event in _HOOK_EVENTS[host]
-                and len(handlers) == 1
-                and len(marker_handlers) == 1
-                and marker_handlers[0].get("type") == "command"
-                and marker_handlers[0].get("async") is True
-                and marker_handlers[0].get("timeout") == 10
-                and group.get("matcher") == expected_matcher
-                and set(group) <= {"hooks", "matcher"}
-            )
-            if not valid:
+            if event not in _HOOK_EVENTS[host] or group != _shadow_group(
+                event=event, host=host, command=command
+            ):
                 raise ValueError(f"existing Latent Compass hook marker collides in {event}")
 
 
 def _planned_host_payload(path: Path, *, host: Host, command: str) -> dict[str, object]:
     payload = _read_json(path)
-    _validate_existing_shadow_groups(payload, host)
+    _validate_existing_shadow_groups(payload, host, command=command)
     hooks = cast(dict[str, object], payload["hooks"])
-    for event, matcher in _HOOK_EVENTS[host].items():
-        groups = _without_shadow_groups(hooks.get(event, []))
-        group: dict[str, object] = {
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": command,
-                    "async": True,
-                    "timeout": 10,
-                }
-            ]
-        }
-        if matcher is not None:
-            group["matcher"] = matcher
-        groups.append(group)
+    for event in _HOOK_EVENTS[host]:
+        groups = _without_shadow_groups(
+            hooks.get(event, []), event=event, host=host, command=command
+        )
+        groups.append(_shadow_group(event=event, host=host, command=command))
         hooks[event] = groups
     return payload
 
 
-def _remove_host_payload(path: Path, *, host: Host) -> dict[str, object]:
+def _remove_host_payload(path: Path, *, host: Host, wrapper: Path) -> dict[str, object]:
     payload = _read_json(path)
-    _validate_existing_shadow_groups(payload, host)
     hooks = cast(dict[str, object], payload["hooks"])
     for event in set(_HOOK_EVENTS["codex"]) | set(_HOOK_EVENTS["claude"]):
         if event in hooks:
-            hooks[event] = _without_shadow_groups(hooks[event])
+            hooks[event] = _without_shadow_groups(
+                hooks[event], event=event, host=host, wrapper=wrapper
+            )
     return payload
 
 
@@ -522,7 +551,11 @@ def plan_remove_shadow_hooks(
         remove_hooks = next_config is None
         try:
             settings = (
-                _remove_host_payload(settings_path, host=host)
+                _remove_host_payload(
+                    settings_path,
+                    host=host,
+                    wrapper=config_path.parent / "runtime" / "latent-compass-shadow-hook.py",
+                )
                 if settings_path.is_file() and remove_hooks
                 else None
             )
@@ -609,8 +642,12 @@ def host_status(
     report["dry_run"] = dry_run
     report["states"] = {
         str(snapshot["host"]): {
-            "installed": True,
-            "configured": snapshot["project_registered"],
+            "installed": (
+                snapshot["hooks_present"] == len(_HOOK_EVENTS[cast(Host, snapshot["host"])])
+                and snapshot["runtime_present"] is True
+                and snapshot["wrapper_present"] is True
+            ),
+            "configured": bool(snapshot["project_registered"]),
             "loaded": "UNKNOWN",
             "approved": snapshot["hook_trust"],
             "observed": bool(snapshot["event_count"]),
