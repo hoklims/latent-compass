@@ -204,6 +204,14 @@ def _assert_safe_path_under(home: Path, path: Path) -> Path:
     target = _lexical_absolute(path)
     if not target.is_relative_to(root):
         raise ValueError("transaction path escapes the selected home")
+    if _path_entry_exists(root):
+        root_info = root.lstat()
+        if (
+            stat.S_ISLNK(root_info.st_mode)
+            or _is_reparse_point(root_info)
+            or not stat.S_ISDIR(root_info.st_mode)
+        ):
+            raise ValueError("selected home must be a regular directory path")
     current = root
     for part in target.relative_to(root).parts[:-1]:
         current /= part
@@ -246,6 +254,7 @@ def _begin_transaction(
         "entries": entries,
     }
     path = _pending_transaction_path(home)
+    _assert_safe_path_under(home, path)
     _atomic_json(path, journal)
     return path
 
@@ -265,7 +274,9 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
         ]
     try:
         payload = json.loads(journal_path.read_text(encoding="utf-8"))
-        entries = payload["entries"] if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            raise ValueError("pending transaction journal must contain a JSON object")
+        entries = payload.get("entries")
         if payload.get("schema_version") != 1 or not isinstance(entries, list):
             raise ValueError("invalid pending transaction journal")
         backup_tag = payload.get("backup_tag")
@@ -878,6 +889,18 @@ def _target_paths(home: Path, hosts: tuple[Host, ...]) -> dict[Host, tuple[Path,
     }
 
 
+def _validate_host_paths(
+    *, home: Path, settings_path: Path, config_path: Path, backup_tag: str | None
+) -> None:
+    ownership_path = config_path.with_name(_OWNERSHIP_NAME)
+    wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+    targets = (settings_path, config_path, ownership_path, wrapper_path)
+    for target in targets:
+        _assert_safe_path_under(home, target)
+        if backup_tag is not None:
+            _assert_safe_path_under(home, _backup_destination(target, backup_tag))
+
+
 def _file_plan(path: Path, payload: dict[str, object] | None) -> dict[str, object]:
     before_bytes = _regular_file_bytes_or_none(path)
     if payload is None:
@@ -968,6 +991,22 @@ def plan_install_shadow_hooks(
         except (OSError, UnicodeDecodeError) as exc:
             conflicts.append({"code": "hook_resource_missing", "path": "", "detail": str(exc)})
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+        try:
+            _validate_host_paths(
+                home=home,
+                settings_path=settings_path,
+                config_path=config_path,
+                backup_tag=backup_tag,
+            )
+        except (OSError, ValueError) as exc:
+            conflicts.append(
+                {
+                    "code": "configuration_collision",
+                    "path": str(settings_path),
+                    "detail": str(exc),
+                }
+            )
+            continue
         if not settings_path.is_file():
             conflicts.append({"code": "host_configuration_missing", "path": str(settings_path)})
             continue
@@ -1117,6 +1156,8 @@ def install_shadow_hooks(
             if isinstance(wrapper_text, str):
                 wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
                 if _text_file_plan(wrapper_path, wrapper_text)["action"] != "unchanged":
+                    _assert_safe_path_under(home, wrapper_path)
+                    _assert_safe_path_under(home, _backup_destination(wrapper_path, backup_tag))
                     _assert_snapshot(wrapper_path, snapshots[wrapper_path])
                     if wrapper_path.is_file():
                         _backup(wrapper_path, backup_tag)
@@ -1131,6 +1172,8 @@ def install_shadow_hooks(
                 proposed = cast(dict[str, object], payloads[host][key])
                 if _file_plan(path, proposed)["action"] == "unchanged":
                     continue
+                _assert_safe_path_under(home, path)
+                _assert_safe_path_under(home, _backup_destination(path, backup_tag))
                 _assert_snapshot(path, snapshots[path])
                 if path.is_file():
                     _backup(path, backup_tag)
@@ -1202,6 +1245,22 @@ def plan_remove_shadow_hooks(
     files: list[dict[str, object]] = []
     payloads: dict[str, dict[str, object] | None] = {}
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+        try:
+            _validate_host_paths(
+                home=home,
+                settings_path=settings_path,
+                config_path=config_path,
+                backup_tag=backup_tag,
+            )
+        except (OSError, ValueError) as exc:
+            conflicts.append(
+                {
+                    "code": "configuration_collision",
+                    "path": str(settings_path),
+                    "detail": str(exc),
+                }
+            )
+            continue
         ownership_path = config_path.with_name(_OWNERSHIP_NAME)
         try:
             owned = _ownership_from_manifest(ownership_path, host=host)
@@ -1337,6 +1396,8 @@ def remove_shadow_hooks(
             )
             if _file_plan(path, payload)["action"] == "unchanged":
                 continue
+            _assert_safe_path_under(home, path)
+            _assert_safe_path_under(home, _backup_destination(path, backup_tag))
             _assert_snapshot(path, snapshots[path])
             if path.is_file():
                 _backup(path, backup_tag)

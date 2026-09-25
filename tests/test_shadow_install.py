@@ -283,6 +283,39 @@ def test_install_preview_refuses_symlinked_host_settings(tmp_path: Path, danglin
     assert (outside.read_bytes() if outside.is_file() else None) == outside_before
 
 
+def test_install_and_remove_preview_refuse_symlinked_host_parent(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "outside-codex"
+    hooks = outside / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    try:
+        (home / ".codex").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.fail(f"directory symlink support is required for this security witness: {exc}")
+    project = tmp_path / "project"
+    project.mkdir()
+    before = hooks.read_bytes()
+
+    install_plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="preview",
+    )
+    remove_plan = shadow_install.plan_remove_shadow_hooks(
+        home=home,
+        hosts=("codex",),
+        backup_tag="preview",
+    )
+
+    assert install_plan["conflicts"]
+    assert remove_plan["conflicts"]
+    assert hooks.read_bytes() == before
+    assert not (outside / "latent-compass-shadow").exists()
+
+
 @pytest.mark.parametrize("replacement", ["symlink", "dangling", "directory"])
 def test_install_preview_refuses_non_regular_managed_wrapper(
     tmp_path: Path, replacement: str
@@ -1152,13 +1185,16 @@ def test_recover_refuses_directory_at_journal_path(tmp_path: Path) -> None:
     assert journal.is_dir()
 
 
-def test_malformed_journal_returns_json_conflict_for_every_operation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("raw", ["not-json", "[]", "null", '"text"'])
+def test_malformed_journal_returns_json_conflict_for_every_operation(
+    tmp_path: Path, raw: str
+) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
     _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
     journal = home / ".latent-compass-shadow.pending.json"
-    journal.write_text("not-json", encoding="utf-8")
+    journal.write_text(raw, encoding="utf-8")
     commands = (
         [
             "install",
@@ -1181,7 +1217,7 @@ def test_malformed_journal_returns_json_conflict_for_every_operation(tmp_path: P
         report = json.loads(stdout.getvalue())
         assert code == 3
         assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
-        assert journal.read_text(encoding="utf-8") == "not-json"
+        assert journal.read_text(encoding="utf-8") == raw
 
 
 def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
