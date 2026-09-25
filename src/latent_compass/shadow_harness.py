@@ -143,11 +143,14 @@ def _project_for_cwd(config: ShadowHarnessConfig, cwd: object) -> ShadowProject 
     if not isinstance(cwd, str) or not cwd:
         return None
     candidate = _resolved(cwd)
+    matches: list[tuple[Path, ShadowProject]] = []
     for project in config.projects:
         root = _resolved(project.root)
         if candidate == root or candidate.is_relative_to(root):
-            return project
-    return None
+            matches.append((root, project))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item[0].parts))[1]
 
 
 def _source_cache_path(store_root: Path, project: ShadowProject) -> Path:

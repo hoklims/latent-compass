@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -219,24 +220,39 @@ def _without_shadow_groups(
     return retained
 
 
-def _ownership_payload(*, host: Host, command: str) -> dict[str, object]:
-    return {"schema_version": 1, "host": host, "command": command}
+def _wrapper_digest(path: Path) -> str:
+    return f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
 
 
-def _owned_command_from_manifest(path: Path, *, host: Host) -> str | None:
+def _text_digest(content: str) -> str:
+    return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+
+
+def _ownership_payload(*, host: Host, command: str, wrapper_digest: str) -> dict[str, object]:
+    return {
+        "schema_version": 2,
+        "host": host,
+        "command": command,
+        "wrapper_digest": wrapper_digest,
+    }
+
+
+def _ownership_from_manifest(path: Path, *, host: Host) -> tuple[str, str] | None:
     if not path.is_file():
         return None
     payload = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(payload, dict)
-        or set(payload) != {"schema_version", "host", "command"}
-        or payload.get("schema_version") != 1
+        or set(payload) != {"schema_version", "host", "command", "wrapper_digest"}
+        or payload.get("schema_version") != 2
         or payload.get("host") != host
         or not isinstance(payload.get("command"), str)
+        or not isinstance(payload.get("wrapper_digest"), str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is None
         or _parse_owned_command(cast(str, payload["command"]), host) is None
     ):
         raise ValueError("invalid Latent Compass hook ownership manifest")
-    return cast(str, payload["command"])
+    return cast(str, payload["command"]), cast(str, payload["wrapper_digest"])
 
 
 def _discover_owned_command(payload: dict[str, object], *, host: Host, wrapper: Path) -> str | None:
@@ -539,7 +555,9 @@ def plan_install_shadow_hooks(
                 else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
             )
             command = _command(host, runtime_python, installed_hook)
-            owned_command = _owned_command_from_manifest(ownership_path, host=host)
+            owned = _ownership_from_manifest(ownership_path, host=host)
+            owned_command = owned[0] if owned is not None else None
+            owned_digest = owned[1] if owned is not None else None
             if (
                 packaged_hook is not None
                 and installed_hook.is_file()
@@ -547,6 +565,20 @@ def plan_install_shadow_hooks(
             ):
                 conflicts.append({"code": "wrapper_collision", "path": str(installed_hook)})
                 continue
+            if (
+                packaged_hook is not None
+                and installed_hook.is_file()
+                and _wrapper_digest(installed_hook) != owned_digest
+            ):
+                conflicts.append(
+                    {"code": "wrapper_integrity_collision", "path": str(installed_hook)}
+                )
+                continue
+            wrapper_digest = (
+                _text_digest(packaged_hook)
+                if packaged_hook is not None
+                else _wrapper_digest(installed_hook)
+            )
             settings = _planned_host_payload(
                 settings_path,
                 host=host,
@@ -581,7 +613,7 @@ def plan_install_shadow_hooks(
             continue
         if packaged_hook is not None:
             files.append(_text_file_plan(installed_hook, packaged_hook))
-        ownership = _ownership_payload(host=host, command=command)
+        ownership = _ownership_payload(host=host, command=command, wrapper_digest=wrapper_digest)
         files.extend(
             (
                 _file_plan(settings_path, settings),
@@ -682,7 +714,19 @@ def plan_remove_shadow_hooks(
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
         ownership_path = config_path.with_name(_OWNERSHIP_NAME)
         try:
-            owned_command = _owned_command_from_manifest(ownership_path, host=host)
+            owned = _ownership_from_manifest(ownership_path, host=host)
+            owned_command = owned[0] if owned is not None else None
+            owned_digest = owned[1] if owned is not None else None
+            parsed_owned = (
+                _parse_owned_command(owned_command, host) if owned_command is not None else None
+            )
+            owned_wrapper = parsed_owned[1] if parsed_owned is not None else None
+            if (
+                owned_wrapper is not None
+                and owned_wrapper.is_file()
+                and _wrapper_digest(owned_wrapper) != owned_digest
+            ):
+                raise ValueError("owned hook wrapper content does not match its manifest")
             if config_path.is_file():
                 config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
                 next_config = _without_project(
@@ -728,6 +772,12 @@ def plan_remove_shadow_hooks(
         if remove_hooks:
             files.append(_file_plan(ownership_path, None))
             payloads[f"{host}:ownership"] = None
+            managed_wrapper = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+            if owned_wrapper is not None and _path_identity(owned_wrapper) == _path_identity(
+                managed_wrapper
+            ):
+                files.append(_file_plan(managed_wrapper, None))
+                payloads[f"{host}:wrapper"] = None
     plan: dict[str, object] = {
         "schema_version": 1,
         "operation": "remove",
@@ -773,6 +823,8 @@ def remove_shadow_hooks(
             if kind == "settings"
             else config_path.with_name(_OWNERSHIP_NAME)
             if kind == "ownership"
+            else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+            if kind == "wrapper"
             else config_path
         )
         if _file_plan(path, payload)["action"] == "unchanged":

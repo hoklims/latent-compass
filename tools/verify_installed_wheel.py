@@ -146,6 +146,34 @@ def main() -> int:
         for path in settings.values():
             payload = json.loads(path.read_text(encoding="utf-8"))
             assert all(groups == [] for groups in payload["hooks"].values())
+        wrappers = [
+            home
+            / f".{host}"
+            / "latent-compass-shadow"
+            / "runtime"
+            / "latent-compass-shadow-hook.py"
+            for host in ("codex", "claude")
+        ]
+        assert all(not wrapper.exists() for wrapper in wrappers)
+        reinstalled = json.loads(_run([*install_command, "--backup-tag", "wheel-reinstall"]).stdout)
+        assert reinstalled["conflicts"] == []
+        assert all(state["installed"] for state in reinstalled["states"].values())
+        cleaned = json.loads(
+            _run(
+                [
+                    executable,
+                    "host",
+                    "remove",
+                    "--home",
+                    str(home),
+                    "--backup-tag",
+                    "wheel-cleanup",
+                    "--json",
+                ]
+            ).stdout
+        )
+        assert cleaned["conflicts"] == []
+        assert all(not wrapper.exists() for wrapper in wrappers)
     return 0
 
 

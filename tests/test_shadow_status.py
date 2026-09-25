@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from io import StringIO
 from pathlib import Path
@@ -75,7 +76,12 @@ def _install_fixture(
     store = home / f".{host}" / "latent-compass-shadow"
     _write_json(
         store / "ownership.json",
-        {"schema_version": 1, "host": host, "command": command},
+        {
+            "schema_version": 2,
+            "host": host,
+            "command": command,
+            "wrapper_digest": f"sha256:{hashlib.sha256(wrapper.read_bytes()).hexdigest()}",
+        },
     )
     _write_json(
         store / "config.json",
@@ -171,6 +177,34 @@ def test_status_distinguishes_unregistered_and_no_observations(tmp_path: Path) -
     assert inspect_host(home=home, host="codex", project_root=elsewhere)["status"] == (
         "PROJECT_NOT_REGISTERED"
     )
+
+
+def test_status_requires_exact_nested_registration(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    store = _install_fixture(home, parent)
+    config_path = store / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["projects"].append(
+        {
+            "root": str(child),
+            "alias": "child",
+            "capabilities": [{"capability_id": "Read", "kind": "TOOL", "cost_ceiling": 0}],
+            "remaining_budget": 0,
+        }
+    )
+    _write_json(config_path, config)
+
+    nested = inspect_host(home=home, host="codex", project_root=child)
+    assert nested["project_alias"] == "child"
+
+    config["projects"] = [project for project in config["projects"] if project["alias"] != "child"]
+    _write_json(config_path, config)
+    removed = inspect_host(home=home, host="codex", project_root=child)
+    assert removed["status"] == "PROJECT_NOT_REGISTERED"
+    assert removed["project_registered"] is False
 
 
 def test_invalid_event_degrades_without_exposing_its_content(tmp_path: Path) -> None:
@@ -289,6 +323,20 @@ def test_status_rejects_foreign_command_with_owned_wrapper_basename(tmp_path: Pa
 
     assert report["status"] == "HOOKS_MISSING"
     assert report["hooks_present"] == 0
+
+
+def test_status_reports_changed_owned_wrapper_as_missing(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _install_fixture(home, project)
+    wrapper = home / "runtime" / "latent-compass-shadow-hook.py"
+    wrapper.write_text("# replaced content\n", encoding="utf-8")
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "RUNTIME_MISSING"
+    assert report["wrapper_present"] is False
 
 
 def test_configuration_and_records_are_bound_to_the_reported_host(tmp_path: Path) -> None:

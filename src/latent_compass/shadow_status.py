@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -85,23 +86,29 @@ def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
     return runtime, wrapper
 
 
-def _owned_command(store: Path, host: Host) -> tuple[str | None, bool]:
+def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, bool]:
     path = store / _OWNERSHIP_NAME
     if not path.is_file():
-        return None, True
+        return None, None, True
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None, False
+        return None, None, False
     valid = (
         isinstance(payload, dict)
-        and set(payload) == {"schema_version", "host", "command"}
-        and payload.get("schema_version") == 1
+        and set(payload) == {"schema_version", "host", "command", "wrapper_digest"}
+        and payload.get("schema_version") == 2
         and payload.get("host") == host
         and isinstance(payload.get("command"), str)
+        and isinstance(payload.get("wrapper_digest"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is not None
         and _parse_hook_command(str(payload.get("command")), host) is not None
     )
-    return (str(payload["command"]), True) if valid else (None, False)
+    return (
+        (str(payload["command"]), str(payload["wrapper_digest"]), True)
+        if valid
+        else (None, None, False)
+    )
 
 
 def _expected_group(event: str, host: Host, command: str) -> dict[str, object]:
@@ -114,6 +121,15 @@ def _expected_group(event: str, host: Host, command: str) -> dict[str, object]:
     return group
 
 
+def _wrapper_matches(path: Path, expected_digest: str | None) -> bool:
+    try:
+        return path.is_file() and expected_digest == (
+            f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+        )
+    except OSError:
+        return False
+
+
 def _host_settings(home: Path, host: Host) -> Path:
     return home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
 
@@ -122,7 +138,9 @@ def _store_root(home: Path, host: Host) -> Path:
     return home / f".{host}" / "latent-compass-shadow"
 
 
-def _hook_state(path: Path, host: Host, owned_command: str | None) -> dict[str, object]:
+def _hook_state(
+    path: Path, host: Host, owned_command: str | None, wrapper_digest: str | None
+) -> dict[str, object]:
     if not path.is_file():
         return {"configuration_present": False, "events": [], "runtime_present": None}
     try:
@@ -166,7 +184,7 @@ def _hook_state(path: Path, host: Host, owned_command: str | None) -> dict[str, 
             runtime, wrapper = parsed
             events.add(event)
             runtime_states.append(runtime.is_file())
-            wrapper_states.append(wrapper.is_file())
+            wrapper_states.append(_wrapper_matches(wrapper, wrapper_digest))
     runtime_present = all(runtime_states) if runtime_states else None
     wrapper_present = all(wrapper_states) if wrapper_states else None
     return {
@@ -184,7 +202,7 @@ def _project_for_root(
     candidate = project_root.resolve(strict=False)
     for project in projects:
         root = Path(project.root).resolve(strict=False)
-        if candidate == root or candidate.is_relative_to(root):
+        if candidate == root:
             return project
     return None
 
@@ -313,8 +331,8 @@ def _valid_timestamp(value: str) -> bool:
 
 def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, object]:
     store = _store_root(home, host)
-    owned_command, ownership_valid = _owned_command(store, host)
-    settings = _hook_state(_host_settings(home, host), host, owned_command)
+    owned_command, wrapper_digest, ownership_valid = _owned_command(store, host)
+    settings = _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest)
     configured_events = settings["events"]
     assert isinstance(configured_events, list)
     config_path = store / DEFAULT_CONFIG_NAME

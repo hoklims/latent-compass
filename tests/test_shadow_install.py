@@ -384,6 +384,72 @@ def test_install_refuses_unowned_runtime_wrapper_before_backup_or_write(tmp_path
     assert not (wrapper.parents[1] / "ownership.json").exists()
 
 
+def test_install_refuses_changed_owned_wrapper_content(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    wrapper.write_text("# replaced by foreign content\n", encoding="utf-8")
+    before = wrapper.read_bytes()
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="reinstall",
+        hosts=("codex",),
+    )
+
+    assert result["conflicts"] == [{"code": "wrapper_integrity_collision", "path": str(wrapper)}]
+    assert wrapper.read_bytes() == before
+    assert not wrapper.with_name(f"{wrapper.name}.bak-latent-compass-reinstall").exists()
+
+
+def test_final_removal_deletes_managed_wrapper_and_allows_reinstall(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+
+    removed = remove_shadow_hooks(home=home, backup_tag="remove", hosts=("codex",))
+    assert not wrapper.exists()
+    reinstalled = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="reinstall",
+        hosts=("codex",),
+    )
+
+    assert removed["conflicts"] == []
+    assert reinstalled["conflicts"] == []
+    assert wrapper.is_file()
+    for event in ("SessionStart", "PreToolUse", "PostToolUse"):
+        assert len(_commands(hooks, event)) == 1
+
+
 def test_remove_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

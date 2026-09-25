@@ -58,11 +58,12 @@ def _allowed_root(config: ShadowHarnessConfig, cwd: object) -> Path | None:
     if not isinstance(cwd, str) or not cwd:
         return None
     candidate = Path(cwd).resolve(strict=False)
+    matches: list[Path] = []
     for project in config.projects:
         root = Path(project.root).resolve(strict=False)
         if candidate == root or candidate.is_relative_to(root):
-            return root
-    return None
+            matches.append(root)
+    return max(matches, key=lambda root: len(root.parts), default=None)
 
 
 def main(

@@ -127,6 +127,36 @@ def test_known_tool_yields_non_authoritative_advice_without_sensitive_content(
     assert '"tool_name":"functions.exec"' in persisted
 
 
+def test_nested_project_routes_to_most_specific_registration(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    capabilities = [{"capability_id": "functions.exec", "kind": "TOOL", "cost_ceiling": 0}]
+    config = load_shadow_config(
+        {
+            "contract_version": "1.0.0",
+            "enabled": True,
+            "host_id": "codex-local",
+            "agent_family": "codex",
+            "projects": [
+                {"root": str(parent), "alias": "parent", "capabilities": capabilities},
+                {"root": str(child), "alias": "child", "capabilities": capabilities},
+            ],
+        }
+    )
+    store = tmp_path / "store"
+    _prime_source(child, host="codex", config=config, store=store, marker="child")
+
+    record = process_hook_event(
+        _payload(child), host="codex", config=config, store_root=store, now=NOW
+    )
+
+    assert record is not None
+    assert record["project_alias"] == "child"
+    assert next((store / "events" / "child").rglob("*.json")).is_file()
+    assert not (store / "events" / "parent").exists()
+
+
 def test_unknown_tool_abstains_without_affecting_the_host(repository: Path, tmp_path: Path) -> None:
     store = tmp_path / "store"
     config = _config(repository)
