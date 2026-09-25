@@ -63,6 +63,16 @@ def assert_run(job_payload: dict[str, Any], name: str, command: str) -> dict[str
     return candidate
 
 
+def assert_conditional_run(
+    job_payload: dict[str, Any], name: str, command: str, condition: str
+) -> dict[str, Any]:
+    candidate = step(job_payload, name)
+    assert candidate.get("continue-on-error", False) is False
+    assert candidate.get("if") == condition
+    assert candidate.get("run") == command
+    return candidate
+
+
 def needs(job_payload: dict[str, Any]) -> set[str]:
     raw = job_payload.get("needs", [])
     if isinstance(raw, str):

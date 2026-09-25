@@ -85,14 +85,65 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _atomic_json(path: Path, payload: object) -> None:
+    content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    _atomic_bytes(path, content)
+
+
+def _atomic_text(path: Path, content: str) -> None:
+    _atomic_bytes(path, content.encode("utf-8"))
+
+
+def _atomic_bytes(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    temporary.replace(path)
+    try:
+        temporary.write_bytes(content)
+        temporary.replace(path)
+    finally:
+        if temporary.is_file():
+            temporary.unlink()
+
+
+def _transaction_snapshot(plan: dict[str, object]) -> dict[Path, bytes | None]:
+    snapshots: dict[Path, bytes | None] = {}
+    for item in cast(list[dict[str, object]], plan["files"]):
+        if item["action"] == "unchanged":
+            continue
+        path = Path(str(item["path"]))
+        snapshots[path] = path.read_bytes() if path.is_file() else None
+    return snapshots
+
+
+def _bytes_digest(content: bytes | None) -> str | None:
+    return None if content is None else f"sha256:{hashlib.sha256(content).hexdigest()}"
+
+
+def _assert_plan_inputs(plan: dict[str, object]) -> None:
+    for item in cast(list[dict[str, object]], plan["files"]):
+        if item["action"] == "unchanged":
+            continue
+        path = Path(str(item["path"]))
+        current = path.read_bytes() if path.is_file() else None
+        if _bytes_digest(current) != item.get("before_sha256"):
+            raise ValueError(f"concurrent change detected for {path}")
+
+
+def _assert_snapshot(path: Path, expected: bytes | None) -> None:
+    current = path.read_bytes() if path.is_file() else None
+    if current != expected:
+        raise ValueError(f"concurrent change detected for {path}")
+
+
+def _rollback_transaction(snapshots: dict[Path, bytes | None], created_backups: list[Path]) -> None:
+    for path, content in snapshots.items():
+        if content is None:
+            if path.is_file():
+                path.unlink()
+        else:
+            _atomic_bytes(path, content)
+    for backup in created_backups:
+        if backup.is_file():
+            backup.unlink()
 
 
 def _backup(path: Path, tag: str) -> Path:
@@ -172,9 +223,35 @@ def _owned_command(command: object, *, host: Host, wrapper: Path) -> bool:
 
 
 def _command_references_wrapper(command: object, wrapper: Path) -> bool:
+    if not isinstance(command, str) or len(command) > 8192:
+        return False
+    powershell = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)'(?P<rest> .+)$", command)
+    if powershell is not None:
+        candidate_wrapper = Path(powershell.group(2).replace("''", "'"))
+        try:
+            suffix = shlex.split(powershell.group("rest"))
+        except ValueError:
+            return False
+        return _has_host_argument(suffix) and candidate_wrapper.resolve(
+            strict=False
+        ) == wrapper.resolve(strict=False)
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return False
+    if arguments and arguments[0] == "&":
+        arguments = arguments[1:]
+    return (
+        len(arguments) >= 4
+        and _has_host_argument(arguments[2:])
+        and Path(arguments[1]).resolve(strict=False) == wrapper.resolve(strict=False)
+    )
+
+
+def _has_host_argument(arguments: list[str]) -> bool:
     return any(
-        _owned_command(command, host=candidate_host, wrapper=wrapper)
-        for candidate_host in cast(tuple[Host, ...], ("codex", "claude"))
+        arguments[index] == "--host" and arguments[index + 1] in {"codex", "claude"}
+        for index in range(len(arguments) - 1)
     )
 
 
@@ -528,19 +605,29 @@ def _target_paths(home: Path, hosts: tuple[Host, ...]) -> dict[Host, tuple[Path,
 
 
 def _file_plan(path: Path, payload: dict[str, object] | None) -> dict[str, object]:
+    before_bytes = path.read_bytes() if path.is_file() else None
     if payload is None:
-        action = "delete" if path.is_file() else "unchanged"
+        action = "delete" if before_bytes is not None else "unchanged"
     else:
         after = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-        before = path.read_text(encoding="utf-8") if path.is_file() else None
+        before = before_bytes.decode("utf-8") if before_bytes is not None else None
         action = "unchanged" if before == after else ("update" if before is not None else "create")
-    return {"path": str(path), "action": action}
+    return {
+        "path": str(path),
+        "action": action,
+        "before_sha256": _bytes_digest(before_bytes),
+    }
 
 
 def _text_file_plan(path: Path, content: str) -> dict[str, object]:
-    before = path.read_text(encoding="utf-8") if path.is_file() else None
+    before_bytes = path.read_bytes() if path.is_file() else None
+    before = before_bytes.decode("utf-8") if before_bytes is not None else None
     action = "unchanged" if before == content else ("update" if before is not None else "create")
-    return {"path": str(path), "action": action}
+    return {
+        "path": str(path),
+        "action": action,
+        "before_sha256": _bytes_digest(before_bytes),
+    }
 
 
 def plan_install_shadow_hooks(
@@ -699,28 +786,47 @@ def install_shadow_hooks(
     if plan["conflicts"]:
         plan["dry_run"] = False
         return plan
+    try:
+        _assert_plan_inputs(plan)
+    except (OSError, ValueError) as exc:
+        cast(list[dict[str, str]], plan["conflicts"]).append(
+            {"code": "concurrent_change", "path": "", "detail": str(exc)}
+        )
+        plan["dry_run"] = False
+        return plan
+    snapshots = _transaction_snapshot(plan)
+    created_backups: list[Path] = []
     payloads = cast(dict[str, dict[str, object]], plan.pop("_payloads"))
-    for host, (settings_path, config_path) in _target_paths(home, hosts).items():
-        wrapper_text = payloads[host].get("wrapper_text")
-        if isinstance(wrapper_text, str):
-            wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
-            if _text_file_plan(wrapper_path, wrapper_text)["action"] != "unchanged":
-                wrapper_path.parent.mkdir(parents=True, exist_ok=True)
-                if wrapper_path.is_file():
-                    _backup(wrapper_path, backup_tag)
-                wrapper_path.write_text(wrapper_text, encoding="utf-8", newline="\n")
-        ownership_path = config_path.with_name(_OWNERSHIP_NAME)
-        for path, key in (
-            (settings_path, "settings"),
-            (config_path, "config"),
-            (ownership_path, "ownership"),
-        ):
-            proposed = cast(dict[str, object], payloads[host][key])
-            if _file_plan(path, proposed)["action"] == "unchanged":
-                continue
-            if path.is_file():
-                _backup(path, backup_tag)
-            _atomic_json(path, proposed)
+    try:
+        for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+            wrapper_text = payloads[host].get("wrapper_text")
+            if isinstance(wrapper_text, str):
+                wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+                if _text_file_plan(wrapper_path, wrapper_text)["action"] != "unchanged":
+                    _assert_snapshot(wrapper_path, snapshots[wrapper_path])
+                    if wrapper_path.is_file():
+                        created_backups.append(_backup(wrapper_path, backup_tag))
+                    _atomic_text(wrapper_path, wrapper_text)
+            ownership_path = config_path.with_name(_OWNERSHIP_NAME)
+            for path, key in (
+                (settings_path, "settings"),
+                (config_path, "config"),
+                (ownership_path, "ownership"),
+            ):
+                proposed = cast(dict[str, object], payloads[host][key])
+                if _file_plan(path, proposed)["action"] == "unchanged":
+                    continue
+                _assert_snapshot(path, snapshots[path])
+                if path.is_file():
+                    created_backups.append(_backup(path, backup_tag))
+                _atomic_json(path, proposed)
+    except (OSError, ValueError) as exc:
+        _rollback_transaction(snapshots, created_backups)
+        cast(list[dict[str, str]], plan["conflicts"]).append(
+            {"code": "apply_failed", "path": "", "detail": str(exc)}
+        )
+        plan["dry_run"] = False
+        return plan
     plan["dry_run"] = False
     plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
         "states"
@@ -842,29 +948,48 @@ def remove_shadow_hooks(
     if plan["conflicts"]:
         plan["dry_run"] = False
         return plan
-    payloads = cast(dict[str, dict[str, object] | None], plan.pop("_payloads"))
-    for key, payload in payloads.items():
-        host_name, kind = key.split(":", 1)
-        host = cast(Host, host_name)
-        settings_path, config_path = _target_paths(home, (host,))[host]
-        path = (
-            settings_path
-            if kind == "settings"
-            else config_path.with_name(_OWNERSHIP_NAME)
-            if kind == "ownership"
-            else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
-            if kind == "wrapper"
-            else config_path
+    try:
+        _assert_plan_inputs(plan)
+    except (OSError, ValueError) as exc:
+        cast(list[dict[str, str]], plan["conflicts"]).append(
+            {"code": "concurrent_change", "path": "", "detail": str(exc)}
         )
-        if _file_plan(path, payload)["action"] == "unchanged":
-            continue
-        if path.is_file():
-            _backup(path, backup_tag)
-        if payload is None:
+        plan["dry_run"] = False
+        return plan
+    snapshots = _transaction_snapshot(plan)
+    created_backups: list[Path] = []
+    payloads = cast(dict[str, dict[str, object] | None], plan.pop("_payloads"))
+    try:
+        for key, payload in payloads.items():
+            host_name, kind = key.split(":", 1)
+            host = cast(Host, host_name)
+            settings_path, config_path = _target_paths(home, (host,))[host]
+            path = (
+                settings_path
+                if kind == "settings"
+                else config_path.with_name(_OWNERSHIP_NAME)
+                if kind == "ownership"
+                else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+                if kind == "wrapper"
+                else config_path
+            )
+            if _file_plan(path, payload)["action"] == "unchanged":
+                continue
+            _assert_snapshot(path, snapshots[path])
             if path.is_file():
-                path.unlink()
-        else:
-            _atomic_json(path, payload)
+                created_backups.append(_backup(path, backup_tag))
+            if payload is None:
+                if path.is_file():
+                    path.unlink()
+            else:
+                _atomic_json(path, payload)
+    except (OSError, ValueError) as exc:
+        _rollback_transaction(snapshots, created_backups)
+        cast(list[dict[str, str]], plan["conflicts"]).append(
+            {"code": "apply_failed", "path": "", "detail": str(exc)}
+        )
+        plan["dry_run"] = False
+        return plan
     plan["dry_run"] = False
     return plan
 

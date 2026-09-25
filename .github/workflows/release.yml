@@ -7,6 +7,8 @@ on:
 jobs:
   verify:
     uses: ./.github/workflows/verify.yml
+    with:
+      build-packages: false
     permissions:
       contents: read
 
@@ -133,7 +135,7 @@ jobs:
           done
 
   pypi-publish:
-    needs: attest
+    needs: github-release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

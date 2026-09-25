@@ -13,6 +13,9 @@ import latent_compass.shadow_harness as shadow_harness
 import latent_compass.shadow_install as shadow_install
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
+    _assert_plan_inputs,
+    _atomic_json,
+    _backup,
     _command,
     _default_project_alias,
     _merged_host_config,
@@ -484,7 +487,10 @@ def test_final_removal_refuses_foreign_reference_to_managed_wrapper(
             "hooks": [
                 {
                     "type": "command",
-                    "command": _command(embedded_host, foreign_runtime, wrapper, platform="nt"),
+                    "command": (
+                        _command(embedded_host, foreign_runtime, wrapper, platform="nt")
+                        + f' --home "{home}"'
+                    ),
                     "async": True,
                     "timeout": 10,
                 }
@@ -542,6 +548,125 @@ def test_default_backup_tags_allow_rapid_install_remove_lifecycle(
     assert remove_code == 0
     assert json.loads(install_output.getvalue())["conflicts"] == []
     assert json.loads(remove_output.getvalue())["conflicts"] == []
+
+
+def test_install_rolls_back_all_files_when_late_atomic_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(
+        hooks,
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {"matcher": "foreign", "hooks": [{"type": "command", "command": "keep"}]}
+                ]
+            }
+        },
+    )
+    before = hooks.read_bytes()
+    real_atomic_json = _atomic_json
+
+    def fail_on_config(path: Path, payload: object) -> None:
+        if path.name == "config.json":
+            raise OSError("injected config write failure")
+        real_atomic_json(path, payload)
+
+    monkeypatch.setattr(shadow_install, "_atomic_json", fail_on_config)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="fault",
+        hosts=("codex",),
+    )
+
+    store = home / ".codex" / "latent-compass-shadow"
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert hooks.read_bytes() == before
+    assert not (store / "config.json").exists()
+    assert not (store / "ownership.json").exists()
+    assert not (store / "runtime" / "latent-compass-shadow-hook.py").exists()
+    assert not list(home.rglob("*.bak-latent-compass-fault"))
+
+
+def test_remove_rolls_back_all_files_when_late_backup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+    store = home / ".codex" / "latent-compass-shadow"
+    wrapper = store / "runtime" / "latent-compass-shadow-hook.py"
+    paths = (hooks, store / "config.json", store / "ownership.json", wrapper)
+    before = {path: path.read_bytes() for path in paths}
+    real_backup = _backup
+
+    def fail_on_config(path: Path, tag: str) -> Path:
+        if path.name == "config.json":
+            raise OSError("injected config backup failure")
+        return real_backup(path, tag)
+
+    monkeypatch.setattr(shadow_install, "_backup", fail_on_config)
+
+    result = remove_shadow_hooks(home=home, backup_tag="fault", hosts=("codex",))
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert not list(home.rglob("*.bak-latent-compass-fault"))
+
+
+def test_install_refuses_concurrent_foreign_hook_before_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    concurrent = {
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "foreign", "hooks": [{"type": "command", "command": "keep"}]}
+            ]
+        }
+    }
+    real_assert = _assert_plan_inputs
+
+    def inject_then_validate(plan: dict[str, object]) -> None:
+        _write(hooks, concurrent)
+        real_assert(plan)
+
+    monkeypatch.setattr(shadow_install, "_assert_plan_inputs", inject_then_validate)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="concurrent",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "concurrent_change"
+    assert json.loads(hooks.read_text(encoding="utf-8")) == concurrent
+    assert not (home / ".codex" / "latent-compass-shadow" / "config.json").exists()
+    assert not list(home.rglob("*.bak-latent-compass-concurrent"))
 
 
 def test_remove_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:

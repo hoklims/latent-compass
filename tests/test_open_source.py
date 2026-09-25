@@ -14,7 +14,15 @@ from pathlib import Path
 import pytest
 
 from latent_compass.canonical import seal
-from workflow_assertions import assert_required, assert_run, job, needs, step, workflow
+from workflow_assertions import (
+    assert_conditional_run,
+    assert_required,
+    assert_run,
+    job,
+    needs,
+    step,
+    workflow,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -181,6 +189,7 @@ def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
     pypi = job(payload, "pypi-publish")
 
     assert verify["uses"] == "./.github/workflows/verify.yml"
+    assert verify["with"] == {"build-packages": False}
     assert verify["permissions"] == {"contents": "read"}
     assert build["permissions"] == {
         "contents": "read",
@@ -211,7 +220,7 @@ def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
     assert needs(verify_artifacts) == {"build"}
     assert needs(attest_job) == {"build", "verify-artifacts"}
     assert needs(github_release) == {"attest"}
-    assert needs(pypi) == {"attest"}
+    assert needs(pypi) == {"github-release"}
     verify_workflow = workflow(REPO / ".github" / "workflows" / "verify.yml")
     assert "workflow_call" in verify_workflow["on"]
     assert job(verify_workflow, "verify")["strategy"]["matrix"]["os"] == [
@@ -241,12 +250,14 @@ def test_github_release_uses_an_explicit_repository_without_checkout() -> None:
 
 def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
     verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
-    assert_run(
+    condition = "${{ github.event_name != 'workflow_call' || inputs.build-packages }}"
+    assert_conditional_run(
         verify,
         "Verify installed wheel outside checkout",
         'uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/'
         'latent_compass-0.3.0-py3-none-any.whl" python '
         '"${{ github.workspace }}/tools/verify_installed_wheel.py"',
+        condition,
     )
 
     assert verify["strategy"]["matrix"]["os"] == [
@@ -260,11 +271,13 @@ def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() 
         "Test complete source tree",
         "uv run --frozen pytest -o addopts='' -q",
     )
-    assert_run(
+    assert_conditional_run(
         verify,
         "Test extracted source distribution",
         "uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.3.0.tar.gz",
+        condition,
     )
+    assert_conditional_run(verify, "Build distributions", "uv build --no-sources", condition)
     names = [candidate["name"] for candidate in verify["steps"]]
     assert names.index("Build distributions") < names.index(
         "Verify installed wheel outside checkout"
