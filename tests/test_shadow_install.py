@@ -356,6 +356,76 @@ def test_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
     assert not (home / ".codex" / "latent-compass-shadow").exists()
 
 
+def test_install_refuses_unowned_runtime_wrapper_before_backup_or_write(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text("# foreign wrapper\n", encoding="utf-8")
+    before = wrapper.read_bytes()
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="collision",
+        hosts=("codex",),
+    )
+
+    assert result["conflicts"] == [{"code": "wrapper_collision", "path": str(wrapper)}]
+    assert wrapper.read_bytes() == before
+    assert not wrapper.with_name(f"{wrapper.name}.bak-latent-compass-collision").exists()
+    assert not (wrapper.parents[1] / "config.json").exists()
+    assert not (wrapper.parents[1] / "ownership.json").exists()
+
+
+def test_remove_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+    backup = hooks.with_name("hooks.json.bak-latent-compass-fixed")
+    backup.write_text("existing backup\n", encoding="utf-8")
+    store = home / ".codex" / "latent-compass-shadow"
+    before = {
+        path: path.read_bytes() for path in (hooks, store / "config.json", store / "ownership.json")
+    }
+    stdout = StringIO()
+
+    code = main(
+        [
+            "remove",
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--backup-tag",
+            "fixed",
+            "--dry-run",
+            "--json",
+        ],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert {item["path"] for item in report["conflicts"]} >= {str(backup)}
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
 def test_project_removal_preserves_other_registration_and_hooks(tmp_path: Path) -> None:
     home = tmp_path / "home"
     first = tmp_path / "first"

@@ -14,10 +14,10 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      version: ${{ steps.package.outputs.version }}
     permissions:
       contents: read
-      id-token: write
-      attestations: write
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,15 +40,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build distributions from tag
         run: uv build --no-sources
-      - name: Test extracted source distribution
-        run: uv run --frozen python tools/verify_sdist.py "dist/latent_compass-${{ steps.package.outputs.version }}.tar.gz"
-      - name: Verify installed wheel outside checkout
-        working-directory: ${{ runner.temp }}
-        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-${{ steps.package.outputs.version }}-py3-none-any.whl" python "${{ github.workspace }}/tools/verify_installed_wheel.py"
-      - name: Attest exact release artifacts
-        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
-        with:
-          subject-path: dist/*
       - name: Retain exact release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -57,8 +48,62 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  github-release:
+  verify-artifacts:
     needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Check out tagged verification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.12.5'
+          python-version: '3.13'
+          enable-cache: false
+      - name: Install locked verification environment
+        run: uv sync --locked --all-groups
+      - name: Install real language server used by packaged tests
+        run: npm install --global pyright@1.1.414
+      - name: Retrieve exact release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: ${{ runner.temp }}/dist
+      - name: Test exact source distribution
+        run: uv run --frozen python tools/verify_sdist.py "${{ runner.temp }}/dist/latent_compass-${{ needs.build.outputs.version }}.tar.gz"
+      - name: Test exact installed wheel lifecycle
+        working-directory: ${{ runner.temp }}
+        run: uv run --no-project --isolated --python 3.13 --with "${{ runner.temp }}/dist/latent_compass-${{ needs.build.outputs.version }}-py3-none-any.whl" python "${{ github.workspace }}/tools/verify_installed_wheel.py"
+
+  attest:
+    needs: [build, verify-artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Retrieve verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Attest exact verified artifacts
+        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
+        with:
+          subject-path: dist/*
+
+  github-release:
+    needs: attest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -79,7 +124,7 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" dist/* --clobber
 
   pypi-publish:
-    needs: build
+    needs: attest
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

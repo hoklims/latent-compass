@@ -540,6 +540,13 @@ def plan_install_shadow_hooks(
             )
             command = _command(host, runtime_python, installed_hook)
             owned_command = _owned_command_from_manifest(ownership_path, host=host)
+            if (
+                packaged_hook is not None
+                and installed_hook.is_file()
+                and not _owned_command(owned_command, host=host, wrapper=installed_hook)
+            ):
+                conflicts.append({"code": "wrapper_collision", "path": str(installed_hook)})
+                continue
             settings = _planned_host_payload(
                 settings_path,
                 host=host,
@@ -666,6 +673,7 @@ def plan_remove_shadow_hooks(
     hosts: tuple[Host, ...],
     project_root: Path | None = None,
     project_alias: str | None = None,
+    backup_tag: str | None = None,
 ) -> dict[str, object]:
     """Plan project-level removal while retaining every unrelated registration."""
     conflicts: list[dict[str, str]] = []
@@ -720,7 +728,7 @@ def plan_remove_shadow_hooks(
         if remove_hooks:
             files.append(_file_plan(ownership_path, None))
             payloads[f"{host}:ownership"] = None
-    return {
+    plan: dict[str, object] = {
         "schema_version": 1,
         "operation": "remove",
         "version": __version__,
@@ -732,6 +740,9 @@ def plan_remove_shadow_hooks(
         "next_steps": [],
         "_payloads": payloads,
     }
+    if backup_tag is not None:
+        conflicts.extend(_backup_conflicts(plan, backup_tag))
+    return plan
 
 
 def remove_shadow_hooks(
@@ -747,13 +758,9 @@ def remove_shadow_hooks(
         hosts=hosts,
         project_root=project_root,
         project_alias=project_alias,
+        backup_tag=backup_tag,
     )
     if plan["conflicts"]:
-        plan["dry_run"] = False
-        return plan
-    backup_conflicts = _backup_conflicts(plan, backup_tag)
-    if backup_conflicts:
-        cast(list[dict[str, str]], plan["conflicts"]).extend(backup_conflicts)
         plan["dry_run"] = False
         return plan
     payloads = cast(dict[str, dict[str, object] | None], plan.pop("_payloads"))
@@ -880,6 +887,7 @@ def run_host_namespace(
                 hosts=hosts,
                 project_root=args.project_root,
                 project_alias=args.project_alias,
+                backup_tag=tag,
             )
             if args.dry_run
             else remove_shadow_hooks(
