@@ -268,6 +268,20 @@ idempotente. Pour retirer un seul projet sans toucher aux autres, prévisualisez
 --dry-run --json`, puis relancez sans `--dry-run`. L’ancien point d’entrée
 `python -m latent_compass.shadow_install ...` reste disponible.
 
+Si l’installation ou la suppression a été interrompue, les deux commandes
+refusent de continuer avec `recovery_required` et indiquent la commande de
+réparation exacte dans leur JSON. Prévisualisez puis appliquez la réparation,
+avant de relancer la configuration initiale :
+
+```bash
+latent-compass host recover --dry-run --json
+latent-compass host recover --json
+```
+
+La reprise restaure uniquement les octets écrits par la transaction. Si un
+tiers a modifié un fichier entre-temps, `pending_transaction_conflict` laisse
+ce fichier et sa sauvegarde intacts pour examen.
+
 Le workflow de release est configuré pour le Trusted Publishing PyPI. Le nom du
 paquet doit d’abord être lié à ce dépôt, à ce workflow et à l’environnement
 `pypi` dans PyPI. La documentation d’installation ne doit remplacer `.` par le

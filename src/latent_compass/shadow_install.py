@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -27,7 +28,9 @@ __all__ = [
     "install_shadow_hooks",
     "main",
     "plan_install_shadow_hooks",
+    "plan_recover_shadow_hooks",
     "plan_remove_shadow_hooks",
+    "recover_shadow_hooks",
     "remove_shadow_hooks",
     "run_host_namespace",
 ]
@@ -72,6 +75,7 @@ _HOOK_EVENTS: Final = {
     },
 }
 _OWNERSHIP_NAME: Final = "ownership.json"
+_PENDING_TRANSACTION_NAME: Final = ".latent-compass-shadow.pending.json"
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -134,16 +138,230 @@ def _assert_snapshot(path: Path, expected: bytes | None) -> None:
         raise ValueError(f"concurrent change detected for {path}")
 
 
-def _rollback_transaction(snapshots: dict[Path, bytes | None], created_backups: list[Path]) -> None:
-    for path, content in snapshots.items():
-        if content is None:
+def _rollback_transaction(
+    snapshots: dict[Path, bytes | None],
+    written: dict[Path, bytes | None],
+    created_backups: list[tuple[Path, Path]],
+) -> list[Path]:
+    unresolved: list[Path] = []
+    for path, after_content in written.items():
+        current = path.read_bytes() if path.is_file() else None
+        if current != after_content:
+            unresolved.append(path)
+            continue
+        before_content = snapshots[path]
+        if before_content is None:
             if path.is_file():
                 path.unlink()
         else:
-            _atomic_bytes(path, content)
-    for backup in created_backups:
-        if backup.is_file():
+            _atomic_bytes(path, before_content)
+    unresolved_set = set(unresolved)
+    for source, backup in created_backups:
+        if source not in unresolved_set and backup.is_file():
             backup.unlink()
+    return unresolved
+
+
+def _pending_transaction_path(home: Path) -> Path:
+    return home / _PENDING_TRANSACTION_NAME
+
+
+def _path_entry_exists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _begin_transaction(
+    *,
+    home: Path,
+    operation: str,
+    backup_tag: str,
+    plan: dict[str, object],
+) -> Path:
+    entries: list[dict[str, object]] = []
+    for item in cast(list[dict[str, object]], plan["files"]):
+        if item["action"] == "unchanged":
+            continue
+        path = Path(str(item["path"]))
+        entries.append(
+            {
+                "path": str(path),
+                "before_sha256": item.get("before_sha256"),
+                "after_sha256": item.get("after_sha256"),
+                "backup_path": (
+                    str(_backup_destination(path, backup_tag))
+                    if item["action"] in {"update", "delete"}
+                    else None
+                ),
+            }
+        )
+    journal = {
+        "schema_version": 1,
+        "operation": operation,
+        "backup_tag": backup_tag,
+        "entries": entries,
+    }
+    path = _pending_transaction_path(home)
+    _atomic_json(path, journal)
+    return path
+
+
+def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict[str, str]]:
+    journal_path = _pending_transaction_path(home)
+    if not _path_entry_exists(journal_path):
+        return []
+    if not stat.S_ISREG(journal_path.lstat().st_mode):
+        return [
+            {
+                "code": "pending_transaction_invalid",
+                "path": str(journal_path),
+                "detail": "pending transaction journal must be a regular file inside home",
+            }
+        ]
+    try:
+        payload = json.loads(journal_path.read_text(encoding="utf-8"))
+        entries = payload["entries"] if isinstance(payload, dict) else None
+        if payload.get("schema_version") != 1 or not isinstance(entries, list):
+            raise ValueError("invalid pending transaction journal")
+        backup_tag = payload.get("backup_tag")
+        if not isinstance(backup_tag, str) or not backup_tag:
+            raise ValueError("invalid pending transaction backup tag")
+        root = home.resolve(strict=False)
+        decoded: list[tuple[Path, str | None, str | None, Path | None]] = []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                raise ValueError("invalid pending transaction entry")
+            path = Path(str(raw.get("path", ""))).resolve(strict=False)
+            if not path.is_relative_to(root):
+                raise ValueError("pending transaction path escapes the selected home")
+            before_digest = cast(str | None, raw.get("before_sha256"))
+            after_digest = cast(str | None, raw.get("after_sha256"))
+            current = path.read_bytes() if path.is_file() else None
+            current_digest = _bytes_digest(current)
+            if current_digest not in {raw.get("before_sha256"), after_digest}:
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": (
+                            "current bytes match neither transaction state; preserve and inspect"
+                        ),
+                    }
+                ]
+            backup_raw = raw.get("backup_path")
+            backup = (
+                Path(str(backup_raw)).resolve(strict=False) if isinstance(backup_raw, str) else None
+            )
+            expected_backup = _backup_destination(path, backup_tag).resolve(strict=False)
+            if backup is not None and (
+                not backup.is_relative_to(root) or backup != expected_backup
+            ):
+                raise ValueError("pending transaction backup path is not bound to its source")
+            decoded.append((path, before_digest, after_digest, backup))
+        if not apply:
+            return []
+        for path, before_digest, after_digest, backup in decoded:
+            current = path.read_bytes() if path.is_file() else None
+            current_digest = _bytes_digest(current)
+            if current_digest not in {before_digest, after_digest}:
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": "current bytes changed after recovery preflight",
+                    }
+                ]
+            if current_digest == after_digest:
+                if before_digest is None:
+                    if path.is_file():
+                        path.unlink()
+                else:
+                    if backup is None or not backup.is_file():
+                        return [
+                            {
+                                "code": "pending_transaction_conflict",
+                                "path": str(path),
+                                "detail": "required recovery backup is missing",
+                            }
+                        ]
+                    backup_content = backup.read_bytes()
+                    if _bytes_digest(backup_content) != before_digest:
+                        return [
+                            {
+                                "code": "pending_transaction_conflict",
+                                "path": str(backup),
+                                "detail": "recovery backup digest mismatch",
+                            }
+                        ]
+                    _atomic_bytes(path, backup_content)
+            if backup is not None and backup.is_file():
+                backup_content = backup.read_bytes()
+                if _bytes_digest(backup_content) == before_digest:
+                    backup.unlink()
+        journal_path.unlink()
+        return []
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return [
+            {
+                "code": "pending_transaction_invalid",
+                "path": str(journal_path),
+                "detail": str(exc),
+            }
+        ]
+
+
+def _pending_recovery_description(home: Path) -> dict[str, object]:
+    path = _pending_transaction_path(home)
+    if not path.is_file():
+        return {"pending": False, "files": []}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    entries = cast(list[dict[str, object]], payload["entries"])
+    files: list[dict[str, object]] = []
+    final_files: list[dict[str, object]] = []
+    for entry in entries:
+        target = Path(str(entry["path"]))
+        current = target.read_bytes() if target.is_file() else None
+        current_digest = _bytes_digest(current)
+        before_digest = entry.get("before_sha256")
+        after_digest = entry.get("after_sha256")
+        action = (
+            "unchanged"
+            if current_digest == before_digest
+            else "delete"
+            if before_digest is None and current_digest == after_digest
+            else "restore"
+        )
+        files.append(
+            {
+                "path": str(target),
+                "action": action,
+                "before_sha256": current_digest,
+                "after_sha256": before_digest,
+            }
+        )
+        final_action = (
+            "unchanged"
+            if current_digest == after_digest
+            else "delete"
+            if after_digest is None
+            else "create"
+            if current_digest is None
+            else "update"
+        )
+        final_files.append(
+            {
+                "path": str(target),
+                "action": final_action,
+                "before_sha256": current_digest,
+                "after_sha256": after_digest,
+            }
+        )
+    return {
+        "pending": True,
+        "action": "restore transaction-owned after-states before apply",
+        "files": files,
+        "final_files": final_files,
+        "then": "replan requested operation",
+    }
 
 
 def _backup(path: Path, tag: str) -> Path:
@@ -417,27 +635,27 @@ def _planned_host_payload(
     command: str,
     owned_command: str | None,
     owned_wrapper: Path | None,
+    target_wrapper: Path,
 ) -> dict[str, object]:
     payload = _read_json(path)
     if owned_command is None and owned_wrapper is not None:
         owned_command = _discover_owned_command(payload, host=host, wrapper=owned_wrapper)
     if owned_command is not None:
         _validate_existing_shadow_groups(payload, host, command=owned_command)
-    if command != owned_command:
-        hooks = cast(dict[str, object], payload["hooks"])
-        for groups_raw in hooks.values():
-            if not isinstance(groups_raw, list):
-                continue
-            for group in groups_raw:
-                handlers = group.get("hooks") if isinstance(group, dict) else None
-                if isinstance(handlers, list) and any(
-                    isinstance(handler, dict) and handler.get("command") == command
-                    for handler in handlers
-                ):
-                    raise ValueError(
-                        "target hook command already exists without ownership evidence"
-                    )
     hooks = cast(dict[str, object], payload["hooks"])
+    for groups_raw in hooks.values():
+        if not isinstance(groups_raw, list):
+            continue
+        for group in groups_raw:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                candidate = handler.get("command") if isinstance(handler, dict) else None
+                if candidate != owned_command and _command_references_wrapper(
+                    candidate, target_wrapper
+                ):
+                    raise ValueError("managed wrapper is referenced by a foreign hook command")
     for event in _HOOK_EVENTS[host]:
         groups = _without_shadow_groups(
             hooks.get(event, []), event=event, host=host, command=owned_command
@@ -608,14 +826,17 @@ def _file_plan(path: Path, payload: dict[str, object] | None) -> dict[str, objec
     before_bytes = path.read_bytes() if path.is_file() else None
     if payload is None:
         action = "delete" if before_bytes is not None else "unchanged"
+        after_bytes = None
     else:
         after = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        after_bytes = after.encode("utf-8")
         before = before_bytes.decode("utf-8") if before_bytes is not None else None
         action = "unchanged" if before == after else ("update" if before is not None else "create")
     return {
         "path": str(path),
         "action": action,
         "before_sha256": _bytes_digest(before_bytes),
+        "after_sha256": _bytes_digest(after_bytes),
     }
 
 
@@ -627,6 +848,7 @@ def _text_file_plan(path: Path, content: str) -> dict[str, object]:
         "path": str(path),
         "action": action,
         "before_sha256": _bytes_digest(before_bytes),
+        "after_sha256": _bytes_digest(content.encode("utf-8")),
     }
 
 
@@ -642,6 +864,9 @@ def plan_install_shadow_hooks(
 ) -> dict[str, object]:
     """Preflight every selected host and return the complete no-write plan."""
     conflicts: list[dict[str, str]] = []
+    pending = _pending_transaction_path(home)
+    if _path_entry_exists(pending):
+        conflicts.extend(_recover_pending_transaction(home, apply=False))
     if not runtime_python.is_file():
         conflicts.append({"code": "runtime_missing", "path": str(runtime_python)})
     if not project_root.is_dir():
@@ -650,6 +875,32 @@ def plan_install_shadow_hooks(
         conflicts.append({"code": "hook_script_missing", "path": str(hook_script)})
     if not hosts or len(set(hosts)) != len(hosts):
         conflicts.append({"code": "invalid_hosts", "path": ""})
+    if _path_entry_exists(pending):
+        recovery = _pending_recovery_description(home)
+        if not conflicts:
+            conflicts.append(
+                {
+                    "code": "recovery_required",
+                    "path": str(pending),
+                    "detail": (f'run latent-compass host recover --home "{home}" --dry-run --json'),
+                }
+            )
+        return {
+            "schema_version": 1,
+            "operation": "install",
+            "version": __version__,
+            "project_root": str(project_root.resolve()),
+            "dry_run": True,
+            "changed": False,
+            "hosts": list(hosts),
+            "files": [],
+            "conflicts": conflicts,
+            "states": host_status(home=home, project_root=project_root, hosts=hosts, dry_run=True)[
+                "states"
+            ],
+            "next_steps": [f'latent-compass host recover --home "{home}" --dry-run --json'],
+            "recovery": recovery,
+        }
     files: list[dict[str, object]] = []
     payloads: dict[str, dict[str, object]] = {}
     packaged_hook: str | None = None
@@ -704,6 +955,7 @@ def plan_install_shadow_hooks(
                     if owned_command is None and hook_script is None
                     else None
                 ),
+                target_wrapper=installed_hook,
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             conflicts.append(
@@ -756,6 +1008,7 @@ def plan_install_shadow_hooks(
         "next_steps": ["Review and approve the exact Codex hook definition with /hooks before use."]
         if "codex" in hosts
         else [],
+        "recovery": _pending_recovery_description(home),
         "_payloads": payloads,
     }
     if backup_tag is not None:
@@ -795,9 +1048,14 @@ def install_shadow_hooks(
         plan["dry_run"] = False
         return plan
     snapshots = _transaction_snapshot(plan)
-    created_backups: list[Path] = []
+    created_backups: list[tuple[Path, Path]] = []
+    written: dict[Path, bytes | None] = {}
     payloads = cast(dict[str, dict[str, object]], plan.pop("_payloads"))
+    journal_path: Path | None = None
     try:
+        journal_path = _begin_transaction(
+            home=home, operation="install", backup_tag=backup_tag, plan=plan
+        )
         for host, (settings_path, config_path) in _target_paths(home, hosts).items():
             wrapper_text = payloads[host].get("wrapper_text")
             if isinstance(wrapper_text, str):
@@ -805,8 +1063,9 @@ def install_shadow_hooks(
                 if _text_file_plan(wrapper_path, wrapper_text)["action"] != "unchanged":
                     _assert_snapshot(wrapper_path, snapshots[wrapper_path])
                     if wrapper_path.is_file():
-                        created_backups.append(_backup(wrapper_path, backup_tag))
+                        created_backups.append((wrapper_path, _backup(wrapper_path, backup_tag)))
                     _atomic_text(wrapper_path, wrapper_text)
+                    written[wrapper_path] = wrapper_path.read_bytes()
             ownership_path = config_path.with_name(_OWNERSHIP_NAME)
             for path, key in (
                 (settings_path, "settings"),
@@ -818,15 +1077,28 @@ def install_shadow_hooks(
                     continue
                 _assert_snapshot(path, snapshots[path])
                 if path.is_file():
-                    created_backups.append(_backup(path, backup_tag))
+                    created_backups.append((path, _backup(path, backup_tag)))
                 _atomic_json(path, proposed)
+                written[path] = path.read_bytes()
     except (OSError, ValueError) as exc:
-        _rollback_transaction(snapshots, created_backups)
+        unresolved = _rollback_transaction(snapshots, written, created_backups)
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
         )
+        for path in unresolved:
+            cast(list[dict[str, str]], plan["conflicts"]).append(
+                {
+                    "code": "rollback_conflict",
+                    "path": str(path),
+                    "detail": "current bytes changed after this transaction wrote the path",
+                }
+            )
+        if not unresolved and journal_path is not None and journal_path.is_file():
+            journal_path.unlink()
         plan["dry_run"] = False
         return plan
+    if journal_path.is_file():
+        journal_path.unlink()
     plan["dry_run"] = False
     plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
         "states"
@@ -844,6 +1116,31 @@ def plan_remove_shadow_hooks(
 ) -> dict[str, object]:
     """Plan project-level removal while retaining every unrelated registration."""
     conflicts: list[dict[str, str]] = []
+    pending = _pending_transaction_path(home)
+    if _path_entry_exists(pending):
+        conflicts.extend(_recover_pending_transaction(home, apply=False))
+    if _path_entry_exists(pending):
+        recovery = _pending_recovery_description(home)
+        if not conflicts:
+            conflicts.append(
+                {
+                    "code": "recovery_required",
+                    "path": str(pending),
+                    "detail": (f'run latent-compass host recover --home "{home}" --dry-run --json'),
+                }
+            )
+        return {
+            "schema_version": 1,
+            "operation": "remove",
+            "version": __version__,
+            "dry_run": True,
+            "changed": False,
+            "hosts": list(hosts),
+            "files": [],
+            "conflicts": conflicts,
+            "next_steps": [f'latent-compass host recover --home "{home}" --dry-run --json'],
+            "recovery": recovery,
+        }
     files: list[dict[str, object]] = []
     payloads: dict[str, dict[str, object] | None] = {}
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
@@ -923,6 +1220,7 @@ def plan_remove_shadow_hooks(
         "files": files,
         "conflicts": conflicts,
         "next_steps": [],
+        "recovery": _pending_recovery_description(home),
         "_payloads": payloads,
     }
     if backup_tag is not None:
@@ -957,9 +1255,14 @@ def remove_shadow_hooks(
         plan["dry_run"] = False
         return plan
     snapshots = _transaction_snapshot(plan)
-    created_backups: list[Path] = []
+    created_backups: list[tuple[Path, Path]] = []
+    written: dict[Path, bytes | None] = {}
     payloads = cast(dict[str, dict[str, object] | None], plan.pop("_payloads"))
+    journal_path: Path | None = None
     try:
+        journal_path = _begin_transaction(
+            home=home, operation="remove", backup_tag=backup_tag, plan=plan
+        )
         for key, payload in payloads.items():
             host_name, kind = key.split(":", 1)
             host = cast(Host, host_name)
@@ -977,20 +1280,72 @@ def remove_shadow_hooks(
                 continue
             _assert_snapshot(path, snapshots[path])
             if path.is_file():
-                created_backups.append(_backup(path, backup_tag))
+                created_backups.append((path, _backup(path, backup_tag)))
             if payload is None:
                 if path.is_file():
                     path.unlink()
+                written[path] = None
             else:
                 _atomic_json(path, payload)
+                written[path] = path.read_bytes()
     except (OSError, ValueError) as exc:
-        _rollback_transaction(snapshots, created_backups)
+        unresolved = _rollback_transaction(snapshots, written, created_backups)
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
         )
+        for path in unresolved:
+            cast(list[dict[str, str]], plan["conflicts"]).append(
+                {
+                    "code": "rollback_conflict",
+                    "path": str(path),
+                    "detail": "current bytes changed after this transaction wrote the path",
+                }
+            )
+        if not unresolved and journal_path is not None and journal_path.is_file():
+            journal_path.unlink()
         plan["dry_run"] = False
         return plan
+    if journal_path.is_file():
+        journal_path.unlink()
     plan["dry_run"] = False
+    return plan
+
+
+def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
+    conflicts = _recover_pending_transaction(home, apply=False)
+    recovery = (
+        _pending_recovery_description(home) if not conflicts else {"pending": True, "files": []}
+    )
+    files = cast(list[dict[str, object]], recovery.get("files", []))
+    return {
+        "schema_version": 1,
+        "operation": "recover",
+        "version": __version__,
+        "dry_run": True,
+        "changed": any(item.get("action") != "unchanged" for item in files),
+        "hosts": [],
+        "files": files,
+        "conflicts": conflicts,
+        "next_steps": (
+            ["Apply recovery, then rerun the original install or remove dry-run."]
+            if recovery.get("pending") is True
+            else []
+        ),
+        "recovery": recovery,
+    }
+
+
+def recover_shadow_hooks(*, home: Path) -> dict[str, object]:
+    plan = plan_recover_shadow_hooks(home=home)
+    if plan["conflicts"]:
+        plan["dry_run"] = False
+        return plan
+    conflicts = _recover_pending_transaction(home)
+    if conflicts:
+        cast(list[dict[str, str]], plan["conflicts"]).extend(conflicts)
+    plan["dry_run"] = False
+    recovery = cast(dict[str, object], plan["recovery"])
+    plan["recovery"] = {**recovery, "completed": not conflicts}
     return plan
 
 
@@ -1043,10 +1398,12 @@ def configure_host_parser(parser: argparse.ArgumentParser) -> None:
     remove = sub.add_parser("remove")
     remove.add_argument("--project-root", type=Path)
     remove.add_argument("--project-alias")
+    recover = sub.add_parser("recover")
     status = sub.add_parser("status")
     status.add_argument("--project-root", type=Path, default=Path.cwd())
     for command in (install, remove, status):
         command.add_argument("--host", action="append", choices=("codex", "claude"))
+    for command in (install, remove, recover, status):
         command.add_argument("--home", type=Path, default=Path.home(), help=argparse.SUPPRESS)
         command.add_argument("--dry-run", action="store_true")
         command.add_argument("--json", action="store_true")
@@ -1066,7 +1423,7 @@ def run_host_namespace(
     stdout: TextIO = sys.stdout,
     stderr: TextIO = sys.stderr,
 ) -> int:
-    hosts = cast(tuple[Host, ...], tuple(args.host or ("codex", "claude")))
+    hosts = cast(tuple[Host, ...], tuple(getattr(args, "host", None) or ("codex", "claude")))
     tag = getattr(args, "backup_tag", None) or _default_backup_tag()
     if args.host_operation == "install":
         alias = args.project_alias or _default_project_alias(args.project_root)
@@ -1108,6 +1465,12 @@ def run_host_namespace(
                 project_root=args.project_root,
                 project_alias=args.project_alias,
             )
+        )
+    elif args.host_operation == "recover":
+        result = (
+            plan_recover_shadow_hooks(home=args.home)
+            if args.dry_run
+            else recover_shadow_hooks(home=args.home)
         )
     else:
         result = host_status(

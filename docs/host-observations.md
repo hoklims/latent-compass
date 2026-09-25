@@ -189,6 +189,9 @@ latent-compass host status --host codex \
 
 latent-compass host remove --host codex \
   --project-alias <stable-project-alias> --dry-run --json
+
+latent-compass host recover --dry-run --json
+latent-compass host recover --json
 ```
 
 The installed tool environment's interpreter runs a packaged wrapper resource
@@ -199,6 +202,14 @@ and `--hook-script` options remain available for controlled deployments.
 Removing one project keeps every other project registration and leaves the
 hooks active. Removing the final registration removes only Latent Compass hook
 groups and the host registration file; observation journals remain available.
+Before its first mutation, install or remove writes a minimal pending journal
+containing paths and before/after digests, but no copied hook contents. An
+interrupted transaction makes later install/remove previews return
+`recovery_required`. `host recover --dry-run --json` reports the exact repair;
+apply performs only those actions. If current bytes match neither recorded
+state, recovery returns `pending_transaction_conflict`, preserves the file and
+its backup, and requires operator inspection. Run the original setup again
+after recovery succeeds.
 
 Codex binds trust to the current hook definition. A newly installed or changed
 hook therefore remains skipped until an operator reviews it through Codex's

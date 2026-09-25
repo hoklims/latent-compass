@@ -14,15 +14,21 @@ import latent_compass.shadow_install as shadow_install
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _assert_plan_inputs,
+    _assert_snapshot,
     _atomic_json,
+    _atomic_text,
     _backup,
+    _begin_transaction,
     _command,
     _default_project_alias,
     _merged_host_config,
+    _packaged_hook_text,
+    _transaction_snapshot,
     _without_project,
     host_status,
     install_shadow_hooks,
     main,
+    plan_install_shadow_hooks,
     remove_shadow_hooks,
 )
 from latent_compass.shadow_status import Host
@@ -509,6 +515,50 @@ def test_final_removal_refuses_foreign_reference_to_managed_wrapper(
     assert all(path.read_bytes() == content for path, content in before.items())
 
 
+def test_install_refuses_foreign_reference_to_managed_wrapper(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    foreign_runtime = tmp_path / "foreign" / "python.exe"
+    foreign_runtime.parent.mkdir()
+    foreign_runtime.write_bytes(b"foreign")
+    foreign_command = (
+        _command("claude", foreign_runtime, wrapper, platform="nt") + f' --home "{home}"'
+    )
+    _write(
+        hooks,
+        {
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "foreign",
+                        "hooks": [{"type": "command", "command": foreign_command}],
+                    }
+                ]
+            }
+        },
+    )
+    before = hooks.read_bytes()
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts
+    assert "referenced by a foreign hook" in str(conflicts[0]["detail"])
+    assert hooks.read_bytes() == before
+    assert not wrapper.exists()
+
+
 def test_default_backup_tags_allow_rapid_install_remove_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -667,6 +717,227 @@ def test_install_refuses_concurrent_foreign_hook_before_first_write(
     assert json.loads(hooks.read_text(encoding="utf-8")) == concurrent
     assert not (home / ".codex" / "latent-compass-shadow" / "config.json").exists()
     assert not list(home.rglob("*.bak-latent-compass-concurrent"))
+
+
+def test_install_rollback_preserves_concurrent_change_to_unwritten_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    hooks_before = hooks.read_bytes()
+    config = home / ".codex" / "latent-compass-shadow" / "config.json"
+    third_party = b'{"third_party":true}\n'
+    real_assert = _assert_snapshot
+
+    def inject_on_config(path: Path, expected: bytes | None) -> None:
+        if path == config:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(third_party)
+        real_assert(path, expected)
+
+    monkeypatch.setattr(shadow_install, "_assert_snapshot", inject_on_config)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="concurrent-late",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert hooks.read_bytes() == hooks_before
+    assert config.read_bytes() == third_party
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="crash",
+    )
+    snapshots = _transaction_snapshot(plan)
+    journal = _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="crash",
+        plan=plan,
+    )
+    wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
+    _atomic_text(wrapper, _packaged_hook_text())
+
+    install_arguments = [
+        "install",
+        "--host",
+        "codex",
+        "--home",
+        str(home),
+        "--project-root",
+        str(project),
+        "--backup-tag",
+        "retry",
+        "--json",
+    ]
+    blocked_output = StringIO()
+    blocked_code = main([*install_arguments, "--dry-run"], stdout=blocked_output)
+    recovery_preview_output = StringIO()
+    recovery_preview_code = main(
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+        stdout=recovery_preview_output,
+    )
+    recovery_apply_output = StringIO()
+    recovery_apply_code = main(
+        ["recover", "--home", str(home), "--json"],
+        stdout=recovery_apply_output,
+    )
+    install_preview_output = StringIO()
+    install_preview_code = main([*install_arguments, "--dry-run"], stdout=install_preview_output)
+    install_apply_output = StringIO()
+    install_apply_code = main(install_arguments, stdout=install_apply_output)
+    blocked = json.loads(blocked_output.getvalue())
+    recovery_preview = json.loads(recovery_preview_output.getvalue())
+    recovery_apply = json.loads(recovery_apply_output.getvalue())
+    install_preview = json.loads(install_preview_output.getvalue())
+    install_apply = json.loads(install_apply_output.getvalue())
+
+    assert blocked_code == 3
+    assert blocked["conflicts"][0]["code"] == "recovery_required"
+    assert blocked["next_steps"] == [
+        f'latent-compass host recover --home "{home}" --dry-run --json'
+    ]
+    assert recovery_preview_code == recovery_apply_code == 0
+    assert recovery_preview["files"] == recovery_apply["files"]
+    assert recovery_apply["recovery"]["completed"] is True
+    assert install_preview_code == install_apply_code == 0
+    assert install_preview["files"] == install_apply["files"]
+    assert wrapper.is_file()
+    assert not journal.exists()
+
+
+def test_recover_refuses_symlinked_journal_outside_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"schema_version":1,"entries":[]}\n', encoding="utf-8")
+    journal = home / ".latent-compass-shadow.pending.json"
+    try:
+        journal.symlink_to(outside)
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+    before = outside.read_bytes()
+    stdout = StringIO()
+
+    code = main(
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
+    assert outside.read_bytes() == before
+
+
+def test_recover_refuses_dangling_symlinked_journal(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    journal = home / ".latent-compass-shadow.pending.json"
+    try:
+        journal.symlink_to(tmp_path / "missing.json")
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+    stdout = StringIO()
+
+    code = main(
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
+    assert journal.is_symlink()
+
+
+def test_recover_refuses_directory_at_journal_path(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.mkdir(parents=True)
+    stdout = StringIO()
+
+    code = main(
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
+    assert journal.is_dir()
+
+
+def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    third_party = b'{"hooks":{"PreToolUse":[{"foreign":true}]}}\n'
+    real_atomic_json = _atomic_json
+
+    def fail_after_foreign_change(path: Path, payload: object) -> None:
+        if path.name == "config.json":
+            hooks.write_bytes(third_party)
+            raise OSError("injected failure after concurrent hook change")
+        real_atomic_json(path, payload)
+
+    monkeypatch.setattr(shadow_install, "_atomic_json", fail_after_foreign_change)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="rollback-conflict",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert [item["code"] for item in conflicts] == ["apply_failed", "rollback_conflict"]
+    assert hooks.read_bytes() == third_party
+    assert (home / ".latent-compass-shadow.pending.json").is_file()
+    assert hooks.with_name("hooks.json.bak-latent-compass-rollback-conflict").is_file()
+    dry_output = StringIO()
+    dry_code = main(
+        [
+            "install",
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--project-root",
+            str(project),
+            "--dry-run",
+            "--json",
+        ],
+        stdout=dry_output,
+    )
+    dry_report = json.loads(dry_output.getvalue())
+    assert dry_code == 3
+    assert dry_report["conflicts"][0]["code"] == "pending_transaction_conflict"
+    assert hooks.read_bytes() == third_party
 
 
 def test_remove_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:

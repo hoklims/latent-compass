@@ -235,6 +235,19 @@ registration without disturbing the others with `latent-compass host remove
 without `--dry-run` after reviewing the plan. The legacy `python -m
 latent_compass.shadow_install ...` entry point remains available.
 
+If install or remove was interrupted, both commands refuse with
+`recovery_required` and include the exact recovery command in their JSON.
+Preview and apply the repair separately, then rerun the original setup:
+
+```bash
+latent-compass host recover --dry-run --json
+latent-compass host recover --json
+```
+
+Recovery restores only transaction-owned bytes. A concurrent third-party
+change returns `pending_transaction_conflict`; its file and backup are left
+untouched for inspection.
+
 The release workflow is configured for PyPI Trusted Publishing. The package
 name must first be bound to this repository, workflow and `pypi` environment in
 PyPI. Do not replace `.` with the registry package name in installation guidance
