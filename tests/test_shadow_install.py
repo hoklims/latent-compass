@@ -14,6 +14,7 @@ import latent_compass.shadow_install as shadow_install
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _command,
+    _default_project_alias,
     _merged_host_config,
     _without_project,
     host_status,
@@ -454,7 +455,10 @@ def test_final_removal_deletes_managed_wrapper_and_allows_reinstall(tmp_path: Pa
         assert len(_commands(hooks, event)) == 1
 
 
-def test_final_removal_refuses_foreign_reference_to_managed_wrapper(tmp_path: Path) -> None:
+@pytest.mark.parametrize("embedded_host", ["codex", "claude"])
+def test_final_removal_refuses_foreign_reference_to_managed_wrapper(
+    tmp_path: Path, embedded_host: Host
+) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -480,7 +484,7 @@ def test_final_removal_refuses_foreign_reference_to_managed_wrapper(tmp_path: Pa
             "hooks": [
                 {
                     "type": "command",
-                    "command": _command("codex", foreign_runtime, wrapper),
+                    "command": _command(embedded_host, foreign_runtime, wrapper, platform="nt"),
                     "async": True,
                     "timeout": 10,
                 }
@@ -898,3 +902,15 @@ def test_posix_registration_accepts_case_distinct_root(
 
     projects = cast(list[dict[str, object]], result["projects"])
     assert [project["alias"] for project in projects] == ["upper", "lower"]
+
+
+def test_posix_default_aliases_preserve_case_distinct_roots(tmp_path: Path) -> None:
+    upper = tmp_path / "A" / "foo"
+    lower = tmp_path / "a" / "foo"
+
+    assert _default_project_alias(upper, platform="posix") != _default_project_alias(
+        lower, platform="posix"
+    )
+    assert _default_project_alias(upper, platform="nt") == _default_project_alias(
+        lower, platform="nt"
+    )

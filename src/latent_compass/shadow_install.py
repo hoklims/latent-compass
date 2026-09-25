@@ -171,6 +171,13 @@ def _owned_command(command: object, *, host: Host, wrapper: Path) -> bool:
     return candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False)
 
 
+def _command_references_wrapper(command: object, wrapper: Path) -> bool:
+    return any(
+        _owned_command(command, host=candidate_host, wrapper=wrapper)
+        for candidate_host in cast(tuple[Host, ...], ("codex", "claude"))
+    )
+
+
 def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:
     if host == "codex":
         match = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex$", command)
@@ -383,8 +390,8 @@ def _remove_host_payload(
                     continue
                 for handler in handlers:
                     command = handler.get("command") if isinstance(handler, dict) else None
-                    if command != owned_command and _owned_command(
-                        command, host=host, wrapper=wrapper_to_delete
+                    if command != owned_command and _command_references_wrapper(
+                        command, wrapper_to_delete
                     ):
                         raise ValueError(
                             "managed wrapper is still referenced by a foreign hook command"
@@ -424,12 +431,14 @@ def _path_identity(path: Path, *, platform: str = os.name) -> str:
     return resolved.casefold() if platform == "nt" else resolved
 
 
-def _default_project_alias(project_root: Path) -> str:
+def _default_project_alias(project_root: Path, *, platform: str = os.name) -> str:
     resolved = project_root.resolve()
     readable = re.sub(r"[^A-Za-z0-9._:-]+", "-", resolved.name).strip("._:-")
     if not readable or not readable[0].isalnum():
         readable = "project"
-    digest = seal("shadow.install.project-alias.v1", str(resolved).casefold())[7:15]
+    digest = seal("shadow.install.project-alias.v1", _path_identity(resolved, platform=platform))[
+        7:15
+    ]
     return f"{readable[:110]}-{digest}"
 
 
