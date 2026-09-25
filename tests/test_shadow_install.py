@@ -6,6 +6,8 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from latent_compass.shadow_install import (
     _command,
     host_status,
@@ -13,6 +15,7 @@ from latent_compass.shadow_install import (
     main,
     remove_shadow_hooks,
 )
+from latent_compass.shadow_status import Host
 
 
 def _write(path: Path, payload: object) -> None:
@@ -166,7 +169,12 @@ def test_dry_run_reports_exact_plan_without_writing(tmp_path: Path) -> None:
     assert code == 0
     assert report["dry_run"] is True
     assert report["changed"] is True
-    assert [item["action"] for item in report["files"]] == ["create", "update", "create"]
+    assert [item["action"] for item in report["files"]] == [
+        "create",
+        "update",
+        "create",
+        "create",
+    ]
     assert hooks.read_bytes() == before
     assert not (home / ".codex" / "latent-compass-shadow").exists()
 
@@ -347,6 +355,115 @@ def test_project_removal_preserves_other_registration_and_hooks(tmp_path: Path) 
     assert [project["alias"] for project in config["projects"]] == ["second"]
     for event in ("SessionStart", "PreToolUse", "PostToolUse"):
         assert len(_commands(hooks, event)) == 1
+
+
+def test_removal_uses_persisted_ownership_for_custom_wrapper(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    custom_wrapper = tmp_path / "custom" / "latent-compass-shadow-hook.py"
+    custom_wrapper.parent.mkdir()
+    custom_wrapper.write_text("# custom fixture\n", encoding="utf-8")
+
+    installed = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        hook_script=custom_wrapper,
+        project_root=project,
+        project_alias="custom",
+        backup_tag="custom",
+        hosts=("codex",),
+    )
+    removed = remove_shadow_hooks(
+        home=home,
+        backup_tag="remove-custom",
+        hosts=("codex",),
+    )
+
+    assert installed["conflicts"] == []
+    assert removed["conflicts"] == []
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    for event in ("SessionStart", "PreToolUse", "PostToolUse"):
+        assert payload["hooks"][event] == []
+    assert not (home / ".codex" / "latent-compass-shadow" / "ownership.json").exists()
+
+
+@pytest.mark.parametrize("host", ["codex", "claude"])
+def test_interpreter_change_migrates_one_owned_hook_per_event(tmp_path: Path, host: Host) -> None:
+    home = tmp_path / host
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
+    _write(settings, {"hooks": {"PreToolUse": []}})
+    runtime_one = tmp_path / "runtime-one" / "python.exe"
+    runtime_two = tmp_path / "runtime-two" / "python.exe"
+    for runtime in (runtime_one, runtime_two):
+        runtime.parent.mkdir()
+        runtime.write_bytes(b"fixture")
+
+    first = install_shadow_hooks(
+        home=home,
+        runtime_python=runtime_one,
+        project_root=project,
+        project_alias="project",
+        backup_tag="runtime-one",
+        hosts=(host,),
+    )
+    second = install_shadow_hooks(
+        home=home,
+        runtime_python=runtime_two,
+        project_root=project,
+        project_alias="project",
+        backup_tag="runtime-two",
+        hosts=(host,),
+    )
+
+    assert first["conflicts"] == []
+    assert second["conflicts"] == []
+    for event in ("SessionStart", "PreToolUse", "PostToolUse"):
+        commands = _commands(settings, event)
+        assert len(commands) == 1
+        assert str(runtime_two) in commands[0] or runtime_two.as_posix() in commands[0]
+        assert str(runtime_one) not in commands[0]
+
+
+def test_interpreter_change_refuses_ambiguous_owned_groups(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    first_runtime = tmp_path / "first" / "python.exe"
+    second_runtime = tmp_path / "second" / "python.exe"
+    for runtime in (first_runtime, second_runtime):
+        runtime.parent.mkdir()
+        runtime.write_bytes(b"fixture")
+    install_shadow_hooks(
+        home=home,
+        runtime_python=first_runtime,
+        project_root=project,
+        backup_tag="first",
+        hosts=("codex",),
+    )
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    payload["hooks"]["PreToolUse"].append(payload["hooks"]["PreToolUse"][-1])
+    _write(hooks, payload)
+    before = hooks.read_bytes()
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=second_runtime,
+        project_root=project,
+        backup_tag="second",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts
+    assert "ambiguous Latent Compass hook ownership" in str(conflicts[0]["detail"])
+    assert hooks.read_bytes() == before
 
 
 def test_status_keeps_loading_and_approval_unknown(tmp_path: Path) -> None:

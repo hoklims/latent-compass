@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from latent_compass.canonical import seal
-from workflow_assertions import active_lines, job_lines, permissions, step_values
+from workflow_assertions import assert_required, job, needs, step, workflow
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -172,54 +172,76 @@ def test_the_readme_carries_only_workflow_backed_badges() -> None:
 
 
 def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
-    path = REPO / ".github" / "workflows" / "release.yml"
-    build = job_lines(path, "build")
-    github_release = job_lines(path, "github-release")
-    pypi = job_lines(path, "pypi-publish")
+    payload = workflow(REPO / ".github" / "workflows" / "release.yml")
+    build = job(payload, "build")
+    github_release = job(payload, "github-release")
+    pypi = job(payload, "pypi-publish")
 
-    assert permissions(build) == {
+    assert build["permissions"] == {
         "contents": "read",
         "id-token": "write",
         "attestations": "write",
     }
-    assert permissions(github_release) == {"contents": "write"}
-    assert permissions(pypi) == {"id-token": "write"}
-    assert step_values(build, "uses")["Attest exact release artifacts"].startswith(
-        "actions/attest-build-provenance@"
-    )
-    assert step_values(pypi, "uses")["Publish distributions to PyPI with trusted publishing"] == (
+    assert github_release["permissions"] == {"contents": "write"}
+    assert pypi["permissions"] == {"id-token": "write"}
+    attest = step(build, "Attest exact release artifacts")
+    publish_pypi = step(pypi, "Publish distributions to PyPI with trusted publishing")
+    assert attest["uses"].startswith("actions/attest-build-provenance@")
+    assert publish_pypi["uses"] == (
         "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
     )
-    assert "    environment:" in pypi
-    assert "      name: pypi" in pypi
+    assert pypi["environment"]["name"] == "pypi"
+    for required in (build, github_release, pypi, attest, publish_pypi):
+        assert_required(required)
+    assert needs(github_release) == {"build"}
+    assert needs(pypi) == {"build"}
+
+
+def test_github_release_uses_an_explicit_repository_without_checkout() -> None:
+    payload = workflow(REPO / ".github" / "workflows" / "release.yml")
+    github_release = job(payload, "github-release")
+    publish = step(github_release, "Publish exact attested artifacts to GitHub")
+
+    assert all(
+        not str(candidate.get("uses", "")).startswith("actions/checkout@")
+        for candidate in github_release["steps"]
+    )
+    assert publish["env"]["GH_REPO"] == "${{ github.repository }}"
+    assert_required(publish)
 
 
 def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
-    path = REPO / ".github" / "workflows" / "verify.yml"
-    verify = job_lines(path, "verify")
-    commands = step_values(verify, "run")
+    verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
+    smoke = step(verify, "Verify installed wheel outside checkout")
 
-    assert "        os: [ubuntu-latest, windows-latest, macos-latest]" in active_lines(path)
-    assert commands["Verify installed wheel outside checkout"].endswith(
-        'python "${{ github.workspace }}/tools/verify_installed_wheel.py"'
-    )
-    assert list(commands).index("Build distributions") < list(commands).index(
+    assert verify["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "windows-latest",
+        "macos-latest",
+    ]
+    assert smoke["run"].endswith('python "${{ github.workspace }}/tools/verify_installed_wheel.py"')
+    assert_required(verify)
+    assert_required(smoke)
+    names = [candidate["name"] for candidate in verify["steps"]]
+    assert names.index("Build distributions") < names.index(
         "Verify installed wheel outside checkout"
     )
 
 
 def test_release_workflow_exercises_the_installed_wheel_before_attestation() -> None:
-    build = job_lines(REPO / ".github" / "workflows" / "release.yml", "build")
-    commands = step_values(build, "run")
-    uses = step_values(build, "uses")
+    build = job(workflow(REPO / ".github" / "workflows" / "release.yml"), "build")
+    smoke = step(build, "Verify installed wheel outside checkout")
+    attest = step(build, "Attest exact release artifacts")
 
-    assert commands["Verify installed wheel outside checkout"].endswith(
-        'python "${{ github.workspace }}/tools/verify_installed_wheel.py"'
+    assert smoke["run"].endswith('python "${{ github.workspace }}/tools/verify_installed_wheel.py"')
+    assert_required(smoke)
+    names = [candidate["name"] for candidate in build["steps"]]
+    assert (
+        names.index("Build distributions from tag")
+        < names.index("Verify installed wheel outside checkout")
+        < names.index("Attest exact release artifacts")
     )
-    assert list(commands).index("Build distributions from tag") < list(commands).index(
-        "Verify installed wheel outside checkout"
-    )
-    assert "Attest exact release artifacts" in uses
+    assert "uses" in attest
 
 
 def test_the_honest_limit_appears_in_every_document_that_relies_on_it() -> None:

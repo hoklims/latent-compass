@@ -69,6 +69,7 @@ _HOOK_EVENTS: Final = {
         "PostToolUse": "Write|Edit|MultiEdit|NotebookEdit|Bash",
     },
 }
+_OWNERSHIP_NAME: Final = "ownership.json"
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -218,10 +219,71 @@ def _without_shadow_groups(
     return retained
 
 
+def _ownership_payload(*, host: Host, command: str) -> dict[str, object]:
+    return {"schema_version": 1, "host": host, "command": command}
+
+
+def _owned_command_from_manifest(path: Path, *, host: Host) -> str | None:
+    if not path.is_file():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"schema_version", "host", "command"}
+        or payload.get("schema_version") != 1
+        or payload.get("host") != host
+        or not isinstance(payload.get("command"), str)
+        or _parse_owned_command(cast(str, payload["command"]), host) is None
+    ):
+        raise ValueError("invalid Latent Compass hook ownership manifest")
+    return cast(str, payload["command"])
+
+
+def _discover_owned_command(payload: dict[str, object], *, host: Host, wrapper: Path) -> str | None:
+    hooks = cast(dict[str, object], payload["hooks"])
+    candidates: dict[str, set[str]] = {}
+    occurrences: dict[tuple[str, str], int] = {}
+    for event, groups_raw in hooks.items():
+        if not isinstance(groups_raw, list):
+            raise ValueError(f"{event} hook entries must be an array")
+        for group in groups_raw:
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            command = (
+                handlers[0].get("command")
+                if isinstance(handlers, list)
+                and len(handlers) == 1
+                and isinstance(handlers[0], dict)
+                else None
+            )
+            if not _owned_command(command, host=host, wrapper=wrapper):
+                continue
+            assert isinstance(command, str)
+            if event not in _HOOK_EVENTS[host] or group != _shadow_group(
+                event=event, host=host, command=command
+            ):
+                raise ValueError(f"ambiguous Latent Compass hook ownership in {event}")
+            key = (command, event)
+            occurrences[key] = occurrences.get(key, 0) + 1
+            if occurrences[key] > 1:
+                raise ValueError(f"ambiguous Latent Compass hook ownership in {event}")
+            candidates.setdefault(command, set()).add(event)
+    if not candidates:
+        return None
+    if len(candidates) != 1:
+        raise ValueError("ambiguous Latent Compass hook ownership commands")
+    command, events = next(iter(candidates.items()))
+    if events != set(_HOOK_EVENTS[host]):
+        raise ValueError("incomplete Latent Compass hook ownership evidence")
+    return command
+
+
 def _validate_existing_shadow_groups(
     payload: dict[str, object], host: Host, *, command: str
 ) -> None:
     hooks = cast(dict[str, object], payload["hooks"])
+    occurrences: dict[str, int] = {}
     for event, groups_raw in hooks.items():
         if not isinstance(groups_raw, list):
             raise ValueError(f"{event} hook entries must be an array")
@@ -242,28 +304,65 @@ def _validate_existing_shadow_groups(
                 event=event, host=host, command=command
             ):
                 raise ValueError(f"existing Latent Compass hook marker collides in {event}")
+            occurrences[event] = occurrences.get(event, 0) + 1
+            if occurrences[event] > 1:
+                raise ValueError(f"ambiguous Latent Compass hook ownership in {event}")
 
 
-def _planned_host_payload(path: Path, *, host: Host, command: str) -> dict[str, object]:
+def _planned_host_payload(
+    path: Path,
+    *,
+    host: Host,
+    command: str,
+    owned_command: str | None,
+    owned_wrapper: Path | None,
+) -> dict[str, object]:
     payload = _read_json(path)
-    _validate_existing_shadow_groups(payload, host, command=command)
+    if owned_command is None and owned_wrapper is not None:
+        owned_command = _discover_owned_command(payload, host=host, wrapper=owned_wrapper)
+    if owned_command is not None:
+        _validate_existing_shadow_groups(payload, host, command=owned_command)
+    if command != owned_command:
+        hooks = cast(dict[str, object], payload["hooks"])
+        for groups_raw in hooks.values():
+            if not isinstance(groups_raw, list):
+                continue
+            for group in groups_raw:
+                handlers = group.get("hooks") if isinstance(group, dict) else None
+                if isinstance(handlers, list) and any(
+                    isinstance(handler, dict) and handler.get("command") == command
+                    for handler in handlers
+                ):
+                    raise ValueError(
+                        "target hook command already exists without ownership evidence"
+                    )
     hooks = cast(dict[str, object], payload["hooks"])
     for event in _HOOK_EVENTS[host]:
         groups = _without_shadow_groups(
-            hooks.get(event, []), event=event, host=host, command=command
+            hooks.get(event, []), event=event, host=host, command=owned_command
         )
         groups.append(_shadow_group(event=event, host=host, command=command))
         hooks[event] = groups
     return payload
 
 
-def _remove_host_payload(path: Path, *, host: Host, wrapper: Path) -> dict[str, object]:
+def _remove_host_payload(
+    path: Path,
+    *,
+    host: Host,
+    owned_command: str | None,
+    owned_wrapper: Path | None,
+) -> dict[str, object]:
     payload = _read_json(path)
+    if owned_command is None and owned_wrapper is not None:
+        owned_command = _discover_owned_command(payload, host=host, wrapper=owned_wrapper)
+    if owned_command is not None:
+        _validate_existing_shadow_groups(payload, host, command=owned_command)
     hooks = cast(dict[str, object], payload["hooks"])
     for event in set(_HOOK_EVENTS["codex"]) | set(_HOOK_EVENTS["claude"]):
         if event in hooks:
             hooks[event] = _without_shadow_groups(
-                hooks[event], event=event, host=host, wrapper=wrapper
+                hooks[event], event=event, host=host, command=owned_command
             )
     return payload
 
@@ -414,16 +513,25 @@ def plan_install_shadow_hooks(
         if not settings_path.is_file():
             conflicts.append({"code": "host_configuration_missing", "path": str(settings_path)})
             continue
+        ownership_path = config_path.with_name(_OWNERSHIP_NAME)
         try:
             installed_hook = (
                 hook_script
                 if hook_script is not None
                 else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
             )
+            command = _command(host, runtime_python, installed_hook)
+            owned_command = _owned_command_from_manifest(ownership_path, host=host)
             settings = _planned_host_payload(
                 settings_path,
                 host=host,
-                command=_command(host, runtime_python, installed_hook),
+                command=command,
+                owned_command=owned_command,
+                owned_wrapper=(
+                    config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+                    if owned_command is None and hook_script is None
+                    else None
+                ),
             )
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             conflicts.append(
@@ -448,8 +556,15 @@ def plan_install_shadow_hooks(
             continue
         if packaged_hook is not None:
             files.append(_text_file_plan(installed_hook, packaged_hook))
-        files.extend((_file_plan(settings_path, settings), _file_plan(config_path, config)))
-        payloads[host] = {"settings": settings, "config": config}
+        ownership = _ownership_payload(host=host, command=command)
+        files.extend(
+            (
+                _file_plan(settings_path, settings),
+                _file_plan(config_path, config),
+                _file_plan(ownership_path, ownership),
+            )
+        )
+        payloads[host] = {"settings": settings, "config": config, "ownership": ownership}
         if packaged_hook is not None:
             payloads[host]["wrapper_text"] = packaged_hook
     changed = any(item["action"] != "unchanged" for item in files)
@@ -509,7 +624,12 @@ def install_shadow_hooks(
                 if wrapper_path.is_file():
                     _backup(wrapper_path, backup_tag)
                 wrapper_path.write_text(wrapper_text, encoding="utf-8", newline="\n")
-        for path, key in ((settings_path, "settings"), (config_path, "config")):
+        ownership_path = config_path.with_name(_OWNERSHIP_NAME)
+        for path, key in (
+            (settings_path, "settings"),
+            (config_path, "config"),
+            (ownership_path, "ownership"),
+        ):
             proposed = cast(dict[str, object], payloads[host][key])
             if _file_plan(path, proposed)["action"] == "unchanged":
                 continue
@@ -535,7 +655,9 @@ def plan_remove_shadow_hooks(
     files: list[dict[str, object]] = []
     payloads: dict[str, dict[str, object] | None] = {}
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
+        ownership_path = config_path.with_name(_OWNERSHIP_NAME)
         try:
+            owned_command = _owned_command_from_manifest(ownership_path, host=host)
             if config_path.is_file():
                 config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
                 next_config = _without_project(
@@ -554,7 +676,12 @@ def plan_remove_shadow_hooks(
                 _remove_host_payload(
                     settings_path,
                     host=host,
-                    wrapper=config_path.parent / "runtime" / "latent-compass-shadow-hook.py",
+                    owned_command=owned_command,
+                    owned_wrapper=(
+                        config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
+                        if owned_command is None
+                        else None
+                    ),
                 )
                 if settings_path.is_file() and remove_hooks
                 else None
@@ -573,6 +700,9 @@ def plan_remove_shadow_hooks(
             payloads[f"{host}:settings"] = settings
         files.append(_file_plan(config_path, next_config))
         payloads[f"{host}:config"] = next_config
+        if remove_hooks:
+            files.append(_file_plan(ownership_path, None))
+            payloads[f"{host}:ownership"] = None
     return {
         "schema_version": 1,
         "operation": "remove",
@@ -614,7 +744,13 @@ def remove_shadow_hooks(
         host_name, kind = key.split(":", 1)
         host = cast(Host, host_name)
         settings_path, config_path = _target_paths(home, (host,))[host]
-        path = settings_path if kind == "settings" else config_path
+        path = (
+            settings_path
+            if kind == "settings"
+            else config_path.with_name(_OWNERSHIP_NAME)
+            if kind == "ownership"
+            else config_path
+        )
         if _file_plan(path, payload)["action"] == "unchanged":
             continue
         if path.is_file():

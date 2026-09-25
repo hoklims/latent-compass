@@ -42,6 +42,8 @@ dev = [
   # The build backend, mirrored from [build-system] so its closure is locked
   # and licence-audited rather than resolved fresh and unexamined at build time.
   "hatchling==1.32.0",
+  "pyyaml>=6,<7",
+  "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.hatch.build.targets.wheel]
