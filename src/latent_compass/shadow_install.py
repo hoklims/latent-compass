@@ -293,19 +293,48 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
         if not isinstance(payload, dict):
             raise ValueError("pending transaction journal must contain a JSON object")
         entries = payload.get("entries")
-        if payload.get("schema_version") != 1 or not isinstance(entries, list):
+        if payload.get("schema_version") != 1 or not isinstance(entries, list) or not entries:
             raise ValueError("invalid pending transaction journal")
+        operation = payload.get("operation")
+        if operation not in {"install", "remove"}:
+            raise ValueError("pending transaction operation must be install or remove")
         backup_tag = payload.get("backup_tag")
         if not isinstance(backup_tag, str) or not backup_tag:
             raise ValueError("invalid pending transaction backup tag")
         root = _lexical_absolute(home)
+        allowed_paths = {
+            _lexical_absolute(path)
+            for _, (settings_path, config_path) in _target_paths(home, ("codex", "claude")).items()
+            for path in (
+                settings_path,
+                config_path,
+                config_path.with_name(_OWNERSHIP_NAME),
+                config_path.parent / "runtime" / "latent-compass-shadow-hook.py",
+            )
+        }
+        seen_paths: set[Path] = set()
         decoded: list[tuple[Path, str | None, str | None, Path | None]] = []
         for raw in entries:
-            if not isinstance(raw, dict):
+            if not isinstance(raw, dict) or set(raw) != {
+                "path",
+                "before_sha256",
+                "after_sha256",
+                "backup_path",
+            }:
                 raise ValueError("invalid pending transaction entry")
             path = _assert_safe_path_under(root, Path(str(raw.get("path", ""))))
+            if path not in allowed_paths:
+                raise ValueError("pending transaction path is not a managed host target")
+            if path in seen_paths:
+                raise ValueError("pending transaction paths must be unique")
+            seen_paths.add(path)
             before_digest = cast(str | None, raw.get("before_sha256"))
             after_digest = cast(str | None, raw.get("after_sha256"))
+            for digest in (before_digest, after_digest):
+                if digest is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                    raise ValueError("invalid pending transaction content digest")
+            if before_digest == after_digest:
+                raise ValueError("pending transaction entry does not change content")
             current = _regular_file_bytes_or_none(path)
             current_digest = _bytes_digest(current)
             if current_digest not in {raw.get("before_sha256"), after_digest}:
@@ -319,6 +348,8 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                     }
                 ]
             backup_raw = raw.get("backup_path")
+            if (before_digest is None) != (backup_raw is None):
+                raise ValueError("pending transaction backup binding is inconsistent")
             backup = (
                 _assert_safe_path_under(root, Path(str(backup_raw)))
                 if isinstance(backup_raw, str)

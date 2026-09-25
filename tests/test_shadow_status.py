@@ -473,3 +473,47 @@ def test_status_refuses_linked_host_parent_without_reading_external_profile(
     assert report["store_present"] is False
     assert code == 0
     assert payload["hosts"][0]["status"] == "HOST_CONFIGURATION_INVALID"
+
+
+@pytest.mark.parametrize(
+    ("surface", "dangling"),
+    [
+        ("store", False),
+        ("store", True),
+        ("settings", False),
+        ("settings", True),
+        ("ownership", False),
+        ("ownership", True),
+        ("config", False),
+        ("config", True),
+        ("wrapper", False),
+        ("wrapper", True),
+    ],
+)
+def test_status_refuses_linked_profile_children(
+    tmp_path: Path, surface: str, dangling: bool
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    targets = {
+        "store": store,
+        "settings": home / ".codex" / "hooks.json",
+        "ownership": store / "ownership.json",
+        "config": store / "config.json",
+        "wrapper": home / "runtime" / "latent-compass-shadow-hook.py",
+    }
+    target = targets[surface]
+    outside = tmp_path / f"outside-{surface}"
+    target.rename(outside)
+    link_target = tmp_path / f"missing-{surface}" if dangling else outside
+    try:
+        target.symlink_to(link_target, target_is_directory=surface == "store")
+    except OSError as exc:
+        pytest.fail(f"symlink support is required for this security witness: {exc}")
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["hooks_present"] == 0

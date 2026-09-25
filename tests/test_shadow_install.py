@@ -1288,6 +1288,44 @@ def test_malformed_journal_returns_json_conflict_for_every_operation(
         assert journal.read_text(encoding="utf-8") == raw
 
 
+@pytest.mark.parametrize("defect", ["empty", "operation", "duplicate", "unknown-path"])
+def test_recover_rejects_semantically_invalid_journal_entries(tmp_path: Path, defect: str) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    managed = home / ".codex" / "hooks.json"
+    unknown = home / "unmanaged.json"
+    digest = "sha256:" + "1" * 64
+    entry = {
+        "path": str(unknown if defect == "unknown-path" else managed),
+        "before_sha256": None,
+        "after_sha256": digest,
+        "backup_path": None,
+    }
+    entries = [] if defect == "empty" else [entry]
+    if defect == "duplicate":
+        entries.append(dict(entry))
+    payload = {
+        "schema_version": 1,
+        "operation": "unknown" if defect == "operation" else "install",
+        "backup_tag": "test",
+        "entries": entries,
+    }
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_text(json.dumps(payload), encoding="utf-8")
+    before = journal.read_bytes()
+    stdout = StringIO()
+
+    code = main(
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
+    assert journal.read_bytes() == before
+
+
 def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

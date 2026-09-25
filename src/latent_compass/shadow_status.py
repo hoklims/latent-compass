@@ -143,18 +143,45 @@ def _is_reparse_point(info: os.stat_result) -> bool:
     return bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 
+def _entry_kind_safe(path: Path, *, directory: bool) -> bool:
+    if not os.path.lexists(path):
+        return False
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+        return False
+    return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+
+
+def _parents_safe(path: Path) -> bool:
+    absolute = Path(os.path.abspath(path))  # noqa: PTH100 - resolve would follow links
+    for parent in reversed(absolute.parents):
+        if not os.path.lexists(parent):
+            continue
+        if not _entry_kind_safe(parent, directory=True):
+            return False
+    return True
+
+
+def _regular_file_safe_or_absent(path: Path) -> bool:
+    return _parents_safe(path) and (
+        not os.path.lexists(path) or _entry_kind_safe(path, directory=False)
+    )
+
+
 def _host_paths_safe(home: Path, host: Host) -> bool:
     root = Path(os.path.abspath(home))  # noqa: PTH100 - resolve would follow links
-    for ancestor in (*reversed(root.parents), root):
-        if not os.path.lexists(ancestor):
-            continue
-        info = ancestor.lstat()
-        if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
-            return False
+    if not _parents_safe(root):
+        return False
+    if os.path.lexists(root) and not _entry_kind_safe(root, directory=True):
+        return False
     host_root = root / f".{host}"
-    if os.path.lexists(host_root):
-        info = host_root.lstat()
-        if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
+    store = host_root / "latent-compass-shadow"
+    settings = _host_settings(root, host)
+    for directory in (host_root, store, store / "runtime"):
+        if os.path.lexists(directory) and not _entry_kind_safe(directory, directory=True):
+            return False
+    for leaf in (settings, store / _OWNERSHIP_NAME, store / DEFAULT_CONFIG_NAME):
+        if os.path.lexists(leaf) and not _entry_kind_safe(leaf, directory=False):
             return False
     return True
 
@@ -356,6 +383,17 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
     owned_command, wrapper_digest, ownership_valid = (
         _owned_command(store, host) if paths_safe else (None, None, False)
     )
+    if paths_safe and owned_command is not None:
+        parsed = _parse_hook_command(owned_command, host)
+        if parsed is None:
+            paths_safe = False
+        else:
+            runtime, wrapper = parsed
+            paths_safe = _regular_file_safe_or_absent(runtime) and _regular_file_safe_or_absent(
+                wrapper
+            )
+        if not paths_safe:
+            ownership_valid = False
     settings = (
         _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest)
         if paths_safe
