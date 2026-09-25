@@ -436,3 +436,40 @@ def test_cli_supports_human_and_json_output(tmp_path: Path) -> None:
     assert payload["content_recorded"] is False
     assert payload["execution_authority"] is False
     assert payload["host_influenced"] is False
+
+
+def test_status_refuses_linked_host_parent_without_reading_external_profile(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    outside_home = tmp_path / "outside-home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _install_fixture(outside_home, project)
+    try:
+        (home / ".codex").symlink_to(outside_home / ".codex", target_is_directory=True)
+    except OSError as exc:
+        pytest.fail(f"directory symlink support is required for this security witness: {exc}")
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+    stdout = StringIO()
+    code = main(
+        [
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--project-root",
+            str(project),
+            "--json",
+        ],
+        stdout=stdout,
+    )
+    payload = json.loads(stdout.getvalue())
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["hooks_present"] == 0
+    assert report["store_present"] is False
+    assert code == 0
+    assert payload["hosts"][0]["status"] == "HOST_CONFIGURATION_INVALID"

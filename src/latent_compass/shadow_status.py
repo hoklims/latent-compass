@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import sys
 from collections import Counter
 from datetime import datetime
@@ -136,6 +137,26 @@ def _host_settings(home: Path, host: Host) -> Path:
 
 def _store_root(home: Path, host: Host) -> Path:
     return home / f".{host}" / "latent-compass-shadow"
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    return bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _host_paths_safe(home: Path, host: Host) -> bool:
+    root = Path(os.path.abspath(home))  # noqa: PTH100 - resolve would follow links
+    for ancestor in (*reversed(root.parents), root):
+        if not os.path.lexists(ancestor):
+            continue
+        info = ancestor.lstat()
+        if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
+            return False
+    host_root = root / f".{host}"
+    if os.path.lexists(host_root):
+        info = host_root.lstat()
+        if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info) or not stat.S_ISDIR(info.st_mode):
+            return False
+    return True
 
 
 def _hook_state(
@@ -331,8 +352,21 @@ def _valid_timestamp(value: str) -> bool:
 
 def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, object]:
     store = _store_root(home, host)
-    owned_command, wrapper_digest, ownership_valid = _owned_command(store, host)
-    settings = _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest)
+    paths_safe = _host_paths_safe(home, host)
+    owned_command, wrapper_digest, ownership_valid = (
+        _owned_command(store, host) if paths_safe else (None, None, False)
+    )
+    settings = (
+        _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest)
+        if paths_safe
+        else {
+            "configuration_present": False,
+            "configuration_valid": False,
+            "events": [],
+            "runtime_present": None,
+            "wrapper_present": None,
+        }
+    )
     configured_events = settings["events"]
     assert isinstance(configured_events, list)
     config_path = store / DEFAULT_CONFIG_NAME
@@ -345,7 +379,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         "hook_trust": "UNKNOWN",
         "project_registered": False,
         "project_alias": None,
-        "store_present": store.is_dir(),
+        "store_present": store.is_dir() if paths_safe else False,
         "event_count": 0,
         "session_count": 0,
         "verdicts": {},
@@ -353,7 +387,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         "invalid_event_count": 0,
         "truncated": False,
     }
-    if not ownership_valid or settings.get("configuration_valid") is False:
+    if not paths_safe or not ownership_valid or settings.get("configuration_valid") is False:
         base["status"] = "HOST_CONFIGURATION_INVALID"
         return base
     if not config_path.is_file():

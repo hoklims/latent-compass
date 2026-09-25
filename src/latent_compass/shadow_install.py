@@ -204,6 +204,12 @@ def _assert_safe_path_under(home: Path, path: Path) -> Path:
     target = _lexical_absolute(path)
     if not target.is_relative_to(root):
         raise ValueError("transaction path escapes the selected home")
+    for ancestor in reversed(root.parents):
+        if not _path_entry_exists(ancestor):
+            continue
+        ancestor_info = ancestor.lstat()
+        if stat.S_ISLNK(ancestor_info.st_mode) or _is_reparse_point(ancestor_info):
+            raise ValueError(f"selected home ancestor is redirected: {ancestor}")
     if _path_entry_exists(root):
         root_info = root.lstat()
         if (
@@ -263,6 +269,16 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
     journal_path = _pending_transaction_path(home)
     if not _path_entry_exists(journal_path):
         return []
+    try:
+        _assert_safe_path_under(home, journal_path)
+    except (OSError, ValueError) as exc:
+        return [
+            {
+                "code": "pending_transaction_invalid",
+                "path": str(journal_path),
+                "detail": str(exc),
+            }
+        ]
     journal_info = journal_path.lstat()
     if not stat.S_ISREG(journal_info.st_mode) or _is_reparse_point(journal_info):
         return [
@@ -348,12 +364,27 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                 ]
             if current_digest == after_digest:
                 if before_digest is None:
-                    if path.is_file():
+                    if _path_entry_exists(path):
+                        _regular_file_bytes_or_none(path)
                         path.unlink()
                 else:
-                    assert backup is not None
+                    if backup is None:
+                        return [
+                            {
+                                "code": "pending_transaction_conflict",
+                                "path": str(path),
+                                "detail": "required recovery backup is missing",
+                            }
+                        ]
                     backup_content = _regular_file_bytes_or_none(backup)
-                    assert backup_content is not None
+                    if backup_content is None:
+                        return [
+                            {
+                                "code": "pending_transaction_conflict",
+                                "path": str(backup),
+                                "detail": "required recovery backup vanished after preflight",
+                            }
+                        ]
                     if _bytes_digest(backup_content) != before_digest:
                         return [
                             {
@@ -529,15 +560,21 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
     if powershell is not None:
         candidate_wrapper = Path(powershell.group(2).replace("''", "'"))
         return candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False)
-    try:
-        arguments = shlex.split(command)
-    except ValueError:
-        return False
-    if arguments and arguments[0] == "&":
-        arguments = arguments[1:]
-    return len(arguments) >= 2 and Path(arguments[1]).resolve(strict=False) == wrapper.resolve(
-        strict=False
-    )
+    expected = wrapper.resolve(strict=False)
+    for posix in (True, False):
+        try:
+            arguments = shlex.split(command, comments=True, posix=posix)
+        except ValueError:
+            continue
+        if len(arguments) > 128:
+            return False
+        for raw_token in arguments:
+            token = raw_token.strip("\"'")
+            if token in {"&", "env"} or token.startswith("-"):
+                continue
+            if Path(token).resolve(strict=False) == expected:
+                return True
+    return False
 
 
 def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:

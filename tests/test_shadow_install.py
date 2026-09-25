@@ -21,10 +21,12 @@ from latent_compass.shadow_install import (
     _backup,
     _begin_transaction,
     _command,
+    _command_references_wrapper,
     _default_project_alias,
     _merged_host_config,
     _packaged_hook_text,
     _path_entry_exists,
+    _regular_file_bytes_or_none,
     _transaction_snapshot,
     _without_project,
     host_status,
@@ -748,6 +750,24 @@ def test_install_refuses_foreign_reference_to_managed_wrapper(tmp_path: Path) ->
     assert not wrapper.exists()
 
 
+@pytest.mark.parametrize(
+    ("command_template", "expected"),
+    [
+        ('python -u "{wrapper}" --host other', True),
+        ('env python "{wrapper}" --extra', True),
+        ('python "{wrapper}" --extra', True),
+        ('echo ok # "{wrapper}"', False),
+    ],
+)
+def test_bounded_reference_scan_handles_interpreter_forms_and_comments(
+    tmp_path: Path, command_template: str, expected: bool
+) -> None:
+    wrapper = tmp_path / "Windows Style" / "latent-compass-shadow-hook.py"
+    command = command_template.format(wrapper=wrapper)
+
+    assert _command_references_wrapper(command, wrapper) is expected
+
+
 def test_default_backup_tags_allow_rapid_install_remove_lifecycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1048,6 +1068,54 @@ def test_recovery_preflights_all_backups_before_first_mutation(tmp_path: Path) -
     assert "backup is missing" in str(conflicts[0]["detail"])
     assert wrapper.is_file()
     assert journal.is_file()
+
+
+def test_recovery_reports_backup_vanishing_after_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    original = b'{"hooks":{"PreToolUse":[]}}'
+    hooks.parent.mkdir(parents=True)
+    hooks.write_bytes(original)
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="crash",
+    )
+    _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="crash",
+        plan=plan,
+    )
+    payloads = cast(dict[str, dict[str, object]], plan["_payloads"])
+    _atomic_json(hooks, payloads["codex"]["settings"])
+    backup = hooks.with_name("hooks.json.bak-latent-compass-crash")
+    backup.write_bytes(original)
+    real_reader = _regular_file_bytes_or_none
+    backup_reads = 0
+
+    def vanish_on_second_backup_read(path: Path) -> bytes | None:
+        nonlocal backup_reads
+        if path == backup:
+            backup_reads += 1
+            if backup_reads == 3:
+                backup.unlink()
+        return real_reader(path)
+
+    monkeypatch.setattr(shadow_install, "_regular_file_bytes_or_none", vanish_on_second_backup_read)
+
+    result = recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "vanished after preflight" in str(conflicts[0]["detail"])
+    assert (home / ".latent-compass-shadow.pending.json").is_file()
 
 
 @pytest.mark.parametrize("replacement", ["symlink", "directory"])
