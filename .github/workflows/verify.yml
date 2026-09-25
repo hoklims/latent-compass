@@ -1,6 +1,7 @@
 name: Verify
 
 on:
+  workflow_call:
   push:
     branches: [main, 'codex/**']
   pull_request:

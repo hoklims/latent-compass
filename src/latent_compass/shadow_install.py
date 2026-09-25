@@ -355,7 +355,11 @@ def _remove_host_payload(
 ) -> dict[str, object]:
     payload = _read_json(path)
     if owned_command is None and owned_wrapper is not None:
-        owned_command = _discover_owned_command(payload, host=host, wrapper=owned_wrapper)
+        discovered = _discover_owned_command(payload, host=host, wrapper=owned_wrapper)
+        if discovered is not None:
+            raise ValueError(
+                "ownership manifest is required before removing legacy hook definitions"
+            )
     if owned_command is not None:
         _validate_existing_shadow_groups(payload, host, command=owned_command)
     hooks = cast(dict[str, object], payload["hooks"])
@@ -503,6 +507,7 @@ def plan_install_shadow_hooks(
     project_alias: str = "latent-compass-shadow",
     hosts: tuple[Host, ...],
     hook_script: Path | None = None,
+    backup_tag: str | None = None,
 ) -> dict[str, object]:
     """Preflight every selected host and return the complete no-write plan."""
     conflicts: list[dict[str, str]] = []
@@ -581,7 +586,7 @@ def plan_install_shadow_hooks(
         if packaged_hook is not None:
             payloads[host]["wrapper_text"] = packaged_hook
     changed = any(item["action"] != "unchanged" for item in files)
-    return {
+    plan: dict[str, object] = {
         "schema_version": 1,
         "operation": "install",
         "version": __version__,
@@ -598,6 +603,9 @@ def plan_install_shadow_hooks(
         else [],
         "_payloads": payloads,
     }
+    if backup_tag is not None:
+        conflicts.extend(_backup_conflicts(plan, backup_tag))
+    return plan
 
 
 def install_shadow_hooks(
@@ -618,13 +626,9 @@ def install_shadow_hooks(
         project_alias=project_alias,
         hosts=hosts,
         hook_script=hook_script,
+        backup_tag=backup_tag,
     )
     if plan["conflicts"]:
-        plan["dry_run"] = False
-        return plan
-    backup_conflicts = _backup_conflicts(plan, backup_tag)
-    if backup_conflicts:
-        cast(list[dict[str, str]], plan["conflicts"]).extend(backup_conflicts)
         plan["dry_run"] = False
         return plan
     payloads = cast(dict[str, dict[str, object]], plan.pop("_payloads"))
@@ -856,6 +860,7 @@ def run_host_namespace(
                 project_alias=alias,
                 hosts=hosts,
                 hook_script=args.hook_script,
+                backup_tag=tag,
             )
             if args.dry_run
             else install_shadow_hooks(

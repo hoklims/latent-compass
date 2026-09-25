@@ -173,10 +173,13 @@ def test_the_readme_carries_only_workflow_backed_badges() -> None:
 
 def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
     payload = workflow(REPO / ".github" / "workflows" / "release.yml")
+    verify = job(payload, "verify")
     build = job(payload, "build")
     github_release = job(payload, "github-release")
     pypi = job(payload, "pypi-publish")
 
+    assert verify["uses"] == "./.github/workflows/verify.yml"
+    assert verify["permissions"] == {"contents": "read"}
     assert build["permissions"] == {
         "contents": "read",
         "id-token": "write",
@@ -191,10 +194,18 @@ def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
         "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
     )
     assert pypi["environment"]["name"] == "pypi"
-    for required in (build, github_release, pypi, attest, publish_pypi):
+    for required in (verify, build, github_release, pypi, attest, publish_pypi):
         assert_required(required)
+    assert needs(build) == {"verify"}
     assert needs(github_release) == {"build"}
     assert needs(pypi) == {"build"}
+    verify_workflow = workflow(REPO / ".github" / "workflows" / "verify.yml")
+    assert "workflow_call" in verify_workflow["on"]
+    assert job(verify_workflow, "verify")["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "windows-latest",
+        "macos-latest",
+    ]
 
 
 def test_github_release_uses_an_explicit_repository_without_checkout() -> None:

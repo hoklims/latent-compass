@@ -319,6 +319,43 @@ def test_apply_refuses_backup_collision_before_any_write(tmp_path: Path) -> None
     assert not (home / ".codex" / "latent-compass-shadow").exists()
 
 
+def test_dry_run_reports_backup_collision_before_apply(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    backup = hooks.with_name("hooks.json.bak-latent-compass-fixed")
+    backup.write_text("existing backup\n", encoding="utf-8")
+    before = hooks.read_bytes()
+    stdout = StringIO()
+
+    code = main(
+        [
+            "install",
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--project-root",
+            str(project),
+            "--project-alias",
+            "project",
+            "--backup-tag",
+            "fixed",
+            "--dry-run",
+            "--json",
+        ],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert report["conflicts"] == [{"code": "backup_collision", "path": str(backup)}]
+    assert hooks.read_bytes() == before
+    assert not (home / ".codex" / "latent-compass-shadow").exists()
+
+
 def test_project_removal_preserves_other_registration_and_hooks(tmp_path: Path) -> None:
     home = tmp_path / "home"
     first = tmp_path / "first"
@@ -468,6 +505,39 @@ def test_interpreter_change_refuses_ambiguous_owned_groups(tmp_path: Path) -> No
     assert conflicts
     assert "ambiguous Latent Compass hook ownership" in str(conflicts[0]["detail"])
     assert hooks.read_bytes() == before
+
+
+def test_removal_refuses_standard_wrapper_groups_without_ownership_manifest(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="install",
+        hosts=("codex",),
+    )
+    store = home / ".codex" / "latent-compass-shadow"
+    (store / "ownership.json").unlink()
+    hooks_before = hooks.read_bytes()
+    config_before = (store / "config.json").read_bytes()
+
+    result = remove_shadow_hooks(
+        home=home,
+        backup_tag="remove",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts
+    assert "ownership manifest is required" in str(conflicts[0]["detail"])
+    assert hooks.read_bytes() == hooks_before
+    assert (store / "config.json").read_bytes() == config_before
 
 
 def test_status_keeps_loading_and_approval_unknown(tmp_path: Path) -> None:

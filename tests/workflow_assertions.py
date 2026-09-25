@@ -1,13 +1,33 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, cast
 
 import yaml
 
 
+class _WorkflowLoader(yaml.SafeLoader):
+    pass
+
+
+_WorkflowLoader.yaml_implicit_resolvers = {
+    key: [resolver for resolver in value if resolver[0] != "tag:yaml.org,2002:bool"]
+    for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_WorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|false)$", re.IGNORECASE),
+    list("tTfF"),
+)
+
+
 def workflow(path: Path) -> dict[str, Any]:
-    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    loader = _WorkflowLoader(path.read_text(encoding="utf-8"))
+    try:
+        payload = loader.get_single_data()
+    finally:
+        loader.dispose()
     if not isinstance(payload, dict):
         raise AssertionError(f"{path.name} must contain a YAML mapping")
     return cast(dict[str, Any], payload)
