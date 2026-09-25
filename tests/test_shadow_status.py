@@ -291,7 +291,7 @@ def test_missing_wrapper_or_host_suffix_cannot_look_active(tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("host", ["codex", "claude"])
-def test_status_accepts_exact_owned_custom_wrapper(tmp_path: Path, host: str) -> None:
+def test_status_rejects_owned_custom_wrapper_outside_profile(tmp_path: Path, host: str) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
@@ -300,9 +300,9 @@ def test_status_accepts_exact_owned_custom_wrapper(tmp_path: Path, host: str) ->
 
     report = inspect_host(home=home, host=cast(Host, host), project_root=project)
 
-    assert report["status"] == "NO_OBSERVATIONS"
-    assert report["hooks_present"] == 3
-    assert report["wrapper_present"] is True
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["hooks_present"] == 0
+    assert report["wrapper_present"] is None
 
 
 def test_status_rejects_foreign_command_with_owned_wrapper_basename(tmp_path: Path) -> None:
@@ -337,6 +337,25 @@ def test_status_reports_changed_owned_wrapper_as_missing(tmp_path: Path) -> None
 
     assert report["status"] == "RUNTIME_MISSING"
     assert report["wrapper_present"] is False
+
+
+def test_status_does_not_follow_external_runtime_symlink(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _install_fixture(home, project)
+    runtime = home / "runtime" / "python.exe"
+    outside = tmp_path / "outside-python"
+    runtime.replace(outside)
+    try:
+        runtime.symlink_to(outside)
+    except OSError as exc:
+        pytest.fail(f"file symlink support is required for this security witness: {exc}")
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "NO_OBSERVATIONS"
+    assert report["runtime_present"] is True
 
 
 def test_configuration_and_records_are_bound_to_the_reported_host(tmp_path: Path) -> None:
@@ -517,3 +536,27 @@ def test_status_refuses_linked_profile_children(
 
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["hooks_present"] == 0
+
+
+@pytest.mark.parametrize("surface", ["events", "alias", "event-file"])
+def test_status_refuses_linked_event_tree_entries(tmp_path: Path, surface: str) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+    events = store / "events"
+    alias = events / "project-alpha"
+    event_file = next(alias.rglob("*.json"))
+    target = {"events": events, "alias": alias, "event-file": event_file}[surface]
+    outside = tmp_path / f"outside-{surface}"
+    target.rename(outside)
+    try:
+        target.symlink_to(outside, target_is_directory=surface != "event-file")
+    except OSError as exc:
+        pytest.fail(f"symlink support is required for this security witness: {exc}")
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["event_count"] == 0

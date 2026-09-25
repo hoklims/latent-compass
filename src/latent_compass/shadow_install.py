@@ -335,18 +335,6 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                     raise ValueError("invalid pending transaction content digest")
             if before_digest == after_digest:
                 raise ValueError("pending transaction entry does not change content")
-            current = _regular_file_bytes_or_none(path)
-            current_digest = _bytes_digest(current)
-            if current_digest not in {raw.get("before_sha256"), after_digest}:
-                return [
-                    {
-                        "code": "pending_transaction_conflict",
-                        "path": str(path),
-                        "detail": (
-                            "current bytes match neither transaction state; preserve and inspect"
-                        ),
-                    }
-                ]
             backup_raw = raw.get("backup_path")
             if (before_digest is None) != (backup_raw is None):
                 raise ValueError("pending transaction backup binding is inconsistent")
@@ -358,6 +346,20 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
             expected_backup = _lexical_absolute(_backup_destination(path, backup_tag))
             if backup is not None and backup != expected_backup:
                 raise ValueError("pending transaction backup path is not bound to its source")
+            decoded.append((path, before_digest, after_digest, backup))
+        for path, before_digest, after_digest, backup in decoded:
+            current = _regular_file_bytes_or_none(path)
+            current_digest = _bytes_digest(current)
+            if current_digest not in {before_digest, after_digest}:
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": (
+                            "current bytes match neither transaction state; preserve and inspect"
+                        ),
+                    }
+                ]
             backup_content = _regular_file_bytes_or_none(backup) if backup is not None else None
             if backup_content is not None and _bytes_digest(backup_content) != before_digest:
                 return [
@@ -379,7 +381,6 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                         "detail": "required recovery backup is missing",
                     }
                 ]
-            decoded.append((path, before_digest, after_digest, backup))
         if not apply:
             return []
         for path, before_digest, after_digest, backup in decoded:

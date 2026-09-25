@@ -168,6 +168,12 @@ def _regular_file_safe_or_absent(path: Path) -> bool:
     )
 
 
+def _lexically_within(root: Path, candidate: Path) -> bool:
+    root_absolute = Path(os.path.abspath(root))  # noqa: PTH100 - lexical boundary
+    candidate_absolute = Path(os.path.abspath(candidate))  # noqa: PTH100 - lexical boundary
+    return candidate_absolute.is_relative_to(root_absolute)
+
+
 def _host_paths_safe(home: Path, host: Host) -> bool:
     root = Path(os.path.abspath(home))  # noqa: PTH100 - resolve would follow links
     if not _parents_safe(root):
@@ -229,9 +235,9 @@ def _hook_state(
                 }
             parsed = _parse_hook_command(owned_command, host)
             assert parsed is not None
-            runtime, wrapper = parsed
+            _, wrapper = parsed
             events.add(event)
-            runtime_states.append(runtime.is_file())
+            runtime_states.append(True)
             wrapper_states.append(_wrapper_matches(wrapper, wrapper_digest))
     runtime_present = all(runtime_states) if runtime_states else None
     wrapper_present = all(wrapper_states) if wrapper_states else None
@@ -257,7 +263,7 @@ def _project_for_root(
 
 def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict[str, object]:
     root = store / "events" / alias
-    if not root.is_dir():
+    if not os.path.lexists(root):
         return {
             "event_count": 0,
             "session_count": 0,
@@ -265,8 +271,13 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             "last_observed_at": None,
             "invalid_event_count": 0,
             "truncated": False,
+            "unsafe_event_store": False,
         }
-    paths, truncated = _bounded_json_paths(root)
+    if not _parents_safe(root) or not _entry_kind_safe(root, directory=True):
+        return {"unsafe_event_store": True}
+    paths, truncated, unsafe = _bounded_json_paths(root)
+    if unsafe:
+        return {"unsafe_event_store": True}
     verdicts: Counter[str] = Counter()
     sessions: set[str] = set()
     last_observed_at: str | None = None
@@ -274,6 +285,8 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
     invalid = 0
     for path in paths:
         try:
+            if not _entry_kind_safe(path, directory=False):
+                return {"unsafe_event_store": True}
             with path.open("rb") as handle:
                 raw = handle.read(MAX_EVENT_BYTES + 1)
             if len(raw) > MAX_EVENT_BYTES:
@@ -341,10 +354,11 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
         "last_observed_at": last_observed_at,
         "invalid_event_count": invalid,
         "truncated": truncated,
+        "unsafe_event_store": False,
     }
 
 
-def _bounded_json_paths(root: Path) -> tuple[list[Path], bool]:
+def _bounded_json_paths(root: Path) -> tuple[list[Path], bool, bool]:
     pending = [root]
     paths: list[Path] = []
     visited = 0
@@ -353,20 +367,23 @@ def _bounded_json_paths(root: Path) -> tuple[list[Path], bool]:
         try:
             entries = os.scandir(directory)
         except OSError:
-            return sorted(paths, key=lambda item: item.as_posix()), True
+            return sorted(paths, key=lambda item: item.as_posix()), True, False
         with entries:
             for entry in entries:
                 visited += 1
                 if visited > MAX_EVENT_FILES:
-                    return sorted(paths, key=lambda item: item.as_posix()), True
+                    return sorted(paths, key=lambda item: item.as_posix()), True, False
                 try:
+                    info = entry.stat(follow_symlinks=False)
+                    if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+                        return sorted(paths, key=lambda item: item.as_posix()), False, True
                     if entry.is_dir(follow_symlinks=False):
                         pending.append(Path(entry.path))
                     elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".json"):
                         paths.append(Path(entry.path))
                 except OSError:
-                    return sorted(paths, key=lambda item: item.as_posix()), True
-    return sorted(paths, key=lambda item: item.as_posix()), False
+                    return sorted(paths, key=lambda item: item.as_posix()), True, False
+    return sorted(paths, key=lambda item: item.as_posix()), False, False
 
 
 def _valid_timestamp(value: str) -> bool:
@@ -388,10 +405,8 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         if parsed is None:
             paths_safe = False
         else:
-            runtime, wrapper = parsed
-            paths_safe = _regular_file_safe_or_absent(runtime) and _regular_file_safe_or_absent(
-                wrapper
-            )
+            _, wrapper = parsed
+            paths_safe = _lexically_within(home, wrapper) and _regular_file_safe_or_absent(wrapper)
         if not paths_safe:
             ownership_valid = False
     settings = (
@@ -454,7 +469,11 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
     if base["runtime_present"] is not True or base["wrapper_present"] is not True:
         base["status"] = "RUNTIME_MISSING"
         return base
-    base.update(_event_summary(store, alias, host=host, host_id=str(config.host_id)))
+    summary = _event_summary(store, alias, host=host, host_id=str(config.host_id))
+    if summary.get("unsafe_event_store") is True:
+        base["status"] = "HOST_CONFIGURATION_INVALID"
+        return base
+    base.update(summary)
     base["status"] = "OBSERVING" if base["event_count"] else "NO_OBSERVATIONS"
     if base["invalid_event_count"]:
         base["status"] = "DEGRADED"

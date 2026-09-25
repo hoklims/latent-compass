@@ -1326,6 +1326,40 @@ def test_recover_rejects_semantically_invalid_journal_entries(tmp_path: Path, de
     assert journal.read_bytes() == before
 
 
+def test_recover_validates_digest_syntax_before_current_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    target = home / ".codex" / "hooks.json"
+    backup = target.with_name("hooks.json.bak-latent-compass-test")
+    payload = {
+        "schema_version": 1,
+        "operation": "remove",
+        "backup_tag": "test",
+        "entries": [
+            {
+                "path": str(target),
+                "before_sha256": "not-a-digest",
+                "after_sha256": None,
+                "backup_path": str(backup),
+            }
+        ],
+    }
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_text(json.dumps(payload), encoding="utf-8")
+    before = journal.read_bytes()
+    stdout = StringIO()
+
+    code = main(
+        ["recover", "--home", str(home), "--dry-run", "--json"],
+        stdout=stdout,
+    )
+
+    report = json.loads(stdout.getvalue())
+    assert code == 3
+    assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
+    assert journal.read_bytes() == before
+
+
 def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
