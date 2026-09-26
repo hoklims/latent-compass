@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
+import platform
 from io import StringIO
 from pathlib import Path
 from typing import cast
@@ -23,7 +23,7 @@ def _write_json(path: Path, payload: object) -> None:
 
 
 def _windows_observation_is_unknown(report: dict[str, object]) -> bool:
-    if sys.platform != "win32":
+    if platform.system() != "Windows":
         return False
     assert report["status"] == "OBSERVATION_UNKNOWN"
     assert report["event_count"] is None
