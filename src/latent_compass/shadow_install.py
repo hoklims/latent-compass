@@ -334,6 +334,9 @@ def _rollback_transaction(
     home: Path,
     snapshots: dict[Path, bytes | None],
     written: dict[Path, bytes | None],
+    *,
+    journal_path: Path | None = None,
+    journal_state: list[bytes] | None = None,
 ) -> list[Path]:
     unresolved: list[Path] = []
     for path, after_content in written.items():
@@ -348,6 +351,13 @@ def _rollback_transaction(
             if before_content is None:
                 if _path_entry_exists(path):
                     assert after_content is not None
+                    if journal_path is not None:
+                        if not journal_state:
+                            unresolved.append(path)
+                            continue
+                        journal_state[0] = _set_create_publication_state(
+                            home, journal_path, journal_state[0], path, "planned"
+                        )
                     _remove_confined(
                         home,
                         path,
@@ -748,6 +758,15 @@ def _recover_pending_transaction(
                 ]
         if not apply:
             return []
+        current_journal = _regular_file_bytes_or_none(journal_path, home=home)
+        if current_journal != expected_journal:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(journal_path),
+                    "detail": "pending transaction journal changed during recovery preflight",
+                }
+            ]
         for observation in observations:
             path = observation["path"]
             current = observation["current"]
@@ -1790,7 +1809,13 @@ def install_shadow_hooks(
             attempted_creates=attempted_creates,
         )
     except (OSError, ValueError) as exc:
-        unresolved = _rollback_transaction(home, snapshots, written)
+        unresolved = _rollback_transaction(
+            home,
+            snapshots,
+            written,
+            journal_path=journal_path,
+            journal_state=journal_state,
+        )
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
         )
@@ -2069,7 +2094,13 @@ def remove_shadow_hooks(
             attempted_creates=attempted_creates,
         )
     except (OSError, ValueError) as exc:
-        unresolved = _rollback_transaction(home, snapshots, written)
+        unresolved = _rollback_transaction(
+            home,
+            snapshots,
+            written,
+            journal_path=journal_path,
+            journal_state=journal_state,
+        )
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
         )
