@@ -321,7 +321,7 @@ def _prune_unconfirmed_creates(
     written: dict[Path, bytes | None],
 ) -> list[dict[str, str]]:
     try:
-        payload = json.loads(journal_content.decode("utf-8"))
+        payload = decode_host_json(journal_content.decode("utf-8"))
         if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
             raise ValueError("invalid transaction journal during collision cleanup")
         retained = [
@@ -409,6 +409,18 @@ def _rollback_transaction(
     unresolved: list[Path] = []
     for path, after_content in written.items():
         try:
+            before_content = snapshots[path]
+            if before_content is None and journal_path is not None:
+                if not journal_state:
+                    unresolved.append(path)
+                    continue
+                journal_state[0] = (
+                    _set_create_publication_state_lease(journal_lease, path, "revoked")
+                    if journal_lease is not None
+                    else _set_create_publication_state(
+                        home, journal_path, journal_state[0], path, "revoked"
+                    )
+                )
             target_lease = (
                 file_leases.get(_lexical_absolute(path)) if file_leases is not None else None
             )
@@ -422,21 +434,9 @@ def _rollback_transaction(
                     continue
                 unresolved.append(path)
                 continue
-            before_content = snapshots[path]
             if before_content is None:
                 if _path_entry_exists(path):
                     assert after_content is not None
-                    if journal_path is not None:
-                        if not journal_state:
-                            unresolved.append(path)
-                            continue
-                        journal_state[0] = (
-                            _set_create_publication_state_lease(journal_lease, path, "revoked")
-                            if journal_lease is not None
-                            else _set_create_publication_state(
-                                home, journal_path, journal_state[0], path, "revoked"
-                            )
-                        )
                     if target_lease is not None:
                         target_lease.remove()
                     else:
@@ -573,7 +573,7 @@ def _set_create_publication_state_lease(
     journal_content = lease.content
     if journal_content is None:
         raise ValueError("pending transaction journal is absent")
-    payload = json.loads(journal_content.decode("utf-8"))
+    payload = decode_host_json(journal_content.decode("utf-8"))
     assert isinstance(payload, dict)
     entries = cast(list[dict[str, object]], payload["entries"])
     for entry in entries:
@@ -772,7 +772,7 @@ def _begin_transaction_lease(
 def _decode_pending_transaction(
     home: Path, journal_raw: bytes
 ) -> list[tuple[Path, str | None, str | None, Path | None]]:
-    payload = json.loads(journal_raw.decode("utf-8"))
+    payload = decode_host_json(journal_raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("pending transaction journal must contain a JSON object")
     entries = payload.get("entries")
@@ -879,7 +879,7 @@ def _observe_recovery_targets(
 ) -> tuple[list[dict[str, str]], list[_RecoveryObservation]]:
     observations: list[_RecoveryObservation] = []
     _decode_pending_transaction(home, journal_raw)
-    payload = json.loads(journal_raw.decode("utf-8"))
+    payload = decode_host_json(journal_raw.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("pending transaction journal must contain a JSON object")
     publication_confirmed = {
@@ -1557,7 +1557,7 @@ def _ownership_from_manifest(
         content = raw
     if content is None:
         return None
-    payload = json.loads(content.decode("utf-8"))
+    payload = decode_host_json(content.decode("utf-8"))
     if (
         not isinstance(payload, dict)
         or set(payload) != {"schema_version", "host", "command", "wrapper_digest"}
@@ -1785,7 +1785,7 @@ def _merged_host_config(
         payload = _new_host_config(host=host, project=project)
         load_shadow_config(payload)
         return payload
-    current = load_shadow_config(json.loads(content.decode("utf-8"))).canonical_payload()
+    current = load_shadow_config(decode_host_json(content.decode("utf-8"))).canonical_payload()
     projects = cast(list[object], current["projects"])
     resolved_root = _path_identity(project_root, platform=platform)
     for existing_raw in projects:
@@ -2512,7 +2512,7 @@ def plan_remove_shadow_hooks(
                         }
                     )
             if config_before is not None:
-                config = load_shadow_config(json.loads(config_before.decode("utf-8")))
+                config = load_shadow_config(decode_host_json(config_before.decode("utf-8")))
                 next_config = _without_project(
                     config, project_root=project_root, project_alias=project_alias
                 )

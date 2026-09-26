@@ -266,7 +266,7 @@ def _refresh_source_cache(
     )
     try:
         if lease.content is not None:
-            previous = json.loads(lease.content.decode("utf-8"))
+            previous = decode_host_json(lease.content.decode("utf-8"))
             if not isinstance(previous, dict) or previous.get("owner") != "latent-compass-shadow":
                 raise ShadowHarnessViolation(
                     "source cache ownership is not established",
@@ -294,7 +294,7 @@ def _read_source_cache(store_root: Path, project: ShadowProject) -> dict[str, st
         )
     except FileNotFoundError:
         return None
-    payload = json.loads(raw.decode("utf-8"))
+    payload = decode_host_json(raw.decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("owner") != "latent-compass-shadow":
         return None
     digest = payload.get("source_declaration_digest")
@@ -510,7 +510,7 @@ def main(
                 "hook payload exceeded the shadow bound",
                 detail={"reason": "hook_payload_too_large", "max_bytes": MAX_HOOK_BYTES},
             )
-        payload = json.loads(raw)
+        payload = decode_host_json(raw)
         if not isinstance(payload, dict):
             raise ShadowHarnessViolation(
                 "hook payload must be a JSON object", detail={"reason": "not_an_object"}

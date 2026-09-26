@@ -1919,14 +1919,15 @@ def test_fresh_store_rollback_preserves_same_byte_peer_identity(
             except PermissionError:
                 substitution_blocked = True
 
-    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", substitute_then_fail)
-    result = install_shadow_hooks(
-        home=home,
-        runtime_python=Path(sys.executable),
-        project_root=project,
-        backup_tag="fresh-peer",
-        hosts=("codex",),
-    )
+    with monkeypatch.context() as fault:
+        fault.setattr(confined_io.ConfinedFileLease, "replace", substitute_then_fail)
+        result = install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="fresh-peer",
+            hosts=("codex",),
+        )
 
     conflicts = cast(list[dict[str, object]], result["conflicts"])
     assert conflicts[0]["code"] == "apply_failed"
@@ -1941,7 +1942,27 @@ def test_fresh_store_rollback_preserves_same_byte_peer_identity(
         assert wrapper.is_file()
         wrapper_stat = wrapper.stat()
         assert (wrapper_stat.st_dev, wrapper_stat.st_ino) == peer_identity
-    assert (home / ".latent-compass-shadow.pending.json").is_file()
+    journal = home / ".latent-compass-shadow.pending.json"
+    assert journal.is_file()
+    journal_payload = json.loads(journal.read_text(encoding="utf-8"))
+    wrapper_entry = next(
+        entry for entry in journal_payload["entries"] if entry["path"] == str(wrapper)
+    )
+    assert wrapper_entry["publication_state"] == "revoked"
+
+    recovery = recover_shadow_hooks(home=home)
+    recovery_conflicts = cast(list[dict[str, object]], recovery["conflicts"])
+    if os.name == "nt":
+        assert recovery_conflicts == []
+        assert not journal.exists()
+        assert peer.read_bytes() == _packaged_hook_text().encode("utf-8")
+    else:
+        assert recovery_conflicts[0]["code"] == "pending_transaction_conflict"
+        assert "unconfirmed" in str(recovery_conflicts[0]["detail"])
+        assert wrapper.is_file()
+        wrapper_stat = wrapper.stat()
+        assert (wrapper_stat.st_dev, wrapper_stat.st_ino) == peer_identity
+        assert journal.is_file()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native Windows publication semantics")
@@ -2243,6 +2264,67 @@ def test_duplicate_host_keys_cannot_hide_nonfinite_or_deep_values(
     deep_conflicts = cast(list[dict[str, object]], deep_refused["conflicts"])
     assert deep_conflicts[0]["code"] == "configuration_collision"
     assert "duplicate key" in str(deep_conflicts[0]["detail"])
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+@pytest.mark.parametrize("target_kind", ["ownership", "registration"])
+@pytest.mark.parametrize("hidden", ["NaN", "Infinity", "-Infinity", "deep"])
+def test_managed_registration_json_rejects_hidden_duplicate_values_everywhere(
+    tmp_path: Path, target_kind: str, hidden: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    installed = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="strict-json",
+        backup_tag="strict-initial",
+        hosts=("codex",),
+    )
+    assert installed["conflicts"] == []
+    store = home / ".codex" / "latent-compass-shadow"
+    target = store / ("ownership.json" if target_kind == "ownership" else "config.json")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    canonical = json.dumps(payload, separators=(",", ":"))
+    duplicate_key = "schema_version" if target_kind == "ownership" else "contract_version"
+    assert canonical.startswith(f'{{"{duplicate_key}":')
+    hidden_value = "[" * 65 + "0" + "]" * 65 if hidden == "deep" else hidden
+    poisoned = f'{{"{duplicate_key}":' + hidden_value + "," + canonical[1:]
+    target.write_text(poisoned, encoding="utf-8")
+    before = target.read_bytes()
+
+    reinstall = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="strict-json",
+        backup_tag="strict-reinstall",
+        hosts=("codex",),
+    )
+    removed = remove_shadow_hooks(
+        home=home,
+        project_root=project,
+        project_alias="strict-json",
+        backup_tag="strict-remove",
+        hosts=("codex",),
+    )
+    status = host_status(home=home, project_root=project, hosts=("codex",))
+
+    for report in (reinstall, removed):
+        conflicts = cast(list[dict[str, object]], report["conflicts"])
+        assert conflicts[0]["code"] == "configuration_collision"
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    expected_status = (
+        "HOST_CONFIGURATION_INVALID"
+        if target_kind == "ownership"
+        else "SHADOW_CONFIGURATION_INVALID"
+    )
+    assert snapshots[0]["status"] == expected_status
+    assert target.read_bytes() == before
     assert not (home / ".latent-compass-shadow.pending.json").exists()
 
 

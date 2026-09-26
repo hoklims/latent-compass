@@ -372,12 +372,7 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             if len(raw) > MAX_EVENT_BYTES:
                 invalid += 1
                 continue
-            record = json.loads(
-                raw.decode("utf-8"),
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    ValueError(f"non-finite JSON constant {value}")
-                ),
-            )
+            record = decode_host_json(raw.decode("utf-8"))
         except ContractViolation:
             return {"unsafe_event_store": True}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
