@@ -243,9 +243,11 @@ def confined_directory_exists(root: Path, target: Path, *, what: str) -> bool:
     absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
     absolute_target = plan_confined_target(absolute_root, target, what=what)
     relative = Path(os.path.relpath(absolute_target, absolute_root))
-    if _is_windows_runtime():
-        return _directory_exists_windows(absolute_root, relative, what=what)
-    return _directory_exists_posix(absolute_root, relative, what=what)
+    if sys.platform == "win32":
+        exists = _directory_exists_windows(absolute_root, relative, what=what)
+    else:
+        exists = _directory_exists_posix(absolute_root, relative, what=what)
+    return exists
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -609,13 +611,6 @@ def _directory_exists_posix(root: Path, relative: Path, *, what: str) -> bool:
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
-
-
-if sys.platform != "win32":
-
-    def _directory_exists_windows(root: Path, relative: Path, *, what: str) -> bool:
-        del root, relative, what
-        raise RuntimeError("Windows directory handles are unavailable on this platform")
 
 
 if sys.platform == "win32":
