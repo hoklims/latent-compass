@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -21,7 +22,11 @@ from latent_compass.confined_io import read_confined_file as confined_read
 from latent_compass.confined_io import replace_file as confined_replace
 from latent_compass.confined_io import write_new_file as confined_write
 from latent_compass.errors import ContractViolation
-from latent_compass.shadow_harness import host_command_home_is_eligible, load_shadow_config
+from latent_compass.shadow_harness import (
+    host_command_home_is_eligible,
+    load_shadow_config,
+    parse_host_hook_command,
+)
 from latent_compass.shadow_install import (
     _atomic_bytes,
     _atomic_text,
@@ -70,6 +75,16 @@ def _commands(path: Path, event: str) -> list[str]:
         if "latent-compass-shadow-hook.py" in hook.get("command", "")
         or "latent_compass.shadow_hook" in hook.get("command", "")
     ]
+
+
+def _bash_for_hook_command() -> Path:
+    if os.name == "nt":
+        git_bash = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git/bin/bash.exe"
+        assert git_bash.is_file(), "Git Bash is required for the Windows Claude hook witness"
+        return git_bash
+    bash = shutil.which("bash")
+    assert bash is not None, "Bash is required for the Claude hook witness"
+    return Path(bash)
 
 
 def _shadow_handlers(path: Path, event: str) -> list[dict[str, object]]:
@@ -2637,6 +2652,196 @@ def test_two_project_remove_valid_settings_preserves_then_removes_registration(
     assert states[host]["installed"] is True
     assert states[host]["configured"] is True
     assert final["conflicts"] == []
+
+
+def test_claude_shell_command_preserves_literal_special_paths_across_lifecycle(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / (
+        "home $LC_AUDIT_PROBE $(touch${IFS}$LC_AUDIT_MARKER) "
+        "`touch${IFS}$LC_AUDIT_BACKTICK` quote' space"
+    )
+    project = tmp_path / "project"
+    substitution_marker = tmp_path / "lc-audit-substitution-marker"
+    backtick_marker = tmp_path / "lc-audit-backtick-marker"
+    project.mkdir()
+    settings = home / ".claude" / "settings.json"
+    _write(settings, {"hooks": {"PreToolUse": []}})
+
+    installed = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="literal-shell-path",
+        backup_tag="literal-shell-install",
+        hosts=("claude",),
+    )
+    store = home / ".claude" / "latent-compass-shadow"
+    wrapper = store / "runtime" / "latent-compass-shadow-hook.py"
+    ownership = json.loads((store / "ownership.json").read_text(encoding="utf-8"))
+    command = str(ownership["command"])
+    parsed = parse_host_hook_command(command, "claude")
+    assert parsed is not None
+    assert parsed == (Path(sys.executable), wrapper, home)
+    shell = _bash_for_hook_command()
+    completed = subprocess.run(  # noqa: S603 - exact emitted shell form under test
+        [
+            str(shell),
+            "-c",
+            f"set -- {command}; printf '%s\\n' \"$@\"",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "LC_AUDIT_PROBE": "EXPANDED",
+            "LC_AUDIT_MARKER": substitution_marker.name,
+            "LC_AUDIT_BACKTICK": backtick_marker.name,
+        },
+        check=False,
+        timeout=10,
+    )
+    arguments = completed.stdout.splitlines()
+    status = host_status(home=home, project_root=project, hosts=("claude",))
+    removed = remove_shadow_hooks(
+        home=home,
+        project_root=project,
+        project_alias="literal-shell-path",
+        backup_tag="literal-shell-remove",
+        hosts=("claude",),
+    )
+
+    assert installed["conflicts"] == []
+    assert completed.returncode == 0, completed.stderr
+    assert arguments == [
+        Path(sys.executable).as_posix(),
+        wrapper.as_posix(),
+        "--host",
+        "claude",
+        "--home",
+        home.as_posix(),
+    ]
+    states = cast(dict[str, dict[str, object]], status["states"])
+    assert states["claude"]["installed"] is True
+    assert states["claude"]["configured"] is True
+    assert not substitution_marker.exists()
+    assert not backtick_marker.exists()
+    assert removed["conflicts"] == []
+
+
+@pytest.mark.parametrize("selected_host", ["codex", "claude"])
+@pytest.mark.parametrize("all_hosts", [False, True])
+def test_install_refuses_registration_bound_to_other_host_before_any_write(
+    tmp_path: Path, selected_host: str, all_hosts: bool
+) -> None:
+    host = cast(Host, selected_host)
+    other: Host = "claude" if host == "codex" else "codex"
+    hosts: tuple[Host, ...] = ("codex", "claude") if all_hosts else (host,)
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    existing = tmp_path / "existing"
+    project.mkdir()
+    existing.mkdir()
+    settings_paths: list[Path] = []
+    for configured_host in hosts:
+        settings = (
+            home
+            / f".{configured_host}"
+            / ("hooks.json" if configured_host == "codex" else "settings.json")
+        )
+        _write(settings, {"hooks": {"PreToolUse": []}})
+        settings_paths.append(settings)
+    config = home / f".{host}" / "latent-compass-shadow" / "config.json"
+    wrong_config = _merged_host_config(
+        path=config,
+        host=other,
+        project_root=existing,
+        project_alias="existing-other-host",
+        raw=None,
+    )
+    _write(config, wrong_config)
+    settings_before = {path: path.read_bytes() for path in settings_paths}
+    config_before = config.read_bytes()
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="new-selected-host",
+        backup_tag="wrong-host-install",
+        hosts=hosts,
+    )
+    status = host_status(home=home, project_root=project, hosts=(host,))
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert any(
+        item["code"] == "configuration_collision"
+        and "another agent family" in str(item.get("detail"))
+        for item in conflicts
+    )
+    assert config.read_bytes() == config_before
+    assert all(path.read_bytes() == settings_before[path] for path in settings_paths)
+    for configured_host in hosts:
+        store = home / f".{configured_host}" / "latent-compass-shadow"
+        if configured_host != host:
+            assert not (store / "config.json").exists()
+        assert not (store / "ownership.json").exists()
+        assert not (store / "runtime" / "latent-compass-shadow-hook.py").exists()
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    assert snapshots[0]["status"] == "SHADOW_CONFIGURATION_INVALID"
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+@pytest.mark.parametrize("selected_host", ["codex", "claude"])
+def test_remove_refuses_registration_bound_to_other_host_before_any_write(
+    tmp_path: Path, selected_host: str
+) -> None:
+    host = cast(Host, selected_host)
+    other = "claude" if host == "codex" else "codex"
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
+    _write(settings, {"hooks": {"PreToolUse": []}})
+    installed = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="wrong-host-remove",
+        backup_tag="wrong-host-setup",
+        hosts=(host,),
+    )
+    assert installed["conflicts"] == []
+    store = home / f".{host}" / "latent-compass-shadow"
+    config = store / "config.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["agent_family"] = other
+    config.write_bytes(_json_bytes(payload))
+    tracked = (
+        settings,
+        config,
+        store / "ownership.json",
+        store / "runtime" / "latent-compass-shadow-hook.py",
+    )
+    before = {path: path.read_bytes() for path in tracked}
+
+    result = remove_shadow_hooks(
+        home=home,
+        project_root=project,
+        project_alias="wrong-host-remove",
+        backup_tag="wrong-host-remove",
+        hosts=(host,),
+    )
+    status = host_status(home=home, project_root=project, hosts=(host,))
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "configuration_collision"
+    assert "another agent family" in str(conflicts[0]["detail"])
+    assert all(path.read_bytes() == before[path] for path in tracked)
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    assert snapshots[0]["status"] == "SHADOW_CONFIGURATION_INVALID"
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
 
 
 def test_installed_relative_custom_command_uses_selected_home_from_other_cwd(

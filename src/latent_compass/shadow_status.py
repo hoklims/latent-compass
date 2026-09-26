@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import re
-import shlex
 import stat
 import sys
 from collections import Counter
@@ -29,6 +28,7 @@ from latent_compass.shadow_harness import (
     decode_host_json,
     host_command_home_is_eligible,
     load_shadow_config,
+    parse_host_hook_command,
     validate_host_settings,
 )
 
@@ -87,33 +87,6 @@ def _lexical_absolute(path: Path) -> Path:
     return Path(os.path.abspath(path))  # noqa: PTH100 - must not follow links
 
 
-def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path, Path | None] | None:
-    if host == "codex":
-        match = re.fullmatch(
-            r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
-            r"(?: --home '((?:[^']|'')+)')?$",
-            command,
-        )
-        if match is not None:
-            runtime = Path(match.group(1).replace("''", "'"))
-            wrapper = Path(match.group(2).replace("''", "'"))
-            selected_home = (
-                Path(match.group(3).replace("''", "'")) if match.group(3) is not None else None
-            )
-            return runtime, wrapper, selected_home
-    try:
-        arguments = shlex.split(command)
-    except ValueError:
-        return None
-    if len(arguments) not in {4, 6} or arguments[2:4] != ["--host", host]:
-        return None
-    if len(arguments) == 6 and arguments[4] != "--home":
-        return None
-    runtime, wrapper = Path(arguments[0]), Path(arguments[1])
-    selected_home = Path(arguments[5]) if len(arguments) == 6 else None
-    return runtime, wrapper, selected_home
-
-
 def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, bool]:
     path = store / _OWNERSHIP_NAME
     if not path.is_file():
@@ -141,7 +114,7 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
         and isinstance(payload.get("command"), str)
         and isinstance(payload.get("wrapper_digest"), str)
         and re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is not None
-        and (parsed := _parse_hook_command(str(payload.get("command")), host)) is not None
+        and (parsed := parse_host_hook_command(str(payload.get("command")), host)) is not None
         and host_command_home_is_eligible(parsed[2], store.parents[1])
     )
     if not valid:
@@ -282,7 +255,7 @@ def _hook_state(
                     "runtime_present": None,
                     "wrapper_present": None,
                 }
-            parsed = _parse_hook_command(owned_command, host)
+            parsed = parse_host_hook_command(owned_command, host)
             assert parsed is not None
             runtime, wrapper, _selected_home = parsed
             events.add(event)
@@ -446,7 +419,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         _owned_command(store, host) if paths_safe else (None, None, False)
     )
     if paths_safe and owned_command is not None:
-        parsed = _parse_hook_command(owned_command, host)
+        parsed = parse_host_hook_command(owned_command, host)
         if parsed is None:
             paths_safe = False
         else:

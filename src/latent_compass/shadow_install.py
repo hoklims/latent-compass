@@ -34,6 +34,7 @@ from latent_compass.shadow_harness import (
     decode_host_json,
     host_command_home_is_eligible,
     load_shadow_config,
+    parse_host_hook_command,
     validate_host_json_depth,
     validate_host_settings,
 )
@@ -1403,9 +1404,6 @@ def _command(
         runtime = str(runtime_python).replace("'", "''")
         wrapper = str(hook_script).replace("'", "''")
         return f"& '{runtime}' '{wrapper}' --host codex{home_arguments}"
-    if platform == "nt":
-        suffix = "" if home is None else f' --home "{home.as_posix()}"'
-        return f'"{runtime_python.as_posix()}" "{hook_script.as_posix()}" --host {host}{suffix}'
     suffix = "" if home is None else f" --home {shlex.quote(home.as_posix())}"
     return (
         f"{shlex.quote(runtime_python.as_posix())} "
@@ -1443,7 +1441,7 @@ def _shadow_group(*, event: str, host: Host, command: str) -> dict[str, object]:
 def _owned_command(command: object, *, host: Host, wrapper: Path) -> bool:
     if not isinstance(command, str):
         return False
-    parsed = _parse_owned_command(command, host)
+    parsed = parse_host_hook_command(command, host)
     if parsed is None:
         return False
     _, candidate_wrapper, _selected_home = parsed
@@ -1474,41 +1472,10 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
     return False
 
 
-def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path, Path | None] | None:
-    if host == "codex":
-        match = re.fullmatch(
-            r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
-            r"(?: --home '((?:[^']|'')+)')?$",
-            command,
-        )
-        if match is not None:
-            selected_home = (
-                Path(match.group(3).replace("''", "'")) if match.group(3) is not None else None
-            )
-            return (
-                Path(match.group(1).replace("''", "'")),
-                Path(match.group(2).replace("''", "'")),
-                selected_home,
-            )
-    try:
-        arguments = shlex.split(command)
-    except ValueError:
-        return None
-    if len(arguments) not in {4, 6} or arguments[2:4] != ["--host", host]:
-        return None
-    if len(arguments) == 6 and arguments[4] != "--home":
-        return None
-    return (
-        Path(arguments[0]),
-        Path(arguments[1]),
-        Path(arguments[5]) if len(arguments) == 6 else None,
-    )
-
-
 def _owned_command_bound_to_home(command: str, host: Host, home: Path | None) -> bool:
     if home is None:
         return False
-    parsed = _parse_owned_command(command, host)
+    parsed = parse_host_hook_command(command, host)
     if parsed is None:
         return False
     return host_command_home_is_eligible(parsed[2], home)
@@ -1785,6 +1752,13 @@ def _new_host_config(*, host: Host, project: dict[str, object]) -> dict[str, obj
     }
 
 
+def _load_host_config_for_host(content: bytes, host: Host) -> ShadowHarnessConfig:
+    config = load_shadow_config(decode_host_json(content.decode("utf-8")))
+    if config.agent_family.value != host:
+        raise ValueError("host registration belongs to another agent family")
+    return config
+
+
 def _merged_host_config(
     *,
     path: Path,
@@ -1804,7 +1778,7 @@ def _merged_host_config(
         payload = _new_host_config(host=host, project=project)
         load_shadow_config(payload)
         return payload
-    current = load_shadow_config(decode_host_json(content.decode("utf-8"))).canonical_payload()
+    current = _load_host_config_for_host(content, host).canonical_payload()
     projects = cast(list[object], current["projects"])
     resolved_root = _path_identity(project_root, platform=platform)
     for existing_raw in projects:
@@ -2107,7 +2081,7 @@ def plan_install_shadow_hooks(
             owned_command = owned[0] if owned is not None else None
             owned_digest = owned[1] if owned is not None else None
             if owned_command is not None:
-                parsed_owned = _parse_owned_command(owned_command, host)
+                parsed_owned = parse_host_hook_command(owned_command, host)
                 if parsed_owned is None:
                     raise ValueError("invalid Latent Compass hook ownership command")
                 previous_wrapper = _assert_safe_path_under(config_path.parent, parsed_owned[1])
@@ -2504,7 +2478,7 @@ def plan_remove_shadow_hooks(
             owned_command = owned[0] if owned is not None else None
             owned_digest = owned[1] if owned is not None else None
             parsed_owned = (
-                _parse_owned_command(owned_command, host) if owned_command is not None else None
+                parse_host_hook_command(owned_command, host) if owned_command is not None else None
             )
             owned_wrapper = parsed_owned[1] if parsed_owned is not None else None
             if owned_wrapper is not None:
@@ -2533,7 +2507,7 @@ def plan_remove_shadow_hooks(
                         }
                     )
             if config_before is not None:
-                config = load_shadow_config(decode_host_json(config_before.decode("utf-8")))
+                config = _load_host_config_for_host(config_before, host)
                 next_config = _without_project(
                     config, project_root=project_root, project_alias=project_alias
                 )
