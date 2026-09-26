@@ -26,9 +26,9 @@ from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import (
     DEFAULT_CONFIG_NAME,
     ShadowProject,
+    decode_host_json,
     host_command_home_is_eligible,
     load_shadow_config,
-    validate_host_json_depth,
 )
 
 Host = Literal["codex", "claude"]
@@ -121,8 +121,7 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
         raw = read_confined_file(
             store, path, max_bytes=MAX_EVENT_BYTES, what="shadow ownership manifest"
         )
-        payload = json.loads(raw.decode("utf-8"))
-        validate_host_json_depth(payload)
+        payload = decode_host_json(raw.decode("utf-8"))
     except (
         OSError,
         ContractViolation,
@@ -144,11 +143,10 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
         and (parsed := _parse_hook_command(str(payload.get("command")), host)) is not None
         and host_command_home_is_eligible(parsed[2], store.parents[1])
     )
-    return (
-        (str(payload["command"]), str(payload["wrapper_digest"]), True)
-        if valid
-        else (None, None, False)
-    )
+    if not valid:
+        return None, None, False
+    assert isinstance(payload, dict)
+    return str(payload["command"]), str(payload["wrapper_digest"]), True
 
 
 def _expected_group(event: str, host: Host, command: str) -> dict[str, object]:
@@ -247,8 +245,7 @@ def _hook_state(
         return {"configuration_present": False, "events": [], "runtime_present": None}
     try:
         raw = read_confined_file(home, path, max_bytes=MAX_EVENT_BYTES, what="host hook settings")
-        payload = json.loads(raw.decode("utf-8"))
-        validate_host_json_depth(payload)
+        payload = decode_host_json(raw.decode("utf-8"))
     except (
         OSError,
         ContractViolation,
@@ -515,7 +512,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
             max_bytes=MAX_EVENT_BYTES,
             what="shadow host configuration",
         )
-        config = load_shadow_config(json.loads(raw_config.decode("utf-8")))
+        config = load_shadow_config(decode_host_json(raw_config.decode("utf-8")))
     except (
         OSError,
         ContractViolation,

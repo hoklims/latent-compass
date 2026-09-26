@@ -31,11 +31,12 @@ from latent_compass.confined_io import (
 from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import (
     ShadowHarnessConfig,
+    decode_host_json,
     host_command_home_is_eligible,
     load_shadow_config,
     validate_host_json_depth,
 )
-from latent_compass.shadow_status import Host, inspect_hosts, render_text
+from latent_compass.shadow_status import MAX_EVENT_BYTES, Host, inspect_hosts, render_text
 
 __all__ = [
     "configure_host_parser",
@@ -137,7 +138,16 @@ def _json_bytes(payload: object) -> bytes:
     )
 
 
+def _bounded_host_json_bytes(payload: object) -> bytes:
+    content = _json_bytes(payload)
+    if len(content) > MAX_EVENT_BYTES:
+        raise ValueError(f"managed host file exceeds the supported bound {MAX_EVENT_BYTES}")
+    return content
+
+
 def _file_operation(path: Path, before: bytes | None, after: bytes | None) -> _FileOperation:
+    if after is not None and len(after) > MAX_EVENT_BYTES:
+        raise ValueError(f"managed host file exceeds the supported bound {MAX_EVENT_BYTES}")
     action = (
         "unchanged"
         if before == after
@@ -171,8 +181,7 @@ def _read_json(
         content = raw
     if content is None:
         raise FileNotFoundError(path)
-    payload = json.loads(content.decode("utf-8"))
-    validate_host_json_depth(payload)
+    payload = decode_host_json(content.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"{path.name} must contain a JSON object")
     hooks = payload.get("hooks")
@@ -222,6 +231,10 @@ def _atomic_bytes(
     home: Path | None = None,
     expected: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
 ) -> None:
+    if len(content) > _MAX_TRANSACTION_FILE_BYTES:
+        raise ValueError(
+            f"managed host file exceeds the transaction bound {_MAX_TRANSACTION_FILE_BYTES}"
+        )
     root = home if home is not None else path.parent
     try:
         if isinstance(expected, _ExpectedUnset):
@@ -2138,7 +2151,7 @@ def plan_install_shadow_hooks(
                 target_wrapper=installed_hook,
                 raw=settings_before,
             )
-            settings_bytes = _json_bytes(settings)
+            settings_bytes = _bounded_host_json_bytes(settings)
         except (
             OSError,
             UnicodeDecodeError,
@@ -2164,7 +2177,7 @@ def plan_install_shadow_hooks(
                 project_alias=project_alias,
                 raw=config_before,
             )
-            config_bytes = _json_bytes(config)
+            config_bytes = _bounded_host_json_bytes(config)
         except (
             OSError,
             UnicodeDecodeError,
@@ -2505,7 +2518,9 @@ def plan_remove_shadow_hooks(
                 )
             else:
                 next_config = None
-            next_config_bytes = None if next_config is None else _json_bytes(next_config)
+            next_config_bytes = (
+                None if next_config is None else _bounded_host_json_bytes(next_config)
+            )
         except (
             OSError,
             UnicodeDecodeError,
@@ -2538,7 +2553,7 @@ def plan_remove_shadow_hooks(
                 if settings_before is not None and remove_hooks
                 else None
             )
-            settings_bytes = None if settings is None else _json_bytes(settings)
+            settings_bytes = None if settings is None else _bounded_host_json_bytes(settings)
         except (
             OSError,
             UnicodeDecodeError,

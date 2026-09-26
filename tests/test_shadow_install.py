@@ -2105,7 +2105,7 @@ def test_nonfinite_host_json_is_refused_in_parse_serialize_and_status(
     )
     conflicts = cast(list[dict[str, object]], refused["conflicts"])
     assert conflicts[0]["code"] == "configuration_collision"
-    assert "numbers must be finite" in str(conflicts[0]["detail"])
+    assert f"constant {literal} is not permitted" in str(conflicts[0]["detail"])
     assert not (home / ".latent-compass-shadow.pending.json").exists()
     status = host_status(home=home, project_root=project, hosts=("codex",))
     snapshots = cast(list[dict[str, object]], status["hosts"])
@@ -2135,6 +2135,115 @@ def test_finite_host_json_number_remains_supported(tmp_path: Path) -> None:
     )
 
     assert accepted["conflicts"] == []
+
+
+def test_serialized_host_growth_is_bounded_before_journal_with_adjacent_control(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def host_payload(width: int) -> tuple[bytes, bytes]:
+        wide = ",".join("0" for _ in range(width))
+        nested = "[" * 62 + "[" + wide + "]" + "]" * 62
+        compact = ('{"hooks":{"PreToolUse":[]},"foreign":' + nested + "}").encode()
+        payload = json.loads(compact.decode())
+        return compact, _json_bytes(payload)
+
+    oversized_input, oversized_after = host_payload(9_000)
+    assert len(oversized_input) < 1_048_576
+    assert 1_048_576 < len(oversized_after) < 8 * 1_048_576
+    home = tmp_path / "home"
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_bytes(oversized_input)
+    before = hooks.read_bytes()
+
+    preview = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="growth",
+    )
+    applied = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="growth",
+        hosts=("codex",),
+    )
+
+    for report in (preview, applied):
+        conflicts = cast(list[dict[str, object]], report["conflicts"])
+        assert conflicts[0]["code"] == "configuration_collision"
+        assert "supported bound" in str(conflicts[0]["detail"])
+    assert hooks.read_bytes() == before
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+    control_input, control_after = host_payload(5_000)
+    assert len(control_after) < 1_048_576
+    control_home = tmp_path / "control-home"
+    control_hooks = control_home / ".codex" / "hooks.json"
+    control_hooks.parent.mkdir(parents=True)
+    control_hooks.write_bytes(control_input)
+    control = install_shadow_hooks(
+        home=control_home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="growth-control",
+        hosts=("codex",),
+    )
+    assert control["conflicts"] == []
+    status = host_status(home=control_home, project_root=project, hosts=("codex",))
+    states = cast(dict[str, dict[str, object]], status["states"])
+    assert states["codex"]["configured"] is True
+    recovery = plan_recover_shadow_hooks(home=control_home)
+    assert recovery["conflicts"] == []
+    assert recovery["recovery"] == {"pending": False, "files": []}
+
+
+@pytest.mark.parametrize("hidden", ["NaN", "Infinity", "-Infinity"])
+def test_duplicate_host_keys_cannot_hide_nonfinite_or_deep_values(
+    tmp_path: Path, hidden: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    raw = '{"hooks":{"PreToolUse":[]},"hidden":' + hidden + ',"hidden":0}'
+    hooks.write_text(raw, encoding="utf-8")
+
+    refused = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="duplicate",
+        hosts=("codex",),
+    )
+    conflicts = cast(list[dict[str, object]], refused["conflicts"])
+    assert conflicts[0]["code"] == "configuration_collision"
+    assert "not permitted" in str(conflicts[0]["detail"])
+    status = host_status(home=home, project_root=project, hosts=("codex",))
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    assert snapshots[0]["status"] == "HOST_CONFIGURATION_INVALID"
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+    deep = "[" * 65 + "0" + "]" * 65
+    deep_raw = '{"hooks":{"PreToolUse":[]},"hidden":' + deep + ',"hidden":0}'
+    hooks.write_text(deep_raw, encoding="utf-8")
+    deep_refused = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="duplicate-deep",
+        hosts=("codex",),
+    )
+    deep_conflicts = cast(list[dict[str, object]], deep_refused["conflicts"])
+    assert deep_conflicts[0]["code"] == "configuration_collision"
+    assert "duplicate key" in str(deep_conflicts[0]["detail"])
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
 
 
 def test_install_revalidates_custom_hook_script_dependency_before_journal(

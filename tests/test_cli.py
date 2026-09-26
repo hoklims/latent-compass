@@ -442,6 +442,31 @@ def test_confined_lease_detects_file_created_after_absent_observation(tmp_path: 
         lease.close()
 
 
+def test_confined_lease_rejects_oversize_before_publication(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    lease = lease_confined_file(
+        root,
+        target,
+        max_bytes=10,
+        what="test journal",
+        allow_absent=True,
+    )
+    try:
+        with pytest.raises(ContractViolation, match="configured byte limit") as exc_info:
+            lease.replace(b"x" * 11)
+        assert exc_info.value.detail == {
+            "what": "test journal",
+            "path": str(target),
+            "reason": "too_large",
+            "max_bytes": 10,
+        }
+        assert not target.exists()
+    finally:
+        lease.close()
+
+
 def test_confined_lease_detects_same_byte_identity_replacement(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

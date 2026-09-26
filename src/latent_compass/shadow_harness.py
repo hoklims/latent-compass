@@ -44,6 +44,7 @@ __all__ = [
     "DEFAULT_CONFIG_NAME",
     "SHADOW_HARNESS_CONTRACT_VERSION",
     "ShadowHarnessConfig",
+    "decode_host_json",
     "default_store_root",
     "host_command_home_is_eligible",
     "load_shadow_config",
@@ -146,6 +147,29 @@ def validate_host_json_depth(payload: object) -> None:
             pending.extend((item, depth + 1) for item in value)
         elif isinstance(value, float) and not math.isfinite(value):
             raise ValueError("host JSON numbers must be finite")
+
+
+def decode_host_json(raw: str) -> object:
+    """Decode host JSON without accepting hidden constants or duplicate keys."""
+
+    def reject_constant(token: str) -> object:
+        raise ValueError(f"host JSON constant {token} is not permitted")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"host JSON contains duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    payload = json.loads(
+        raw,
+        parse_constant=reject_constant,
+        object_pairs_hook=unique_object,
+    )
+    validate_host_json_depth(payload)
+    return payload
 
 
 def host_command_home_is_eligible(selected_home: Path | None, configured_home: Path) -> bool:
@@ -493,7 +517,7 @@ def main(
             )
         config_path = store_root / DEFAULT_CONFIG_NAME
         config = load_shadow_config(
-            json.loads(
+            decode_host_json(
                 read_confined_file(
                     store_root,
                     config_path,

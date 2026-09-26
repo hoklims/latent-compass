@@ -101,6 +101,16 @@ class ConfinedFileLease:
 
     def replace(self, data: bytes) -> None:
         self._ensure_open()
+        if len(data) > self.max_bytes:
+            raise ContractViolation(
+                f"{self.what} exceeded the configured byte limit",
+                detail={
+                    "what": self.what,
+                    "path": str(self.path),
+                    "reason": "too_large",
+                    "max_bytes": self.max_bytes,
+                },
+            )
         self.assert_current()
         if self._backend == "windows":
             _lease_replace_windows(self, data)
