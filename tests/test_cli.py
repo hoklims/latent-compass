@@ -521,6 +521,40 @@ def test_confined_writer_cleanup_failure_cannot_leave_payload_temp(
     assert any("FILE_DELETE_ON_CLOSE remains active" in note for note in refusal.value.__notes__)
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows post-publication durability")
+def test_windows_post_rename_flush_failure_preserves_published_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    destination = root / "managed.json"
+    destination.write_bytes(b"before")
+    kernel32 = getattr(confined_io, "_kernel32")  # noqa: B009 - absent on POSIX type paths
+    real_flush = kernel32.FlushFileBuffers
+    flush_calls = 0
+    disposed = False
+
+    def fail_second_flush(handle: int) -> int:
+        nonlocal flush_calls
+        flush_calls += 1
+        return 0 if flush_calls == 2 else real_flush(handle)
+
+    def record_dispose(_handle: int) -> None:
+        nonlocal disposed
+        disposed = True
+
+    monkeypatch.setattr(kernel32, "FlushFileBuffers", fail_second_flush)
+    monkeypatch.setattr(confined_io, "_dispose_windows_file", record_dispose)
+
+    with pytest.raises(OSError, match=r"managed\.json"):
+        replace_file(root, destination, b"after", what="managed test target")
+
+    assert disposed is False
+    assert destination.read_bytes() == b"after"
+
+
 def test_confined_writer_preserves_one_concurrent_winner(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

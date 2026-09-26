@@ -346,6 +346,38 @@ def test_missing_wrapper_or_host_suffix_cannot_look_active(tmp_path: Path) -> No
     assert suffix["status"] == "HOOKS_MISSING"
 
 
+def test_missing_runtime_interpreter_is_not_reported_installed(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _install_fixture(home, project)
+    runtime = home / "runtime" / "python.exe"
+    runtime.unlink()
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "RUNTIME_MISSING"
+    assert report["runtime_present"] is False
+
+
+@pytest.mark.parametrize("schema_version", [True, 2.0])
+def test_status_rejects_non_integer_ownership_schema(
+    tmp_path: Path, schema_version: object
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    ownership_path = store / "ownership.json"
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+    ownership["schema_version"] = schema_version
+    _write_json(ownership_path, ownership)
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+
+
 @pytest.mark.parametrize("host", ["codex", "claude"])
 def test_status_rejects_owned_custom_wrapper_outside_profile(tmp_path: Path, host: str) -> None:
     home = tmp_path / "home"

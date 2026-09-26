@@ -1121,6 +1121,7 @@ if sys.platform == "win32":
     ) -> None:
         handles: list[int] = []
         temporary: int | None = None
+        published = False
         final_path = root / relative
         try:
             anchor = Path(root.anchor)
@@ -1166,13 +1167,14 @@ if sys.platform == "win32":
                         f"{what} already exists; refusing to overwrite it",
                         detail={"what": what, "path": str(final_path)},
                     ) from exc
+            published = True
             if not _kernel32.FlushFileBuffers(temporary):
                 error = ctypes.get_last_error()
                 raise OSError(error, ctypes.FormatError(error), str(final_path))
             _kernel32.CloseHandle(temporary)
             temporary = None
         except BaseException as primary:
-            if temporary is not None:
+            if temporary is not None and not published:
                 try:
                     _dispose_windows_file(temporary)
                 except BaseException as cleanup_error:

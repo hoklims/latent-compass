@@ -8,6 +8,7 @@ from typing import Literal
 import pytest
 
 from latent_compass.canonical import seal
+from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import (
     DEFAULT_CONFIG_NAME,
     ShadowHarnessConfig,
@@ -263,4 +264,110 @@ def test_hook_entrypoint_ignores_projects_not_in_its_allowlist(
     )
 
     assert code == 0
+    assert not (store / "events").exists()
+
+
+def test_collector_refuses_linked_source_cache_parent_without_outside_read_or_write(
+    repository: Path, tmp_path: Path
+) -> None:
+    store = tmp_path / "store"
+    store.mkdir()
+    outside = tmp_path / "outside-source"
+    outside.mkdir()
+    outside_cache = outside / "latent-compass-shadow.json"
+    outside_cache.write_text(
+        json.dumps(
+            {
+                "source_declaration_digest": seal("test.shadow.source.v1", {"outside": True}),
+                "source_observed_at": NOW,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (store / "source").symlink_to(outside, target_is_directory=True)
+    before = outside_cache.read_bytes()
+
+    with pytest.raises(ContractViolation):
+        process_hook_event(
+            _payload(repository),
+            host="codex",
+            config=_config(repository),
+            store_root=store,
+            now=NOW,
+        )
+
+    assert outside_cache.read_bytes() == before
+    assert not (store / "events").exists()
+
+
+def test_collector_refuses_linked_events_parent_without_outside_write(
+    repository: Path, tmp_path: Path
+) -> None:
+    store = tmp_path / "store"
+    config = _config(repository)
+    _prime_source(repository, host="codex", config=config, store=store, marker="one")
+    outside = tmp_path / "outside-events"
+    outside.mkdir()
+    (store / "events").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ContractViolation):
+        process_hook_event(
+            _payload(repository),
+            host="codex",
+            config=config,
+            store_root=store,
+            now=NOW,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_hook_entrypoint_stays_fail_open_when_event_store_is_linked(
+    repository: Path, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = default_store_root("codex", home)
+    config = _config(repository)
+    store.mkdir(parents=True)
+    (store / DEFAULT_CONFIG_NAME).write_text(
+        json.dumps(config.canonical_payload()), encoding="utf-8"
+    )
+    _prime_source(repository, host="codex", config=config, store=store, marker="one")
+    outside = tmp_path / "outside-events"
+    outside.mkdir()
+    (store / "events").symlink_to(outside, target_is_directory=True)
+    stderr = StringIO()
+
+    code = main(
+        ["--host", "codex", "--home", str(home), "--now", NOW],
+        stdin=StringIO(json.dumps(_payload(repository))),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "fail-open" in stderr.getvalue()
+    assert list(outside.iterdir()) == []
+
+
+def test_hook_entrypoint_fails_open_for_linked_config_leaf(
+    repository: Path, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = default_store_root("codex", home)
+    store.mkdir(parents=True)
+    outside = tmp_path / "outside-config.json"
+    outside.write_text(json.dumps(_config(repository).canonical_payload()), encoding="utf-8")
+    (store / DEFAULT_CONFIG_NAME).symlink_to(outside)
+    stderr = StringIO()
+
+    code = main(
+        ["--host", "codex", "--home", str(home), "--now", NOW],
+        stdin=StringIO(json.dumps(_payload(repository))),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "fail-open" in stderr.getvalue()
     assert not (store / "events").exists()

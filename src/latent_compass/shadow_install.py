@@ -445,7 +445,13 @@ def _decode_pending_transaction(
     if not isinstance(payload, dict):
         raise ValueError("pending transaction journal must contain a JSON object")
     entries = payload.get("entries")
-    if payload.get("schema_version") != 1 or not isinstance(entries, list) or not entries:
+    if (
+        set(payload) != {"schema_version", "operation", "backup_tag", "entries"}
+        or type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != 1
+        or not isinstance(entries, list)
+        or not entries
+    ):
         raise ValueError("invalid pending transaction journal")
     operation = payload.get("operation")
     if operation not in {"install", "remove"}:
@@ -956,6 +962,7 @@ def _ownership_from_manifest(
     if (
         not isinstance(payload, dict)
         or set(payload) != {"schema_version", "host", "command", "wrapper_digest"}
+        or type(payload.get("schema_version")) is not int
         or payload.get("schema_version") != 2
         or payload.get("host") != host
         or not isinstance(payload.get("command"), str)
@@ -1356,9 +1363,21 @@ def plan_install_shadow_hooks(
                 if hook_script is not None
                 else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
             )
+            if hook_script is not None:
+                try:
+                    _assert_safe_path_under(config_path.parent, installed_hook)
+                except (OSError, ValueError) as exc:
+                    conflicts.append(
+                        {
+                            "code": "hook_script_location_unsupported",
+                            "path": str(installed_hook),
+                            "detail": str(exc),
+                        }
+                    )
+                    continue
             wrapper_before = _regular_file_bytes_or_none(
                 installed_hook,
-                home=home if hook_script is None else None,
+                home=home if hook_script is None else config_path.parent,
             )
             if hook_script is not None and not any(
                 item["path"] == installed_hook for item in observations
@@ -1366,7 +1385,7 @@ def plan_install_shadow_hooks(
                 observations.append(
                     {
                         "path": installed_hook,
-                        "root": installed_hook.parent,
+                        "root": config_path.parent,
                         "content": wrapper_before,
                     }
                 )

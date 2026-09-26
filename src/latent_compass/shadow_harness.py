@@ -21,6 +21,7 @@ from typing import Final, Literal, TextIO
 from pydantic import Field, model_validator
 
 from latent_compass.canonical import canonical_text, seal
+from latent_compass.confined_io import read_confined_file, replace_file, write_new_file
 from latent_compass.contracts import Identifier, StrictModel, validate_contract
 from latent_compass.episode import AgentFamily
 from latent_compass.errors import ContractViolation
@@ -179,18 +180,27 @@ def _refresh_source_cache(
         "source_observed_at": observed_at,
     }
     destination = _source_cache_path(store_root, project)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-    temporary.write_text(canonical_text(cache) + "\n", encoding="utf-8", newline="\n")
-    temporary.replace(destination)
+    replace_file(
+        store_root,
+        destination,
+        (canonical_text(cache) + "\n").encode("utf-8"),
+        what="shadow source cache",
+    )
     return cache
 
 
 def _read_source_cache(store_root: Path, project: ShadowProject) -> dict[str, str] | None:
     path = _source_cache_path(store_root, project)
-    if not path.is_file():
+    try:
+        raw = read_confined_file(
+            store_root,
+            path,
+            max_bytes=MAX_HOOK_BYTES,
+            what="shadow source cache",
+        )
+    except FileNotFoundError:
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict):
         return None
     digest = payload.get("source_declaration_digest")
@@ -298,11 +308,13 @@ def _persist(store_root: Path, project: ShadowProject, record: dict[str, object]
     session_seal = str(record["session_seal"]).removeprefix("sha256:")
     record_seal = str(record["record_seal"]).removeprefix("sha256:")
     directory = store_root / "events" / project.alias / session_seal[:32]
-    directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{record_seal}.json"
-    temporary = directory / f".{record_seal}.{os.getpid()}.tmp"
-    temporary.write_text(canonical_text(record) + "\n", encoding="utf-8", newline="\n")
-    temporary.replace(destination)
+    write_new_file(
+        store_root,
+        destination,
+        (canonical_text(record) + "\n").encode("utf-8"),
+        what="shadow event record",
+    )
 
 
 def process_hook_event(
@@ -410,7 +422,16 @@ def main(
                 "hook payload must be a JSON object", detail={"reason": "not_an_object"}
             )
         config_path = store_root / DEFAULT_CONFIG_NAME
-        config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
+        config = load_shadow_config(
+            json.loads(
+                read_confined_file(
+                    store_root,
+                    config_path,
+                    max_bytes=MAX_HOOK_BYTES,
+                    what="shadow host configuration",
+                ).decode("utf-8")
+            )
+        )
         process_hook_event(
             payload,
             host=args.host,

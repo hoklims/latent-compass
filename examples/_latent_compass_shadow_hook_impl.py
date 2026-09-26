@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Final, TextIO
 
 from latent_compass.canonical import seal
+from latent_compass.confined_io import read_confined_file
 from latent_compass.shadow_harness import (
     DEFAULT_CONFIG_NAME,
     MAX_HOOK_BYTES,
@@ -86,7 +87,17 @@ def main(
         if not isinstance(payload, dict):
             raise RuntimeError("hook_payload_not_object")
         store = default_store_root(args.host, args.home)
-        config = load_shadow_config(json.loads((store / DEFAULT_CONFIG_NAME).read_text("utf-8")))
+        config_path = store / DEFAULT_CONFIG_NAME
+        config = load_shadow_config(
+            json.loads(
+                read_confined_file(
+                    store,
+                    config_path,
+                    max_bytes=MAX_HOOK_BYTES,
+                    what="shadow host configuration",
+                ).decode("utf-8")
+            )
+        )
         if payload.get("hook_event_name") in {"SessionStart", "PostToolUse"}:
             root = _allowed_root(config, payload.get("cwd"))
             if root is not None:

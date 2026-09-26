@@ -107,6 +107,7 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
     valid = (
         isinstance(payload, dict)
         and set(payload) == {"schema_version", "host", "command", "wrapper_digest"}
+        and type(payload.get("schema_version")) is int
         and payload.get("schema_version") == 2
         and payload.get("host") == host
         and isinstance(payload.get("command"), str)
@@ -254,9 +255,12 @@ def _hook_state(
                 }
             parsed = _parse_hook_command(owned_command, host)
             assert parsed is not None
-            _, wrapper = parsed
+            runtime, wrapper = parsed
             events.add(event)
-            runtime_states.append(True)
+            try:
+                runtime_states.append(runtime.is_file())
+            except OSError:
+                runtime_states.append(False)
             wrapper_states.append(_wrapper_matches(store, wrapper, wrapper_digest))
     runtime_present = all(runtime_states) if runtime_states else None
     wrapper_present = all(wrapper_states) if wrapper_states else None

@@ -86,8 +86,6 @@ def test_installer_is_idempotent_and_keeps_host_stores_separate(tmp_path: Path) 
     runtime = tmp_path / "runtime" / "python.exe"
     runtime.parent.mkdir()
     runtime.write_bytes(b"fixture")
-    hook_script = tmp_path / "runtime" / "latent-compass-shadow-hook.py"
-    hook_script.write_text("# fixture\n", encoding="utf-8")
     codex_hooks = home / ".codex" / "hooks.json"
     claude_settings = home / ".claude" / "settings.json"
     _write(codex_hooks, {"hooks": {"PreToolUse": []}})
@@ -96,14 +94,12 @@ def test_installer_is_idempotent_and_keeps_host_stores_separate(tmp_path: Path) 
     first = install_shadow_hooks(
         home=home,
         runtime_python=runtime,
-        hook_script=hook_script,
         project_root=project,
         backup_tag="test",
     )
     second = install_shadow_hooks(
         home=home,
         runtime_python=runtime,
-        hook_script=hook_script,
         project_root=project,
         backup_tag="test-two",
     )
@@ -1644,6 +1640,48 @@ def test_install_revalidates_custom_hook_script_dependency_before_journal(
     assert not (custom_hook.parent / "ownership.json").exists()
 
 
+def test_custom_hook_inside_selected_store_has_complete_lifecycle(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    store = home / ".codex" / "latent-compass-shadow"
+    custom_hook = store / "runtime" / "custom-hook.py"
+    custom_hook.parent.mkdir(parents=True)
+    custom_hook.write_bytes(b"custom-owned-by-operator")
+
+    installed = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        hook_script=custom_hook,
+        project_root=project,
+        project_alias="custom",
+        backup_tag="custom-install",
+        hosts=("codex",),
+    )
+    status = host_status(
+        home=home,
+        project_root=project,
+        hosts=("codex",),
+    )
+    removed = remove_shadow_hooks(
+        home=home,
+        project_root=project,
+        project_alias="custom",
+        backup_tag="custom-remove",
+        hosts=("codex",),
+    )
+
+    assert installed["conflicts"] == []
+    states = cast(dict[str, dict[str, object]], status["states"])
+    assert states["codex"]["installed"] is True
+    assert states["codex"]["configured"] is True
+    assert removed["conflicts"] == []
+    assert custom_hook.read_bytes() == b"custom-owned-by-operator"
+    assert not (store / "ownership.json").exists()
+
+
 def test_install_validates_unchanged_dependencies_before_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2028,6 +2066,64 @@ def test_recovery_reports_backup_vanishing_after_preflight(
     assert conflicts[0]["code"] == "pending_transaction_conflict"
     assert "changed after preflight" in str(conflicts[0]["detail"])
     assert (home / ".latent-compass-shadow.pending.json").is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows post-publication recovery")
+def test_windows_post_rename_flush_failure_keeps_recoverable_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    home = tmp_path / "home"
+    target = home / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    before = b'{"hooks":{"PreToolUse":[]}}'
+    after = b'{"hooks":{"PreToolUse":[{"matcher":"owned","hooks":[]}]}}'
+    target.write_bytes(before)
+    backup_tag = "post-rename"
+    backup = target.with_name(f"hooks.json.bak-latent-compass-{backup_tag}")
+    backup.write_bytes(before)
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_bytes(
+        _json_bytes(
+            {
+                "schema_version": 1,
+                "operation": "install",
+                "backup_tag": backup_tag,
+                "entries": [
+                    {
+                        "path": str(target),
+                        "before_sha256": _bytes_digest(before),
+                        "after_sha256": _bytes_digest(after),
+                        "backup_path": str(backup),
+                    }
+                ],
+            }
+        )
+    )
+    kernel32 = getattr(confined_io, "_kernel32")  # noqa: B009 - absent on POSIX type paths
+    real_flush = kernel32.FlushFileBuffers
+    flush_calls = 0
+
+    def fail_second_flush(handle: int) -> int:
+        nonlocal flush_calls
+        flush_calls += 1
+        return 0 if flush_calls == 2 else real_flush(handle)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(kernel32, "FlushFileBuffers", fail_second_flush)
+        with pytest.raises(OSError, match=r"hooks\.json"):
+            confined_replace(home, target, after, what="managed host file")
+
+    assert target.read_bytes() == after
+    assert backup.read_bytes() == before
+    assert journal.is_file()
+
+    recovered = recover_shadow_hooks(home=home)
+
+    assert recovered["conflicts"] == []
+    assert target.read_bytes() == before
+    assert not journal.exists()
 
 
 @pytest.mark.parametrize("replacement", ["symlink", "directory"])
@@ -2502,6 +2598,46 @@ def test_recover_rejects_semantically_invalid_journal_entries(tmp_path: Path, de
     assert journal.read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    ("schema_version", "extra_field"),
+    [(True, False), (1.0, False), (1, True)],
+)
+def test_recover_requires_exact_journal_schema_without_mutation(
+    tmp_path: Path, schema_version: object, extra_field: bool
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"transaction-after")
+    payload: dict[str, object] = {
+        "schema_version": schema_version,
+        "operation": "install",
+        "backup_tag": "strict-schema",
+        "entries": [
+            {
+                "path": str(target),
+                "before_sha256": None,
+                "after_sha256": _bytes_digest(target.read_bytes()),
+                "backup_path": None,
+            }
+        ],
+    }
+    if extra_field:
+        payload["unexpected"] = "must-refuse"
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_bytes(_json_bytes(payload))
+    journal_before = journal.read_bytes()
+
+    preview = plan_recover_shadow_hooks(home=home)
+    applied = recover_shadow_hooks(home=home)
+
+    for report in (preview, applied):
+        conflicts = cast(list[dict[str, object]], report["conflicts"])
+        assert conflicts[0]["code"] == "pending_transaction_invalid"
+    assert target.read_bytes() == b"transaction-after"
+    assert journal.read_bytes() == journal_before
+
+
 def test_recover_validates_digest_syntax_before_current_state(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
@@ -2745,8 +2881,8 @@ def test_project_removal_preserves_other_registration_and_hooks(tmp_path: Path) 
         assert len(_commands(hooks, event)) == 1
 
 
-def test_removal_refuses_manifest_wrapper_outside_home_without_reading_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_install_refuses_custom_wrapper_outside_selected_host_store(
+    tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
@@ -2766,29 +2902,12 @@ def test_removal_refuses_manifest_wrapper_outside_home_without_reading_it(
         backup_tag="custom",
         hosts=("codex",),
     )
-    hooks_before = hooks.read_bytes()
-    original_reader = _regular_file_bytes_or_none
-
-    def refuse_outside_read(path: Path, *, home: Path | None = None) -> bytes | None:
-        if path == custom_wrapper:
-            pytest.fail("manifest-supplied wrapper outside home must not be read")
-        return original_reader(path, home=home)
-
-    monkeypatch.setattr(
-        "latent_compass.shadow_install._regular_file_bytes_or_none", refuse_outside_read
-    )
-    removed = remove_shadow_hooks(
-        home=home,
-        backup_tag="remove-custom",
-        hosts=("codex",),
-    )
-
-    assert installed["conflicts"] == []
-    conflicts = cast(list[dict[str, object]], removed["conflicts"])
-    assert conflicts[0]["code"] == "configuration_collision"
+    conflicts = cast(list[dict[str, object]], installed["conflicts"])
+    assert conflicts[0]["code"] == "hook_script_location_unsupported"
     assert "escapes the selected home" in str(conflicts[0]["detail"])
-    assert hooks.read_bytes() == hooks_before
+    assert json.loads(hooks.read_text(encoding="utf-8")) == {"hooks": {"PreToolUse": []}}
     assert custom_wrapper.read_text(encoding="utf-8") == "# custom fixture\n"
+    assert not (home / ".codex" / "latent-compass-shadow" / "ownership.json").exists()
 
 
 def test_codex_removal_refuses_manifest_wrapper_in_claude_store_without_reading_it(
