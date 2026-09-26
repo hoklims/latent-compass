@@ -10,6 +10,7 @@ import pytest
 
 import latent_compass.shadow_status as shadow_status
 from latent_compass.canonical import seal
+from latent_compass.confined_io import list_confined_json_files as confined_list
 from latent_compass.confined_io import read_confined_file as confined_read
 from latent_compass.shadow_status import Host, inspect_host, main, render_text
 
@@ -633,3 +634,59 @@ def test_status_refuses_event_file_swapped_to_symlink_before_open(
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["event_count"] == 0
     assert outside.read_bytes() == before
+
+
+def test_status_refuses_alias_swapped_to_symlink_before_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+    alias = store / "events" / "project-alpha"
+    moved = tmp_path / "moved-alias"
+    outside = tmp_path / "outside-alias"
+    outside.mkdir()
+    marker = outside / "must-not-enumerate.json"
+    marker.write_bytes(b'{"outside":true}\n')
+    marker_before = marker.read_bytes()
+    injected = False
+
+    def swap_then_list(
+        root: Path, target: Path, *, max_entries: int, what: str
+    ) -> tuple[list[Path], bool]:
+        nonlocal injected
+        if target == alias and not injected:
+            injected = True
+            alias.rename(moved)
+            alias.symlink_to(outside, target_is_directory=True)
+        return confined_list(
+            root,
+            target,
+            max_entries=max_entries,
+            what=what,
+        )
+
+    monkeypatch.setattr(shadow_status, "list_confined_json_files", swap_then_list)
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["event_count"] == 0
+    assert marker.read_bytes() == marker_before
+
+
+def test_status_reports_excessive_event_directory_depth_as_invalid(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    directory = store / "events" / "project-alpha"
+    for _ in range(34):
+        directory /= "d"
+    directory.mkdir(parents=True)
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["event_count"] == 0

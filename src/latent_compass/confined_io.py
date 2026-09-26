@@ -28,6 +28,7 @@ from typing import Final
 from latent_compass.errors import ContractViolation
 
 _TEMP_PREFIX: Final = ".lc-"
+_MAX_ENUMERATION_DEPTH: Final = 32
 _WINDOWS_RESERVED_NAMES: Final = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
@@ -197,6 +198,38 @@ def read_confined_file(root: Path, target: Path, *, max_bytes: int, what: str) -
     else:
         data = _read_posix(absolute_root, relative, max_bytes=checked_max_bytes, what=what)
     return data
+
+
+def list_confined_json_files(
+    root: Path,
+    target: Path,
+    *,
+    max_entries: object,
+    what: str,
+) -> tuple[list[Path], bool]:
+    """Enumerate regular ``.json`` files below a confined directory.
+
+    Every directory is opened without following links before enumeration. The
+    returned boolean is true only when the entry budget truncates traversal;
+    unsafe or unstable directory entries raise :class:`ContractViolation`.
+    """
+    if isinstance(max_entries, bool) or not isinstance(max_entries, int) or max_entries <= 0:
+        raise ContractViolation(
+            f"{what} entry limit must be a positive integer",
+            detail={"what": what, "max_entries": repr(max_entries)},
+        )
+    absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
+    absolute_target = plan_confined_target(absolute_root, target, what=what)
+    relative = Path(os.path.relpath(absolute_target, absolute_root))
+    if sys.platform == "win32":
+        paths, truncated = _list_windows_json(
+            absolute_root, relative, max_entries=max_entries, what=what
+        )
+    else:
+        paths, truncated = _list_posix_json(
+            absolute_root, relative, max_entries=max_entries, what=what
+        )
+    return sorted(paths, key=lambda item: item.as_posix()), truncated
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -457,6 +490,79 @@ def _remove_posix(root: Path, relative: Path, *, what: str) -> None:
                 detail={"what": what, "path": str(root / relative)},
             ) from exc
         raise
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _list_posix_json(
+    root: Path, relative: Path, *, max_entries: int, what: str
+) -> tuple[list[Path], bool]:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    paths: list[Path] = []
+    visited = 0
+
+    def walk(directory: int, logical: Path, *, depth: int) -> bool:
+        nonlocal visited
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > max_entries:
+                        return True
+                    info = entry.stat(follow_symlinks=False)
+                    child_path = logical / entry.name
+                    if stat.S_ISLNK(info.st_mode):
+                        raise ContractViolation(
+                            f"{what} contains a symbolic link; refusing enumeration",
+                            detail={"what": what, "path": str(child_path)},
+                        )
+                    if stat.S_ISDIR(info.st_mode):
+                        if depth >= _MAX_ENUMERATION_DEPTH:
+                            raise ContractViolation(
+                                f"{what} exceeds the safe directory depth",
+                                detail={"what": what, "path": str(child_path)},
+                            )
+                        child = _open_directory_posix_readonly(
+                            directory,
+                            entry.name,
+                            child_path,
+                            what=what,
+                            directory_flags=directory_flags,
+                        )
+                        try:
+                            if walk(child, child_path, depth=depth + 1):
+                                return True
+                        finally:
+                            os.close(child)
+                    elif stat.S_ISREG(info.st_mode) and entry.name.endswith(".json"):
+                        paths.append(child_path)
+        except ContractViolation:
+            raise
+        except OSError as exc:
+            raise ContractViolation(
+                f"{what} changed or could not be enumerated safely",
+                detail={"what": what, "path": str(logical)},
+            ) from exc
+        return False
+
+    try:
+        anchor = Path(root.anchor)
+        current = os.open(anchor, directory_flags)
+        descriptors.append(current)
+        traversed = anchor
+        for component in (*root.parts[1:], *relative.parts):
+            traversed /= component
+            current = _open_directory_posix_readonly(
+                current,
+                component,
+                traversed,
+                what=what,
+                directory_flags=directory_flags,
+            )
+            descriptors.append(current)
+        return paths, walk(current, root / relative, depth=0)
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
@@ -1063,5 +1169,71 @@ if sys.platform == "win32":
         finally:
             if file_handle is not None:
                 _kernel32.CloseHandle(file_handle)
+            for handle in reversed(handles):
+                _kernel32.CloseHandle(handle)
+
+    def _list_windows_json(
+        root: Path, relative: Path, *, max_entries: int, what: str
+    ) -> tuple[list[Path], bool]:
+        handles: list[int] = []
+        paths: list[Path] = []
+        visited = 0
+
+        def walk(directory_handle: int, logical: Path, *, depth: int) -> bool:
+            nonlocal visited
+            try:
+                with os.scandir(logical) as entries:
+                    for entry in entries:
+                        visited += 1
+                        if visited > max_entries:
+                            return True
+                        info = entry.stat(follow_symlinks=False)
+                        child_path = logical / entry.name
+                        if stat.S_ISLNK(info.st_mode) or bool(
+                            getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+                        ):
+                            raise ContractViolation(
+                                f"{what} contains a Windows reparse point; refusing enumeration",
+                                detail={"what": what, "path": str(child_path)},
+                            )
+                        if stat.S_ISDIR(info.st_mode):
+                            if depth >= _MAX_ENUMERATION_DEPTH:
+                                raise ContractViolation(
+                                    f"{what} exceeds the safe directory depth",
+                                    detail={"what": what, "path": str(child_path)},
+                                )
+                            child = _open_directory_windows_readonly(
+                                directory_handle,
+                                entry.name,
+                                child_path,
+                                what=what,
+                            )
+                            try:
+                                if walk(child, child_path, depth=depth + 1):
+                                    return True
+                            finally:
+                                _kernel32.CloseHandle(child)
+                        elif stat.S_ISREG(info.st_mode) and entry.name.endswith(".json"):
+                            paths.append(child_path)
+            except ContractViolation:
+                raise
+            except OSError as exc:
+                raise ContractViolation(
+                    f"{what} changed or could not be enumerated safely",
+                    detail={"what": what, "path": str(logical)},
+                ) from exc
+            return False
+
+        try:
+            anchor = Path(root.anchor)
+            current = _open_windows_anchor(anchor, what=what)
+            handles.append(current)
+            traversed = anchor
+            for component in (*root.parts[1:], *relative.parts):
+                traversed /= component
+                current = _open_directory_windows_readonly(current, component, traversed, what=what)
+                handles.append(current)
+            return paths, walk(current, root / relative, depth=0)
+        finally:
             for handle in reversed(handles):
                 _kernel32.CloseHandle(handle)

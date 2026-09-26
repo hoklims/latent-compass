@@ -17,7 +17,7 @@ from typing import Final, Literal, TextIO
 
 from latent_compass import __version__
 from latent_compass.canonical import seal
-from latent_compass.confined_io import read_confined_file
+from latent_compass.confined_io import list_confined_json_files, read_confined_file
 from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import DEFAULT_CONFIG_NAME, ShadowProject, load_shadow_config
 
@@ -290,8 +290,14 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
         }
     if not _parents_safe(root) or not _entry_kind_safe(root, directory=True):
         return {"unsafe_event_store": True}
-    paths, truncated, unsafe = _bounded_json_paths(root)
-    if unsafe:
+    try:
+        paths, truncated = list_confined_json_files(
+            store,
+            root,
+            max_entries=MAX_EVENT_FILES,
+            what="shadow event directory",
+        )
+    except (OSError, ContractViolation):
         return {"unsafe_event_store": True}
     verdicts: Counter[str] = Counter()
     sessions: set[str] = set()
@@ -377,34 +383,6 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
         "truncated": truncated,
         "unsafe_event_store": False,
     }
-
-
-def _bounded_json_paths(root: Path) -> tuple[list[Path], bool, bool]:
-    pending = [root]
-    paths: list[Path] = []
-    visited = 0
-    while pending:
-        directory = pending.pop()
-        try:
-            entries = os.scandir(directory)
-        except OSError:
-            return sorted(paths, key=lambda item: item.as_posix()), True, False
-        with entries:
-            for entry in entries:
-                visited += 1
-                if visited > MAX_EVENT_FILES:
-                    return sorted(paths, key=lambda item: item.as_posix()), True, False
-                try:
-                    info = entry.stat(follow_symlinks=False)
-                    if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
-                        return sorted(paths, key=lambda item: item.as_posix()), False, True
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".json"):
-                        paths.append(Path(entry.path))
-                except OSError:
-                    return sorted(paths, key=lambda item: item.as_posix()), True, False
-    return sorted(paths, key=lambda item: item.as_posix()), False, False
 
 
 def _valid_timestamp(value: str) -> bool:
