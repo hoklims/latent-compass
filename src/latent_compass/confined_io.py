@@ -13,6 +13,9 @@ portable threat model. Do not describe these primitives as defending against a
 peer that can concurrently rename already-open profile directories.
 """
 
+# Backend helpers intentionally operate on the lease's opaque handles.
+# ruff: noqa: SLF001
+
 from __future__ import annotations
 
 import ctypes
@@ -22,8 +25,9 @@ import secrets
 import stat
 import sys
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from latent_compass.errors import ContractViolation
 
@@ -36,6 +40,94 @@ _WINDOWS_RESERVED_NAMES: Final = frozenset(
     | {f"COM{index}" for index in "¹²³"}
     | {f"LPT{index}" for index in "¹²³"}
 )
+
+
+@dataclass(frozen=True)
+class FileIdentity:
+    """Local file identity held by a live lease; never a cryptographic attestation."""
+
+    backend: Literal["posix", "windows"]
+    token: tuple[int, int] | tuple[int, bytes]
+
+
+class ConfinedFileLease:
+    """Retain a confined parent/leaf handle from observation through mutation."""
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        path: Path,
+        what: str,
+        max_bytes: int,
+        parent_handle: int,
+        file_handle: int | None,
+        content: bytes | None,
+        identity: FileIdentity | None,
+        backend: Literal["posix", "windows"],
+    ) -> None:
+        self.root = root
+        self.path = path
+        self.what = what
+        self.max_bytes = max_bytes
+        self._parent_handle = parent_handle
+        self._file_handle = file_handle
+        self.content = content
+        self.identity = identity
+        self._backend = backend
+        self._closed = False
+
+    @property
+    def exists(self) -> bool:
+        return self.identity is not None
+
+    def assert_current(self) -> None:
+        self._ensure_open()
+        if self._backend == "windows":
+            _lease_assert_windows(self)
+        else:
+            _lease_assert_posix(self)
+
+    def replace(self, data: bytes) -> None:
+        self._ensure_open()
+        self.assert_current()
+        if self._backend == "windows":
+            _lease_replace_windows(self, data)
+        else:
+            _lease_replace_posix(self, data)
+
+    def remove(self) -> None:
+        self._ensure_open()
+        self.assert_current()
+        if not self.exists:
+            raise ContractViolation(
+                f"{self.what} does not exist; refusing removal",
+                detail={"what": self.what, "path": str(self.path)},
+            )
+        if self._backend == "windows":
+            _lease_remove_windows(self)
+        else:
+            _lease_remove_posix(self)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        if self._backend == "windows":
+            _lease_close_windows(self)
+        else:
+            _lease_close_posix(self)
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("confined file lease is closed")
+
+    def __enter__(self) -> ConfinedFileLease:
+        self._ensure_open()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
 
 
 def _is_windows_runtime() -> bool:
@@ -62,6 +154,17 @@ def _validate_windows_components(path: Path, *, what: str) -> None:
                 f"{what} contains a Windows path component that is not safe for local output",
                 detail={"what": what, "path": text, "component": component, "reason": reason},
             )
+
+
+def validate_portable_component(value: str, *, what: str) -> None:
+    """Require one filename component that is safe on supported hosts."""
+    candidate = Path(value)
+    if len(candidate.parts) != 1 or value in {"", ".", ".."}:
+        raise ContractViolation(
+            f"{what} must be one portable path component",
+            detail={"what": what, "component": value},
+        )
+    _validate_windows_components(candidate, what=what)
 
 
 def _validate_windows_local_path(path: Path, *, what: str) -> None:
@@ -106,6 +209,36 @@ def plan_confined_target(root: Path, target: Path, *, what: str) -> Path:
             detail={"what": what, "root": str(absolute_root), "requested": str(absolute_target)},
         )
     return absolute_target
+
+
+def lease_confined_file(
+    root: Path,
+    target: Path,
+    *,
+    max_bytes: int,
+    what: str,
+    allow_absent: bool = False,
+) -> ConfinedFileLease:
+    """Open a confined file once and retain its namespace/content observation."""
+    checked_max_bytes = _require_positive_read_limit(max_bytes, what=what)
+    absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
+    absolute_target = plan_confined_target(absolute_root, target, what=what)
+    relative = Path(os.path.relpath(absolute_target, absolute_root))
+    if sys.platform == "win32":
+        return _lease_open_windows(
+            absolute_root,
+            relative,
+            max_bytes=checked_max_bytes,
+            what=what,
+            allow_absent=allow_absent,
+        )
+    return _lease_open_posix(  # type: ignore[unreachable]
+        absolute_root,
+        relative,
+        max_bytes=checked_max_bytes,
+        what=what,
+        allow_absent=allow_absent,
+    )
 
 
 def write_new_file(root: Path, target: Path, data: bytes, *, what: str) -> Path:
@@ -403,6 +536,216 @@ def _read_posix(root: Path, relative: Path, *, max_bytes: int, what: str) -> byt
             os.close(descriptor)
 
 
+def _read_posix_lease_descriptor(
+    descriptor: int, *, max_bytes: int, path: Path, what: str
+) -> tuple[bytes, FileIdentity]:
+    status = os.fstat(descriptor)
+    if not stat.S_ISREG(status.st_mode):
+        raise ContractViolation(
+            f"{what} is not a regular file",
+            detail={"what": what, "path": str(path)},
+        )
+    if status.st_size > max_bytes:
+        raise ContractViolation(
+            f"{what} exceeds the declared byte limit",
+            detail={"what": what, "path": str(path), "size": status.st_size, "limit": max_bytes},
+        )
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    remaining = status.st_size
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = os.read(descriptor, min(remaining, _READ_CHUNK_BYTES))
+        if not chunk:
+            raise ContractViolation(
+                f"{what} ended before its declared length",
+                detail={"what": what, "path": str(path)},
+            )
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    after = os.fstat(descriptor)
+    if after.st_size != status.st_size or after.st_mtime_ns != status.st_mtime_ns:
+        raise ContractViolation(
+            f"{what} changed while being read",
+            detail={"what": what, "path": str(path)},
+        )
+    return b"".join(chunks), FileIdentity("posix", (status.st_dev, status.st_ino))
+
+
+def _lease_open_posix(
+    root: Path,
+    relative: Path,
+    *,
+    max_bytes: int,
+    what: str,
+    allow_absent: bool,
+) -> ConfinedFileLease:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptors: list[int] = []
+    file_descriptor: int | None = None
+    final_path = root / relative
+    try:
+        current = os.open(Path(root.anchor), directory_flags)
+        descriptors.append(current)
+        traversed = Path(root.anchor)
+        for component in (*root.parts[1:], *relative.parts[:-1]):
+            traversed /= component
+            current = _open_directory_posix_readonly(
+                current, component, traversed, what=what, directory_flags=directory_flags
+            )
+            descriptors.append(current)
+        try:
+            file_descriptor = os.open(relative.name, file_flags, dir_fd=current)
+        except FileNotFoundError:
+            if not allow_absent:
+                raise ContractViolation(
+                    f"{what} does not exist",
+                    detail={"what": what, "path": str(final_path)},
+                ) from None
+            for descriptor in descriptors[:-1]:
+                os.close(descriptor)
+            return ConfinedFileLease(
+                root=root,
+                path=final_path,
+                what=what,
+                max_bytes=max_bytes,
+                parent_handle=current,
+                file_handle=None,
+                content=None,
+                identity=None,
+                backend="posix",
+            )
+        content, identity = _read_posix_lease_descriptor(
+            file_descriptor, max_bytes=max_bytes, path=final_path, what=what
+        )
+        for descriptor in descriptors[:-1]:
+            os.close(descriptor)
+        return ConfinedFileLease(
+            root=root,
+            path=final_path,
+            what=what,
+            max_bytes=max_bytes,
+            parent_handle=current,
+            file_handle=file_descriptor,
+            content=content,
+            identity=identity,
+            backend="posix",
+        )
+    except BaseException:
+        if file_descriptor is not None:
+            os.close(file_descriptor)
+        for descriptor in reversed(descriptors):
+            with suppress(OSError):
+                os.close(descriptor)
+        raise
+
+
+def _lease_assert_posix(lease: ConfinedFileLease) -> None:
+    try:
+        current_status = os.stat(
+            lease.path.name, dir_fd=lease._parent_handle, follow_symlinks=False
+        )
+    except FileNotFoundError:
+        if not lease.exists:
+            return
+        raise ContractViolation(
+            f"{lease.what} changed after observation",
+            detail={"what": lease.what, "path": str(lease.path), "reason": "missing"},
+        ) from None
+    if not lease.exists or not stat.S_ISREG(current_status.st_mode):
+        raise ContractViolation(
+            f"{lease.what} changed after observation",
+            detail={"what": lease.what, "path": str(lease.path), "reason": "identity"},
+        )
+    assert lease.identity is not None
+    assert lease._file_handle is not None
+    if lease.identity.token != (current_status.st_dev, current_status.st_ino):
+        raise ContractViolation(
+            f"{lease.what} identity changed after observation",
+            detail={"what": lease.what, "path": str(lease.path)},
+        )
+    content, identity = _read_posix_lease_descriptor(
+        lease._file_handle,
+        max_bytes=lease.max_bytes,
+        path=lease.path,
+        what=lease.what,
+    )
+    if identity != lease.identity or content != lease.content:
+        raise ContractViolation(
+            f"{lease.what} bytes changed after observation",
+            detail={"what": lease.what, "path": str(lease.path)},
+        )
+
+
+def _lease_replace_posix(lease: ConfinedFileLease, data: bytes) -> None:
+    temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
+    descriptor = os.open(
+        temporary_name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+        dir_fd=lease._parent_handle,
+    )
+    try:
+        _write_all(descriptor, data)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        if lease.exists:
+            assert lease._file_handle is not None
+            os.close(lease._file_handle)
+            lease._file_handle = None
+            os.replace(
+                temporary_name,
+                lease.path.name,
+                src_dir_fd=lease._parent_handle,
+                dst_dir_fd=lease._parent_handle,
+            )
+        else:
+            os.link(
+                temporary_name,
+                lease.path.name,
+                src_dir_fd=lease._parent_handle,
+                dst_dir_fd=lease._parent_handle,
+                follow_symlinks=False,
+            )
+            os.unlink(temporary_name, dir_fd=lease._parent_handle)
+        os.fsync(lease._parent_handle)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary_name, dir_fd=lease._parent_handle)
+    lease._file_handle = os.open(
+        lease.path.name,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        dir_fd=lease._parent_handle,
+    )
+    lease.content, lease.identity = _read_posix_lease_descriptor(
+        lease._file_handle, max_bytes=lease.max_bytes, path=lease.path, what=lease.what
+    )
+    if lease.content != data:
+        raise ContractViolation(
+            f"{lease.what} changed during publication",
+            detail={"what": lease.what, "path": str(lease.path)},
+        )
+
+
+def _lease_remove_posix(lease: ConfinedFileLease) -> None:
+    os.unlink(lease.path.name, dir_fd=lease._parent_handle)
+    os.fsync(lease._parent_handle)
+    assert lease._file_handle is not None
+    os.close(lease._file_handle)
+    lease._file_handle = None
+    lease.content = None
+    lease.identity = None
+
+
+def _lease_close_posix(lease: ConfinedFileLease) -> None:
+    if lease._file_handle is not None:
+        os.close(lease._file_handle)
+        lease._file_handle = None
+    os.close(lease._parent_handle)
+
+
 def _write_posix(root: Path, relative: Path, data: bytes, *, what: str, replace: bool) -> None:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[int] = []
@@ -641,6 +984,7 @@ if sys.platform == "win32":
     _FILE_ACCESS = _FILE_WRITE_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE
     _FILE_READ_DATA = 0x0001
     _FILE_READ_ACCESS = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
+    _SHARE_READ = 0x00000001
     # Denying FILE_SHARE_DELETE pins every opened directory in the namespace
     # until publication completes. An attacker cannot rename a parent out of
     # the confined root after we have validated and opened it.
@@ -704,6 +1048,12 @@ if sys.platform == "win32":
             ("FileAttributes", wintypes.DWORD),
         ]
 
+    class _FileId128(ctypes.Structure):
+        _fields_ = [("Identifier", ctypes.c_ubyte * 16)]
+
+    class _FileIdInfo(ctypes.Structure):
+        _fields_ = [("VolumeSerialNumber", ctypes.c_ulonglong), ("FileId", _FileId128)]
+
     _kernel32.CreateFileW.restype = wintypes.HANDLE
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
@@ -734,6 +1084,12 @@ if sys.platform == "win32":
         wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD),
         wintypes.LPVOID,
+    ]
+    _kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
     ]
     _kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
     _ntdll.RtlNtStatusToDosError.argtypes = [ctypes.c_long]
@@ -812,6 +1168,7 @@ if sys.platform == "win32":
         disposition: int,
         options: int,
         path: Path,
+        share_access: int = _SHARE_READ_WRITE,
     ) -> int:
         name_buffer = ctypes.create_unicode_buffer(name)
         encoded_length = len(name.encode("utf-16-le"))
@@ -836,7 +1193,7 @@ if sys.platform == "win32":
                 ctypes.byref(io_status),
                 None,
                 _FILE_ATTRIBUTE_NORMAL,
-                _SHARE_READ_WRITE,
+                share_access,
                 disposition,
                 options | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
                 None,
@@ -1047,6 +1404,17 @@ if sys.platform == "win32":
             raise OSError(error, ctypes.FormatError(error), str(path))
         return int(info.LastWriteTime)
 
+    def _file_identity_windows(handle: int, path: Path) -> FileIdentity:
+        info = _FileIdInfo()
+        if not _kernel32.GetFileInformationByHandleEx(
+            handle, 18, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        return FileIdentity(
+            "windows", (int(info.VolumeSerialNumber), bytes(info.FileId.Identifier))
+        )
+
     def _read_all_windows(handle: int, size: int, path: Path, *, what: str) -> bytes:
         chunks: list[bytes] = []
         remaining = size
@@ -1115,6 +1483,218 @@ if sys.platform == "win32":
                 _kernel32.CloseHandle(file_handle)
             for handle in reversed(handles):
                 _kernel32.CloseHandle(handle)
+
+    def _read_windows_lease_handle(
+        handle: int, *, max_bytes: int, path: Path, what: str
+    ) -> tuple[bytes, FileIdentity]:
+        size = _file_size_windows(handle, path)
+        if size > max_bytes:
+            raise ContractViolation(
+                f"{what} exceeds the declared byte limit",
+                detail={"what": what, "path": str(path), "size": size, "limit": max_bytes},
+            )
+        before = _file_last_write_time_windows(handle, path)
+        new_position = ctypes.c_longlong()
+        if not _kernel32.SetFilePointerEx(handle, 0, ctypes.byref(new_position), 0):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        data = _read_all_windows(handle, size, path, what=what)
+        after = _file_last_write_time_windows(handle, path)
+        if after != before or _file_size_windows(handle, path) != size:
+            raise ContractViolation(
+                f"{what} changed while being read",
+                detail={"what": what, "path": str(path)},
+            )
+        return data, _file_identity_windows(handle, path)
+
+    def _lease_open_windows(
+        root: Path,
+        relative: Path,
+        *,
+        max_bytes: int,
+        what: str,
+        allow_absent: bool,
+    ) -> ConfinedFileLease:
+        handles: list[int] = []
+        file_handle: int | None = None
+        final_path = root / relative
+        try:
+            current = _open_windows_anchor(Path(root.anchor), what=what)
+            handles.append(current)
+            traversed = Path(root.anchor)
+            for component in (*root.parts[1:], *relative.parts[:-1]):
+                traversed /= component
+                current = _open_directory_windows_readonly(current, component, traversed, what=what)
+                handles.append(current)
+            try:
+                file_handle = _nt_create_relative(
+                    current,
+                    relative.name,
+                    access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
+                    disposition=_FILE_OPEN,
+                    options=_FILE_NON_DIRECTORY_FILE,
+                    path=final_path,
+                    share_access=_SHARE_READ,
+                )
+            except FileNotFoundError:
+                if not allow_absent:
+                    raise ContractViolation(
+                        f"{what} does not exist",
+                        detail={"what": what, "path": str(final_path)},
+                    ) from None
+                for handle in handles[:-1]:
+                    _kernel32.CloseHandle(handle)
+                return ConfinedFileLease(
+                    root=root,
+                    path=final_path,
+                    what=what,
+                    max_bytes=max_bytes,
+                    parent_handle=current,
+                    file_handle=None,
+                    content=None,
+                    identity=None,
+                    backend="windows",
+                )
+            _reject_reparse(file_handle, final_path, what=what)
+            content, identity = _read_windows_lease_handle(
+                file_handle, max_bytes=max_bytes, path=final_path, what=what
+            )
+            for handle in handles[:-1]:
+                _kernel32.CloseHandle(handle)
+            return ConfinedFileLease(
+                root=root,
+                path=final_path,
+                what=what,
+                max_bytes=max_bytes,
+                parent_handle=current,
+                file_handle=file_handle,
+                content=content,
+                identity=identity,
+                backend="windows",
+            )
+        except BaseException:
+            if file_handle is not None:
+                _kernel32.CloseHandle(file_handle)
+            for handle in reversed(handles):
+                _kernel32.CloseHandle(handle)
+            raise
+
+    def _lease_assert_windows(lease: ConfinedFileLease) -> None:
+        if not lease.exists:
+            try:
+                handle = _nt_create_relative(
+                    lease._parent_handle,
+                    lease.path.name,
+                    access=_FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+                    disposition=_FILE_OPEN,
+                    options=_FILE_NON_DIRECTORY_FILE,
+                    path=lease.path,
+                    share_access=_SHARE_READ,
+                )
+            except FileNotFoundError:
+                return
+            _kernel32.CloseHandle(handle)
+            raise ContractViolation(
+                f"{lease.what} appeared after observation",
+                detail={"what": lease.what, "path": str(lease.path)},
+            )
+        assert lease._file_handle is not None
+        assert lease.identity is not None
+        content, identity = _read_windows_lease_handle(
+            lease._file_handle,
+            max_bytes=lease.max_bytes,
+            path=lease.path,
+            what=lease.what,
+        )
+        if identity != lease.identity or content != lease.content:
+            raise ContractViolation(
+                f"{lease.what} changed after observation",
+                detail={"what": lease.what, "path": str(lease.path)},
+            )
+
+    def _write_windows_at(lease: ConfinedFileLease, data: bytes, *, replace: bool) -> None:
+        temporary: int | None = None
+        published = False
+        temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
+        try:
+            temporary = _nt_create_relative(
+                lease._parent_handle,
+                temporary_name,
+                access=_FILE_ACCESS,
+                disposition=_FILE_CREATE,
+                options=(_FILE_NON_DIRECTORY_FILE | (0 if replace else _FILE_DELETE_ON_CLOSE)),
+                path=lease.path.parent / temporary_name,
+            )
+            if data:
+                buffer = ctypes.create_string_buffer(data)
+                written = wintypes.DWORD()
+                if not _kernel32.WriteFile(
+                    temporary, buffer, len(data), ctypes.byref(written), None
+                ):
+                    error = ctypes.get_last_error()
+                    raise OSError(error, ctypes.FormatError(error), str(lease.path))
+                if written.value != len(data):
+                    raise OSError("short filesystem write")
+            if not _kernel32.FlushFileBuffers(temporary):
+                error = ctypes.get_last_error()
+                raise OSError(error, ctypes.FormatError(error), str(lease.path))
+            if replace:
+                _rename_windows_file(temporary, lease._parent_handle, lease.path.name, lease.path)
+            else:
+                _link_windows_file(temporary, lease._parent_handle, lease.path.name, lease.path)
+            published = True
+            if not _kernel32.FlushFileBuffers(temporary):
+                error = ctypes.get_last_error()
+                raise OSError(error, ctypes.FormatError(error), str(lease.path))
+        except BaseException as primary:
+            if temporary is not None and not published:
+                with suppress(BaseException):
+                    _dispose_windows_file(temporary)
+            raise primary
+        finally:
+            if temporary is not None:
+                _kernel32.CloseHandle(temporary)
+
+    def _lease_replace_windows(lease: ConfinedFileLease, data: bytes) -> None:
+        replace = lease.exists
+        if lease._file_handle is not None:
+            _kernel32.CloseHandle(lease._file_handle)
+            lease._file_handle = None
+        _write_windows_at(lease, data, replace=replace)
+        lease._file_handle = _nt_create_relative(
+            lease._parent_handle,
+            lease.path.name,
+            access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
+            disposition=_FILE_OPEN,
+            options=_FILE_NON_DIRECTORY_FILE,
+            path=lease.path,
+            share_access=_SHARE_READ,
+        )
+        lease.content, lease.identity = _read_windows_lease_handle(
+            lease._file_handle,
+            max_bytes=lease.max_bytes,
+            path=lease.path,
+            what=lease.what,
+        )
+        if lease.content != data:
+            raise ContractViolation(
+                f"{lease.what} changed during publication",
+                detail={"what": lease.what, "path": str(lease.path)},
+            )
+
+    def _lease_remove_windows(lease: ConfinedFileLease) -> None:
+        assert lease._file_handle is not None
+        _set_windows_disposition(lease._file_handle, delete=True)
+        _kernel32.CloseHandle(lease._file_handle)
+        lease._file_handle = None
+        lease.content = None
+        lease.identity = None
+
+    def _lease_close_windows(lease: ConfinedFileLease) -> None:
+        if lease._file_handle is not None:
+            _kernel32.CloseHandle(lease._file_handle)
+            lease._file_handle = None
+        _kernel32.CloseHandle(lease._parent_handle)
 
     def _write_windows(
         root: Path, relative: Path, data: bytes, *, what: str, replace: bool

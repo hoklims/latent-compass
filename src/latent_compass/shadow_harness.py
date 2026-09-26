@@ -21,7 +21,12 @@ from typing import Final, Literal, TextIO
 from pydantic import Field, model_validator
 
 from latent_compass.canonical import canonical_text, seal
-from latent_compass.confined_io import read_confined_file, replace_file, write_new_file
+from latent_compass.confined_io import (
+    lease_confined_file,
+    read_confined_file,
+    validate_portable_component,
+    write_new_file,
+)
 from latent_compass.contracts import Identifier, StrictModel, validate_contract
 from latent_compass.episode import AgentFamily
 from latent_compass.errors import ContractViolation
@@ -80,6 +85,10 @@ class ShadowProject(StrictModel):
         root = Path(self.root)
         if not root.is_absolute():
             raise ValueError("project root must be absolute")
+        try:
+            validate_portable_component(str(self.alias), what="project alias")
+        except ContractViolation as exc:
+            raise ValueError(str(exc)) from exc
         keys = [(item.capability_id, item.kind) for item in self.capabilities]
         if len(keys) != len(set(keys)):
             raise ValueError("project capabilities must be unique by id and kind")
@@ -95,7 +104,7 @@ class ShadowHarnessConfig(StrictModel):
 
     @model_validator(mode="after")
     def _coherent(self) -> ShadowHarnessConfig:
-        aliases = [project.alias for project in self.projects]
+        aliases = [str(project.alias).casefold() for project in self.projects]
         roots = [
             _path_identity(Path(project.root), platform=_PLATFORM) for project in self.projects
         ]
@@ -182,30 +191,38 @@ def _refresh_source_cache(
     }
     destination = _source_cache_path(store_root, project)
     content = (canonical_text(cache) + "\n").encode("utf-8")
-    try:
-        before = read_confined_file(
-            store_root, destination, max_bytes=MAX_HOOK_BYTES, what="shadow source cache"
-        )
-    except (FileNotFoundError, ContractViolation) as exc:
-        if isinstance(exc, ContractViolation) and "does not exist" not in str(exc):
-            raise
-        write_new_file(store_root, destination, content, what="shadow source cache")
-    else:
-        previous = json.loads(before.decode("utf-8"))
-        if not isinstance(previous, dict) or previous.get("owner") != "latent-compass-shadow":
-            raise ShadowHarnessViolation(
-                "source cache ownership is not established",
-                detail={"reason": "source_cache_unowned"},
-            )
-        current = read_confined_file(
-            store_root, destination, max_bytes=MAX_HOOK_BYTES, what="shadow source cache"
-        )
-        if current != before:
+    if not os.path.lexists(destination.parent):
+        try:
+            write_new_file(store_root, destination, content, what="shadow source cache")
+        except ContractViolation as exc:
             raise ShadowHarnessViolation(
                 "source cache changed during refresh",
-                detail={"reason": "source_cache_changed"},
-            )
-        replace_file(store_root, destination, content, what="shadow source cache")
+                detail={"reason": "source_cache_changed", "detail": str(exc)},
+            ) from exc
+        return {key: value for key, value in cache.items() if key != "owner"}
+    lease = lease_confined_file(
+        store_root,
+        destination,
+        max_bytes=MAX_HOOK_BYTES,
+        what="shadow source cache",
+        allow_absent=True,
+    )
+    try:
+        if lease.content is not None:
+            previous = json.loads(lease.content.decode("utf-8"))
+            if not isinstance(previous, dict) or previous.get("owner") != "latent-compass-shadow":
+                raise ShadowHarnessViolation(
+                    "source cache ownership is not established",
+                    detail={"reason": "source_cache_unowned"},
+                )
+        lease.replace(content)
+    except ContractViolation as exc:
+        raise ShadowHarnessViolation(
+            "source cache changed during refresh",
+            detail={"reason": "source_cache_changed", "detail": str(exc)},
+        ) from exc
+    finally:
+        lease.close()
     return {key: value for key, value in cache.items() if key != "owner"}
 
 

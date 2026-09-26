@@ -101,6 +101,30 @@ def test_store_roots_are_host_local_and_separate(tmp_path: Path) -> None:
     assert default_store_root("codex", tmp_path) != default_store_root("claude", tmp_path)
 
 
+@pytest.mark.parametrize("alias", ["CON", "foo:bar"])
+def test_project_alias_must_be_a_portable_storage_component(repository: Path, alias: str) -> None:
+    payload = _config(repository).canonical_payload()
+    projects = payload["projects"]
+    assert isinstance(projects, list)
+    projects[0]["alias"] = alias
+
+    with pytest.raises(ContractViolation):
+        load_shadow_config(payload)
+
+
+def test_project_aliases_are_unique_under_windows_case_identity(
+    repository: Path, tmp_path: Path
+) -> None:
+    payload = _config(repository).canonical_payload()
+    projects = payload["projects"]
+    assert isinstance(projects, list)
+    projects[0]["alias"] = "Foo"
+    projects.append({**projects[0], "root": str(tmp_path / "second"), "alias": "foo"})
+
+    with pytest.raises(ContractViolation):
+        load_shadow_config(payload)
+
+
 def test_known_tool_yields_non_authoritative_advice_without_sensitive_content(
     repository: Path, tmp_path: Path
 ) -> None:

@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import platform
 import shutil
 from collections.abc import Callable
 from io import StringIO
@@ -25,7 +26,7 @@ from conftest import (
     write_json,
 )
 from latent_compass.cli import EXIT_INTEGRITY, EXIT_OK, EXIT_REFUSED, EXIT_STORE, main
-from latent_compass.confined_io import replace_file, write_new_file
+from latent_compass.confined_io import lease_confined_file, replace_file, write_new_file
 from latent_compass.errors import ContractViolation
 from latent_compass.pairwise_capture import load_judgeable_projection
 from latent_compass.protocol import Verdict
@@ -412,6 +413,90 @@ def test_confined_replacer_replaces_regular_file_without_temp_residue(tmp_path: 
 
     assert target.read_bytes() == b"after"
     assert not list(root.glob(".lc-*.tmp"))
+
+
+def test_confined_lease_detects_file_created_after_absent_observation(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    lease = lease_confined_file(
+        root,
+        target,
+        max_bytes=1024,
+        what="test journal",
+        allow_absent=True,
+    )
+    try:
+        target.write_bytes(b"peer")
+        with pytest.raises(ContractViolation, match="appeared after observation"):
+            lease.assert_current()
+        assert target.read_bytes() == b"peer"
+    finally:
+        lease.close()
+
+
+def test_confined_lease_detects_same_byte_identity_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"same")
+    replacement = root / "replacement.json"
+    replacement.write_bytes(b"same")
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        if platform.system() == "Windows":
+            assert lease.identity is not None
+            assert lease.identity.backend == "windows"
+            volume, file_id = lease.identity.token
+            assert isinstance(volume, int)
+            assert isinstance(file_id, bytes)
+            assert len(file_id) == 16
+            with pytest.raises(PermissionError):
+                replacement.replace(target)
+            lease.assert_current()
+        else:
+            replacement.replace(target)
+            with pytest.raises(ContractViolation, match="identity changed"):
+                lease.assert_current()
+    finally:
+        lease.close()
+    assert target.read_bytes() == b"same"
+
+
+def test_confined_lease_refreshes_after_replace_and_remove(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        lease.replace(b"after")
+        assert lease.content == b"after"
+        lease.assert_current()
+        lease.remove()
+        assert lease.exists is False
+        lease.assert_current()
+        assert not target.exists()
+    finally:
+        lease.close()
+
+
+def test_confined_lease_context_closes_handles_on_failure(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+
+    with (
+        pytest.raises(RuntimeError, match="injected"),
+        lease_confined_file(root, target, max_bytes=1024, what="test journal"),
+    ):
+        raise RuntimeError("injected failure")
+
+    replacement = root / "replacement.json"
+    replacement.write_bytes(b"after")
+    replacement.replace(target)
+    assert target.read_bytes() == b"after"
 
 
 def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:

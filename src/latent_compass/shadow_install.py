@@ -19,7 +19,9 @@ from typing import Final, TextIO, TypedDict, cast
 from latent_compass import __version__
 from latent_compass.canonical import canonical_text, seal
 from latent_compass.confined_io import (
+    ConfinedFileLease,
     confined_directory_exists,
+    lease_confined_file,
     plan_confined_target,
     read_confined_file,
     remove_file,
@@ -118,6 +120,9 @@ class _RecoveryObservation(TypedDict):
     backup: Path | None
     current: bytes | None
     backup_content: bytes | None
+    publication_state: str | None
+    target_lease: ConfinedFileLease | None
+    backup_lease: ConfinedFileLease | None
 
 
 def _json_bytes(payload: object) -> bytes:
@@ -249,17 +254,38 @@ def _remove_confined(
 
 def _complete_transaction_journal(home: Path, path: Path, expected: bytes) -> list[dict[str, str]]:
     try:
-        _remove_confined(
+        lease = lease_confined_file(
             home,
             path,
+            max_bytes=_MAX_TRANSACTION_FILE_BYTES,
             what="host transaction journal",
-            expected=expected,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ContractViolation) as exc:
         return [
             {
                 "code": "pending_transaction_conflict",
                 "path": str(path),
+                "detail": f"pending transaction journal changed before cleanup: {exc}",
+            }
+        ]
+    try:
+        if lease.content != expected:
+            raise ValueError("pending transaction journal bytes changed before cleanup")
+        return _complete_transaction_journal_lease(lease)
+    finally:
+        lease.close()
+
+
+def _complete_transaction_journal_lease(
+    lease: ConfinedFileLease,
+) -> list[dict[str, str]]:
+    try:
+        lease.remove()
+    except (OSError, ValueError, ContractViolation) as exc:
+        return [
+            {
+                "code": "pending_transaction_conflict",
+                "path": str(lease.path),
                 "detail": f"pending transaction journal changed before cleanup: {exc}",
             }
         ]
@@ -319,6 +345,9 @@ def _transaction_snapshot(home: Path, plan: dict[str, object]) -> dict[Path, byt
             runtime_present = False
         if not runtime_present:
             raise ValueError(f"runtime disappeared before transaction: {runtime_python}")
+    project_root = cast(Path | None, plan.get("_project_root"))
+    if project_root is not None and not project_root.is_dir():
+        raise ValueError(f"project root disappeared before transaction: {project_root}")
     return snapshots
 
 
@@ -339,6 +368,7 @@ def _rollback_transaction(
     *,
     journal_path: Path | None = None,
     journal_state: list[bytes] | None = None,
+    journal_lease: ConfinedFileLease | None = None,
 ) -> list[Path]:
     unresolved: list[Path] = []
     for path, after_content in written.items():
@@ -357,8 +387,12 @@ def _rollback_transaction(
                         if not journal_state:
                             unresolved.append(path)
                             continue
-                        journal_state[0] = _set_create_publication_state(
-                            home, journal_path, journal_state[0], path, "planned"
+                        journal_state[0] = (
+                            _set_create_publication_state_lease(journal_lease, path, "revoked")
+                            if journal_lease is not None
+                            else _set_create_publication_state(
+                                home, journal_path, journal_state[0], path, "revoked"
+                            )
                         )
                     _remove_confined(
                         home,
@@ -383,6 +417,7 @@ def _apply_frozen_operations(
     journal_path: Path,
     journal_state: list[bytes],
     attempted_creates: set[Path],
+    journal_lease: ConfinedFileLease | None = None,
 ) -> None:
     for operation in operations:
         if operation["action"] == "unchanged":
@@ -401,14 +436,22 @@ def _apply_frozen_operations(
             _remove_confined(home, path, what="managed host file", expected=before)
         else:
             if before is None:
-                journal_state[0] = _set_create_publication_state(
-                    home, journal_path, journal_state[0], path, "attempted"
+                journal_state[0] = (
+                    _set_create_publication_state_lease(journal_lease, path, "attempted")
+                    if journal_lease is not None
+                    else _set_create_publication_state(
+                        home, journal_path, journal_state[0], path, "attempted"
+                    )
                 )
                 attempted_creates.add(path)
             _atomic_bytes(path, after, home=home, expected=before)
             if before is None:
-                journal_state[0] = _set_create_publication_state(
-                    home, journal_path, journal_state[0], path, "confirmed"
+                journal_state[0] = (
+                    _set_create_publication_state_lease(journal_lease, path, "confirmed")
+                    if journal_lease is not None
+                    else _set_create_publication_state(
+                        home, journal_path, journal_state[0], path, "confirmed"
+                    )
                 )
         written[path] = after
 
@@ -424,6 +467,28 @@ def _set_create_publication_state(
     path: Path,
     state: str,
 ) -> bytes:
+    lease = lease_confined_file(
+        home,
+        journal_path,
+        max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+        what="host transaction journal",
+    )
+    try:
+        if lease.content != journal_content:
+            raise ValueError("pending transaction journal changed before state update")
+        return _set_create_publication_state_lease(lease, path, state)
+    finally:
+        lease.close()
+
+
+def _set_create_publication_state_lease(
+    lease: ConfinedFileLease,
+    path: Path,
+    state: str,
+) -> bytes:
+    journal_content = lease.content
+    if journal_content is None:
+        raise ValueError("pending transaction journal is absent")
     payload = json.loads(journal_content.decode("utf-8"))
     assert isinstance(payload, dict)
     entries = cast(list[dict[str, object]], payload["entries"])
@@ -432,7 +497,7 @@ def _set_create_publication_state(
             entry["publication_state"] = state
             break
     replacement = _json_bytes(payload)
-    _atomic_bytes(journal_path, replacement, home=home, expected=journal_content)
+    lease.replace(replacement)
     return replacement
 
 
@@ -514,6 +579,23 @@ def _begin_transaction(
     backup_tag: str,
     plan: dict[str, object],
 ) -> tuple[Path, bytes]:
+    lease = _begin_transaction_lease(
+        home=home, operation=operation, backup_tag=backup_tag, plan=plan
+    )
+    try:
+        assert lease.content is not None
+        return lease.path, lease.content
+    finally:
+        lease.close()
+
+
+def _begin_transaction_lease(
+    *,
+    home: Path,
+    operation: str,
+    backup_tag: str,
+    plan: dict[str, object],
+) -> ConfinedFileLease:
     entries: list[dict[str, object]] = []
     for item in cast(list[dict[str, object]], plan["files"]):
         if item["action"] == "unchanged":
@@ -542,8 +624,20 @@ def _begin_transaction(
     }
     path = _pending_transaction_path(home)
     _assert_safe_path_under(home, path)
-    _exclusive_json(path, journal, home=home)
-    return path, _json_bytes(journal)
+    content = _json_bytes(journal)
+    lease = lease_confined_file(
+        home,
+        path,
+        max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+        what="host transaction journal",
+        allow_absent=True,
+    )
+    try:
+        lease.replace(content)
+        return lease
+    except BaseException:
+        lease.close()
+        raise
 
 
 def _decode_pending_transaction(
@@ -606,6 +700,7 @@ def _decode_pending_transaction(
             "planned",
             "attempted",
             "confirmed",
+            "revoked",
             "not_applicable",
         }:
             raise ValueError("invalid pending transaction publication state")
@@ -628,6 +723,7 @@ def _decode_pending_transaction(
                 "planned",
                 "attempted",
                 "confirmed",
+                "revoked",
             }:
                 raise ValueError("create entry has inconsistent publication state")
             if before_digest is not None and publication_state != "not_applicable":
@@ -664,59 +760,132 @@ def _observe_recovery_targets(
         )
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
-    for path, before_digest, after_digest, backup in _decode_pending_transaction(home, journal_raw):
-        current = _regular_file_bytes_or_none(path, home=home)
-        current_digest = _bytes_digest(current)
-        if current_digest not in {before_digest, after_digest}:
-            return [
-                {
-                    "code": "pending_transaction_conflict",
-                    "path": str(path),
-                    "detail": "current bytes match neither transaction state; preserve and inspect",
-                }
-            ], []
-        if (
-            before_digest is None
-            and current_digest == after_digest
-            and not publication_confirmed[path]
+    publication_states = {
+        _lexical_absolute(Path(str(entry["path"]))): cast(
+            str | None, entry.get("publication_state")
+        )
+        for entry in cast(list[dict[str, object]], payload["entries"])
+    }
+    try:
+        for path, before_digest, after_digest, backup in _decode_pending_transaction(
+            home, journal_raw
         ):
-            return [
+            try:
+                target_lease = lease_confined_file(
+                    home,
+                    path,
+                    max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+                    what="managed host recovery target",
+                    allow_absent=True,
+                )
+            except ContractViolation:
+                if _path_entry_exists(path):
+                    raise
+                _assert_safe_path_under(home, path)
+                target_lease = None
+            backup_lease = (
+                lease_confined_file(
+                    home,
+                    backup,
+                    max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+                    what="host transaction recovery backup",
+                    allow_absent=True,
+                )
+                if backup is not None
+                else None
+            )
+            current = target_lease.content if target_lease is not None else None
+            backup_content = backup_lease.content if backup_lease is not None else None
+            current_digest = _bytes_digest(current)
+            if current_digest not in {before_digest, after_digest}:
+                if target_lease is not None:
+                    target_lease.close()
+                if backup_lease is not None:
+                    backup_lease.close()
+                _close_recovery_observations(observations)
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": (
+                            "current bytes match neither transaction state; preserve and inspect"
+                        ),
+                    }
+                ], []
+            if (
+                before_digest is None
+                and current_digest == after_digest
+                and not publication_confirmed[path]
+            ):
+                if target_lease is not None:
+                    target_lease.close()
+                if backup_lease is not None:
+                    backup_lease.close()
+                _close_recovery_observations(observations)
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": "create publication is unconfirmed; preserve and inspect",
+                    }
+                ], []
+            if backup_content is not None and _bytes_digest(backup_content) != before_digest:
+                if target_lease is not None:
+                    target_lease.close()
+                assert backup_lease is not None
+                backup_lease.close()
+                _close_recovery_observations(observations)
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(backup),
+                        "detail": "recovery backup digest mismatch",
+                    }
+                ], []
+            if (
+                current_digest == after_digest
+                and before_digest is not None
+                and backup_content is None
+            ):
+                if target_lease is not None:
+                    target_lease.close()
+                if backup_lease is not None:
+                    backup_lease.close()
+                _close_recovery_observations(observations)
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": "required recovery backup is missing",
+                    }
+                ], []
+            observations.append(
                 {
-                    "code": "pending_transaction_conflict",
-                    "path": str(path),
-                    "detail": "create publication is unconfirmed; preserve and inspect",
+                    "path": path,
+                    "before_digest": before_digest,
+                    "after_digest": after_digest,
+                    "backup": backup,
+                    "current": current,
+                    "backup_content": backup_content,
+                    "publication_state": publication_states[path],
+                    "target_lease": target_lease,
+                    "backup_lease": backup_lease,
                 }
-            ], []
-        backup_content = (
-            _regular_file_bytes_or_none(backup, home=home) if backup is not None else None
-        )
-        if backup_content is not None and _bytes_digest(backup_content) != before_digest:
-            return [
-                {
-                    "code": "pending_transaction_conflict",
-                    "path": str(backup),
-                    "detail": "recovery backup digest mismatch",
-                }
-            ], []
-        if current_digest == after_digest and before_digest is not None and backup_content is None:
-            return [
-                {
-                    "code": "pending_transaction_conflict",
-                    "path": str(path),
-                    "detail": "required recovery backup is missing",
-                }
-            ], []
-        observations.append(
-            {
-                "path": path,
-                "before_digest": before_digest,
-                "after_digest": after_digest,
-                "backup": backup,
-                "current": current,
-                "backup_content": backup_content,
-            }
-        )
+            )
+    except BaseException:
+        _close_recovery_observations(observations)
+        raise
     return [], observations
+
+
+def _close_recovery_observations(observations: list[_RecoveryObservation]) -> None:
+    for observation in observations:
+        target_lease = observation["target_lease"]
+        if target_lease is not None:
+            target_lease.close()
+        backup_lease = observation["backup_lease"]
+        if backup_lease is not None:
+            backup_lease.close()
 
 
 def _recover_pending_transaction(
@@ -725,12 +894,21 @@ def _recover_pending_transaction(
     apply: bool = True,
     journal_raw: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
     observations: list[_RecoveryObservation] | None = None,
+    journal_lease: ConfinedFileLease | None = None,
 ) -> list[dict[str, str]]:
     journal_path = _pending_transaction_path(home)
+    owned_journal_lease = journal_lease is None
+    owned_observations = observations is None
     try:
-        _assert_safe_path_under(home, journal_path)
-        current_journal = _regular_file_bytes_or_none(journal_path, home=home)
-        if not isinstance(journal_raw, _ExpectedUnset) and current_journal != journal_raw:
+        if journal_lease is None:
+            journal_lease = lease_confined_file(
+                home,
+                journal_path,
+                max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+                what="host transaction journal",
+                allow_absent=True,
+            )
+        if not isinstance(journal_raw, _ExpectedUnset) and journal_lease.content != journal_raw:
             return [
                 {
                     "code": "pending_transaction_conflict",
@@ -738,65 +916,82 @@ def _recover_pending_transaction(
                     "detail": "pending transaction journal changed after preview",
                 }
             ]
-        if current_journal is None:
-            return []
-        expected_journal = current_journal
-        if observations is None:
-            conflicts, observations = _observe_recovery_targets(home, expected_journal)
-            if conflicts:
-                return conflicts
-        for observation in observations:
-            current = _regular_file_bytes_or_none(observation["path"], home=home)
-            if current != observation["current"]:
-                return [
-                    {
-                        "code": "pending_transaction_conflict",
-                        "path": str(observation["path"]),
-                        "detail": "current bytes changed after recovery preflight",
-                    }
-                ]
-            backup = observation["backup"]
-            backup_content = (
-                _regular_file_bytes_or_none(backup, home=home) if backup is not None else None
-            )
-            if backup_content != observation["backup_content"]:
-                return [
-                    {
-                        "code": "pending_transaction_conflict",
-                        "path": str(backup),
-                        "detail": "recovery backup changed after preflight",
-                    }
-                ]
-        if not apply:
-            return []
-        current_journal = _regular_file_bytes_or_none(journal_path, home=home)
-        if current_journal != expected_journal:
+        try:
+            journal_lease.assert_current()
+        except ContractViolation as exc:
             return [
                 {
                     "code": "pending_transaction_conflict",
                     "path": str(journal_path),
-                    "detail": "pending transaction journal changed during recovery preflight",
+                    "detail": f"pending transaction journal changed after preview: {exc}",
+                }
+            ]
+        if journal_lease.content is None:
+            return []
+        if observations is None:
+            conflicts, observations = _observe_recovery_targets(home, journal_lease.content)
+            if conflicts:
+                return conflicts
+        for observation in observations:
+            try:
+                target_lease = observation["target_lease"]
+                if target_lease is None:
+                    _assert_safe_path_under(home, observation["path"])
+                    if _path_entry_exists(observation["path"]):
+                        raise ContractViolation(
+                            "managed host recovery target appeared after preflight"
+                        )
+                else:
+                    target_lease.assert_current()
+                backup_lease = observation["backup_lease"]
+                if backup_lease is not None:
+                    backup_lease.assert_current()
+            except ContractViolation as exc:
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(observation["path"]),
+                        "detail": f"recovery input changed after preflight: {exc}",
+                    }
+                ]
+        if not apply:
+            return []
+        try:
+            journal_lease.assert_current()
+        except ContractViolation as exc:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(journal_path),
+                    "detail": f"pending transaction journal changed during preflight: {exc}",
                 }
             ]
         for observation in observations:
-            path = observation["path"]
             current = observation["current"]
             if _bytes_digest(current) != observation["after_digest"]:
                 continue
             if observation["before_digest"] is None:
                 assert current is not None
-                _remove_confined(
-                    home,
-                    path,
-                    what="managed host recovery target",
-                    expected=current,
-                )
+                if observation["publication_state"] != "confirmed":
+                    return [
+                        {
+                            "code": "pending_transaction_conflict",
+                            "path": str(observation["path"]),
+                            "detail": "create publication authority is not confirmed",
+                        }
+                    ]
+                _set_create_publication_state_lease(journal_lease, observation["path"], "revoked")
+                target_lease = observation["target_lease"]
+                assert target_lease is not None
+                target_lease.remove()
             else:
                 backup_content = observation["backup_content"]
                 assert backup_content is not None
-                _atomic_bytes(path, backup_content, home=home, expected=current)
-        return _complete_transaction_journal(home, journal_path, expected_journal)
-    except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+                target_lease = observation["target_lease"]
+                assert target_lease is not None
+                target_lease.replace(backup_content)
+        return _complete_transaction_journal_lease(journal_lease)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, ContractViolation) as exc:
         return [
             {
                 "code": "pending_transaction_invalid",
@@ -804,6 +999,11 @@ def _recover_pending_transaction(
                 "detail": str(exc),
             }
         ]
+    finally:
+        if owned_observations and observations is not None:
+            _close_recovery_observations(observations)
+        if owned_journal_lease and journal_lease is not None:
+            journal_lease.close()
 
 
 def _pending_recovery_description(
@@ -901,24 +1101,53 @@ def _pending_recovery_preview(
     bytes | None,
     list[_RecoveryObservation],
 ]:
+    try:
+        conflicts, recovery, journal_lease, observations = _pending_recovery_session(home)
+    except ValueError as exc:
+        return (
+            [
+                {
+                    "code": "pending_transaction_invalid",
+                    "path": str(_pending_transaction_path(home)),
+                    "detail": str(exc),
+                }
+            ],
+            {"pending": True, "files": []},
+            None,
+            [],
+        )
+    try:
+        return conflicts, recovery, journal_lease.content, observations
+    finally:
+        _close_recovery_observations(observations)
+        journal_lease.close()
+
+
+def _pending_recovery_session(
+    home: Path,
+) -> tuple[
+    list[dict[str, str]],
+    dict[str, object],
+    ConfinedFileLease,
+    list[_RecoveryObservation],
+]:
     journal_path = _pending_transaction_path(home)
-    if not _path_entry_exists(journal_path):
-        return [], {"pending": False, "files": []}, None, []
     try:
-        _assert_safe_path_under(home, journal_path)
-        journal_raw = _regular_file_bytes_or_none(journal_path, home=home)
-        if journal_raw is None:
-            raise ValueError("pending transaction journal vanished during validation")
-    except (OSError, ValueError) as exc:
-        conflict = {
-            "code": "pending_transaction_invalid",
-            "path": str(journal_path),
-            "detail": str(exc),
-        }
-        return [conflict], {"pending": True, "files": []}, None, []
+        journal_lease = lease_confined_file(
+            home,
+            journal_path,
+            max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+            what="host transaction journal",
+            allow_absent=True,
+        )
+    except (OSError, ValueError, ContractViolation) as exc:
+        raise ValueError(f"cannot lease pending transaction journal: {exc}") from exc
+    observations: list[_RecoveryObservation] = []
+    if journal_lease.content is None:
+        return [], {"pending": False, "files": []}, journal_lease, observations
     try:
-        conflicts, observations = _observe_recovery_targets(home, journal_raw)
-    except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+        conflicts, observations = _observe_recovery_targets(home, journal_lease.content)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError, ContractViolation) as exc:
         conflicts = [
             {
                 "code": "pending_transaction_invalid",
@@ -932,7 +1161,7 @@ def _pending_recovery_preview(
         if not conflicts
         else {"pending": True, "files": []}
     )
-    return conflicts, recovery, journal_raw, observations
+    return conflicts, recovery, journal_lease, observations
 
 
 def _backup(
@@ -1358,7 +1587,7 @@ def _path_identity(path: Path, *, platform: str = os.name) -> str:
 
 def _default_project_alias(project_root: Path, *, platform: str = os.name) -> str:
     resolved = project_root.resolve()
-    readable = re.sub(r"[^A-Za-z0-9._:-]+", "-", resolved.name).strip("._:-")
+    readable = re.sub(r"[^A-Za-z0-9._-]+", "-", resolved.name).strip("._-")
     if not readable or not readable[0].isalnum():
         readable = "project"
     digest = seal("shadow.install.project-alias.v1", _path_identity(resolved, platform=platform))[
@@ -1465,10 +1694,15 @@ def _validate_host_paths(
     wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
     targets = (settings_path, config_path, ownership_path, wrapper_path)
     for target in targets:
-        plan_confined_target(home, target, what="managed host target")
-        _assert_safe_path_under(home, target)
-        if backup_tag is not None:
-            _assert_safe_path_under(home, _backup_destination(target, backup_tag))
+        try:
+            plan_confined_target(home, target, what="managed host target")
+            _assert_safe_path_under(home, target)
+            if backup_tag is not None:
+                backup = _backup_destination(target, backup_tag)
+                plan_confined_target(home, backup, what="managed host backup")
+                _assert_safe_path_under(home, backup)
+        except ContractViolation as exc:
+            raise ValueError(str(exc)) from exc
 
 
 def _file_plan(
@@ -1765,6 +1999,7 @@ def plan_install_shadow_hooks(
         "_operations": operations,
         "_observations": observations,
         "_runtime_python": runtime_python,
+        "_project_root": project_root,
     }
     if backup_tag is not None:
         conflicts.extend(_backup_conflicts(plan, backup_tag))
@@ -1797,7 +2032,7 @@ def install_shadow_hooks(
         return plan
     try:
         snapshots = _transaction_snapshot(home, plan)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ContractViolation) as exc:
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "concurrent_change", "path": "", "detail": str(exc)}
         )
@@ -1807,6 +2042,7 @@ def install_shadow_hooks(
         plan.pop("_operations", None)
         plan.pop("_observations", None)
         plan.pop("_runtime_python", None)
+        plan.pop("_project_root", None)
         plan["dry_run"] = False
         plan["states"] = host_status(
             home=home, project_root=project_root, hosts=hosts, dry_run=False
@@ -1816,14 +2052,19 @@ def install_shadow_hooks(
     operations = cast(list[_FileOperation], plan.pop("_operations"))
     plan.pop("_observations", None)
     plan.pop("_runtime_python", None)
+    plan.pop("_project_root", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
+    journal_lease: ConfinedFileLease | None = None
     journal_state: list[bytes] = []
     attempted_creates: set[Path] = set()
     try:
-        journal_path, journal_content = _begin_transaction(
+        journal_lease = _begin_transaction_lease(
             home=home, operation="install", backup_tag=backup_tag, plan=plan
         )
+        journal_path = journal_lease.path
+        journal_content = journal_lease.content
+        assert journal_content is not None
         journal_state = [journal_content]
         _apply_frozen_operations(
             home=home,
@@ -1834,14 +2075,16 @@ def install_shadow_hooks(
             journal_path=journal_path,
             journal_state=journal_state,
             attempted_creates=attempted_creates,
+            journal_lease=journal_lease,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ContractViolation) as exc:
         unresolved = _rollback_transaction(
             home,
             snapshots,
             written,
             journal_path=journal_path,
             journal_state=journal_state,
+            journal_lease=journal_lease,
         )
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
@@ -1854,33 +2097,20 @@ def install_shadow_hooks(
                     "detail": "current bytes changed after this transaction wrote the path",
                 }
             )
-        active_journal = journal_state[0] if journal_state else journal_content
-        if journal_path is not None and active_journal is not None:
-            collision_cleanup = (
-                _complete_transaction_journal(home, journal_path, active_journal)
-                if isinstance(exc, _DefiniteWriteRefusalError) and not unresolved
-                else _prune_unconfirmed_creates(
-                    home,
-                    journal_path,
-                    active_journal,
-                    {
-                        **written,
-                        **(
-                            dict.fromkeys(attempted_creates)
-                            if not isinstance(exc, _DefiniteWriteRefusalError)
-                            else {}
-                        ),
-                    },
-                )
-            )
-            cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
+        if journal_lease is not None:
+            journal_lease.close()
         plan["dry_run"] = False
         return plan
-    if journal_path is not None:
+    except BaseException:
+        if journal_lease is not None:
+            journal_lease.close()
+        raise
+    if journal_lease is not None:
         assert journal_state
         cast(list[dict[str, str]], plan["conflicts"]).extend(
-            _complete_transaction_journal(home, journal_path, journal_state[0])
+            _complete_transaction_journal_lease(journal_lease)
         )
+        journal_lease.close()
     plan["dry_run"] = False
     plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
         "states"
@@ -2103,12 +2333,16 @@ def remove_shadow_hooks(
     plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
+    journal_lease: ConfinedFileLease | None = None
     journal_state: list[bytes] = []
     attempted_creates: set[Path] = set()
     try:
-        journal_path, journal_content = _begin_transaction(
+        journal_lease = _begin_transaction_lease(
             home=home, operation="remove", backup_tag=backup_tag, plan=plan
         )
+        journal_path = journal_lease.path
+        journal_content = journal_lease.content
+        assert journal_content is not None
         journal_state = [journal_content]
         _apply_frozen_operations(
             home=home,
@@ -2119,14 +2353,16 @@ def remove_shadow_hooks(
             journal_path=journal_path,
             journal_state=journal_state,
             attempted_creates=attempted_creates,
+            journal_lease=journal_lease,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ContractViolation) as exc:
         unresolved = _rollback_transaction(
             home,
             snapshots,
             written,
             journal_path=journal_path,
             journal_state=journal_state,
+            journal_lease=journal_lease,
         )
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
@@ -2139,40 +2375,33 @@ def remove_shadow_hooks(
                     "detail": "current bytes changed after this transaction wrote the path",
                 }
             )
-        active_journal = journal_state[0] if journal_state else journal_content
-        if journal_path is not None and active_journal is not None:
-            collision_cleanup = (
-                _complete_transaction_journal(home, journal_path, active_journal)
-                if isinstance(exc, _DefiniteWriteRefusalError) and not unresolved
-                else _prune_unconfirmed_creates(
-                    home,
-                    journal_path,
-                    active_journal,
-                    {
-                        **written,
-                        **(
-                            dict.fromkeys(attempted_creates)
-                            if not isinstance(exc, _DefiniteWriteRefusalError)
-                            else {}
-                        ),
-                    },
-                )
-            )
-            cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
+        if journal_lease is not None:
+            journal_lease.close()
         plan["dry_run"] = False
         return plan
-    if journal_path is not None:
+    except BaseException:
+        if journal_lease is not None:
+            journal_lease.close()
+        raise
+    if journal_lease is not None:
         assert journal_state
         cast(list[dict[str, str]], plan["conflicts"]).extend(
-            _complete_transaction_journal(home, journal_path, journal_state[0])
+            _complete_transaction_journal_lease(journal_lease)
         )
+        journal_lease.close()
     plan["dry_run"] = False
     return plan
 
 
 def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
     home = _lexical_absolute(home)
-    conflicts, recovery, journal_raw, observations = _pending_recovery_preview(home)
+    conflicts, recovery, _journal_raw, _observations = _pending_recovery_preview(home)
+    return _recovery_plan_payload(conflicts=conflicts, recovery=recovery)
+
+
+def _recovery_plan_payload(
+    *, conflicts: list[dict[str, str]], recovery: dict[str, object]
+) -> dict[str, object]:
     files = cast(list[dict[str, object]], recovery.get("files", []))
     return {
         "schema_version": 1,
@@ -2189,28 +2418,44 @@ def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
             else []
         ),
         "recovery": recovery,
-        "_journal_raw": journal_raw,
-        "_recovery_observations": observations,
     }
 
 
 def recover_shadow_hooks(*, home: Path) -> dict[str, object]:
     home = _lexical_absolute(home)
-    plan = plan_recover_shadow_hooks(home=home)
-    journal_raw = cast(bytes | None, plan.pop("_journal_raw"))
-    observations = cast(list[_RecoveryObservation], plan.pop("_recovery_observations"))
-    if plan["conflicts"]:
+    try:
+        initial_conflicts, recovery, journal_lease, observations = _pending_recovery_session(home)
+    except ValueError as exc:
+        initial_conflicts = [
+            {
+                "code": "pending_transaction_invalid",
+                "path": str(_pending_transaction_path(home)),
+                "detail": str(exc),
+            }
+        ]
+        recovery = {"pending": True, "files": []}
+        plan = _recovery_plan_payload(conflicts=initial_conflicts, recovery=recovery)
         plan["dry_run"] = False
         return plan
-    conflicts = _recover_pending_transaction(
-        home, journal_raw=journal_raw, observations=observations
-    )
-    if conflicts:
-        cast(list[dict[str, str]], plan["conflicts"]).extend(conflicts)
-    plan["dry_run"] = False
-    recovery = cast(dict[str, object], plan["recovery"])
-    plan["recovery"] = {**recovery, "completed": not conflicts}
-    return plan
+    plan = _recovery_plan_payload(conflicts=initial_conflicts, recovery=recovery)
+    try:
+        if initial_conflicts:
+            plan["dry_run"] = False
+            return plan
+        conflicts = _recover_pending_transaction(
+            home,
+            journal_raw=journal_lease.content,
+            observations=observations,
+            journal_lease=journal_lease,
+        )
+        if conflicts:
+            cast(list[dict[str, str]], plan["conflicts"]).extend(conflicts)
+        plan["dry_run"] = False
+        plan["recovery"] = {**recovery, "completed": not conflicts}
+        return plan
+    finally:
+        _close_recovery_observations(observations)
+        journal_lease.close()
 
 
 def host_status(
