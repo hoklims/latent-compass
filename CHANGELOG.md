@@ -9,7 +9,19 @@ README and evidence documents rather than being promoted by this history.
 
 ## [Unreleased]
 
-No unreleased user-facing change is currently recorded.
+### Added
+
+- Public `latent-compass host install|status|remove` workflow with deterministic
+  JSON, read-only preflight, per-project removal and truthful host state.
+- Persistent `uv tool` installation support with the passive host wrapper
+  shipped inside the wheel.
+
+### Changed
+
+- The next package version is `0.3.0`; the existing `0.2.0` GitHub release is
+  retained as history and is never reused for the first PyPI publication.
+- Release automation publishes attested artifacts through PyPI Trusted
+  Publishing, while verification now covers Linux, Windows and macOS.
 
 ## [0.2.0] - 2026-09-20
 

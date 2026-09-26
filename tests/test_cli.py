@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import platform
 import shutil
 from collections.abc import Callable
 from io import StringIO
@@ -25,7 +26,7 @@ from conftest import (
     write_json,
 )
 from latent_compass.cli import EXIT_INTEGRITY, EXIT_OK, EXIT_REFUSED, EXIT_STORE, main
-from latent_compass.confined_io import write_new_file
+from latent_compass.confined_io import lease_confined_file, replace_file, write_new_file
 from latent_compass.errors import ContractViolation
 from latent_compass.pairwise_capture import load_judgeable_projection
 from latent_compass.protocol import Verdict
@@ -326,17 +327,418 @@ def test_confined_writer_refuses_root_ancestor_swap(
     original_backend = getattr(confined_io, backend_name)
 
     def swap_ancestor_before_open(
-        backend_root: Path, relative: Path, data: bytes, *, what: str
+        backend_root: Path,
+        relative: Path,
+        data: bytes,
+        *,
+        what: str,
+        replace: bool,
     ) -> None:
         authority_parent.rename(moved_authority)
         authority_parent.symlink_to(outside, target_is_directory=True)
-        original_backend(backend_root, relative, data, what=what)
+        original_backend(backend_root, relative, data, what=what, replace=replace)
 
     monkeypatch.setattr(confined_io, backend_name, swap_ancestor_before_open)
     with pytest.raises(ContractViolation):
         write_new_file(root, destination, b"must stay confined", what="test destination")
 
     assert not (outside / "root" / destination.name).exists()
+
+
+def test_confined_replacer_refuses_parent_swap_without_outside_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    authority_parent = tmp_path / "authority"
+    root = authority_parent / "root"
+    parent = root / "host"
+    parent.mkdir(parents=True)
+    target = parent / "settings.json"
+    target.write_bytes(b"before")
+    moved_authority = tmp_path / "moved-authority"
+    outside = tmp_path / "outside"
+    outside_target = outside / "root" / "host" / target.name
+    outside_target.parent.mkdir(parents=True)
+    outside_target.write_bytes(b"outside")
+    backend_name = "_write_windows" if os.name == "nt" else "_write_posix"
+    original_backend = getattr(confined_io, backend_name)
+
+    def swap_ancestor_before_open(
+        backend_root: Path,
+        relative: Path,
+        data: bytes,
+        *,
+        what: str,
+        replace: bool,
+    ) -> None:
+        authority_parent.rename(moved_authority)
+        authority_parent.symlink_to(outside, target_is_directory=True)
+        original_backend(backend_root, relative, data, what=what, replace=replace)
+
+    monkeypatch.setattr(confined_io, backend_name, swap_ancestor_before_open)
+    with pytest.raises(ContractViolation):
+        replace_file(root, target, b"after", what="managed host file")
+
+    assert outside_target.read_bytes() == b"outside"
+    assert (moved_authority / "root" / "host" / target.name).read_bytes() == b"before"
+
+
+def test_confined_replacer_refuses_static_linked_parent(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_target = outside / "settings.json"
+    outside_target.write_bytes(b"outside")
+    linked_parent = root / "host"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.fail(f"directory link support is required for this security witness: {exc}")
+
+    with pytest.raises(ContractViolation):
+        replace_file(root, linked_parent / "settings.json", b"after", what="managed host file")
+
+    assert outside_target.read_bytes() == b"outside"
+
+
+def test_confined_replacer_replaces_regular_file_without_temp_residue(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "settings.json"
+    target.write_bytes(b"before")
+
+    replace_file(root, target, b"after", what="managed host file")
+
+    assert target.read_bytes() == b"after"
+    assert not list(root.glob(".lc-*.tmp"))
+
+
+def test_confined_lease_detects_file_created_after_absent_observation(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    lease = lease_confined_file(
+        root,
+        target,
+        max_bytes=1024,
+        what="test journal",
+        allow_absent=True,
+    )
+    try:
+        target.write_bytes(b"peer")
+        with pytest.raises(
+            ContractViolation, match=r"(?:appeared|changed) after observation"
+        ) as exc_info:
+            lease.assert_current()
+        assert exc_info.value.detail == {
+            "what": "test journal",
+            "path": str(target),
+            "reason": "identity",
+        }
+        assert target.read_bytes() == b"peer"
+    finally:
+        lease.close()
+
+
+def test_confined_lease_rejects_oversize_before_publication(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    lease = lease_confined_file(
+        root,
+        target,
+        max_bytes=10,
+        what="test journal",
+        allow_absent=True,
+    )
+    try:
+        with pytest.raises(ContractViolation, match="configured byte limit") as exc_info:
+            lease.replace(b"x" * 11)
+        assert exc_info.value.detail == {
+            "what": "test journal",
+            "path": str(target),
+            "reason": "too_large",
+            "max_bytes": 10,
+        }
+        assert not target.exists()
+    finally:
+        lease.close()
+
+
+def test_confined_lease_detects_same_byte_identity_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"same")
+    replacement = root / "replacement.json"
+    replacement.write_bytes(b"same")
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        if platform.system() == "Windows":
+            assert lease.identity is not None
+            assert lease.identity.backend == "windows"
+            volume, file_id = lease.identity.token
+            assert isinstance(volume, int)
+            assert isinstance(file_id, bytes)
+            assert len(file_id) == 16
+            with pytest.raises(PermissionError):
+                replacement.replace(target)
+            lease.assert_current()
+        else:
+            replacement.replace(target)
+            with pytest.raises(ContractViolation, match="identity changed"):
+                lease.assert_current()
+    finally:
+        lease.close()
+    assert target.read_bytes() == b"same"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native POSIX descriptor semantics")
+def test_posix_lease_revalidates_after_staging_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    peer = root / "peer.json"
+    peer.write_bytes(b"before")
+    peer_identity = peer.stat().st_ino
+    real_fsync = os.fsync
+    substituted = False
+    fsync_calls = 0
+
+    def substitute_during_parent_fsync(descriptor: int) -> None:
+        nonlocal fsync_calls, substituted
+        fsync_calls += 1
+        if fsync_calls == 2:
+            peer.replace(target)
+            substituted = True
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", substitute_during_parent_fsync)
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        with pytest.raises(ContractViolation, match="identity changed after observation"):
+            lease.replace(b"after")
+    finally:
+        lease.close()
+
+    assert substituted is True
+    assert fsync_calls == 2
+    assert target.read_bytes() == b"before"
+    assert target.stat().st_ino == peer_identity
+
+
+def test_confined_lease_refreshes_after_replace_and_remove(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        lease.replace(b"after")
+        assert lease.content == b"after"
+        lease.assert_current()
+        lease.remove()
+        assert lease.exists is False
+        lease.assert_current()
+        assert not target.exists()
+    finally:
+        lease.close()
+
+
+def test_confined_lease_context_closes_handles_on_failure(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+
+    with (
+        pytest.raises(RuntimeError, match="injected"),
+        lease_confined_file(root, target, max_bytes=1024, what="test journal"),
+    ):
+        raise RuntimeError("injected failure")
+
+    replacement = root / "replacement.json"
+    replacement.write_bytes(b"after")
+    replacement.replace(target)
+    assert target.read_bytes() == b"after"
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_lease_keeps_original_until_publish_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    peer = root / "peer.json"
+    peer.write_bytes(b"peer")
+    reached = False
+
+    def fail_before_publish(
+        lease: object,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: object = None,
+        retain_published_handle: bool = False,
+    ) -> int | None:
+        nonlocal reached
+        del lease, data, replace, before_publish, retain_published_handle
+        reached = True
+        with pytest.raises(PermissionError):
+            peer.replace(target)
+        raise OSError("injected pre-publication failure")
+
+    monkeypatch.setattr("latent_compass.confined_io._write_windows_at", fail_before_publish)
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        with pytest.raises(OSError, match="pre-publication"):
+            lease.replace(b"after")
+        assert reached is True
+        lease.assert_current()
+        assert lease.content == b"before"
+    finally:
+        lease.close()
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_replace_revalidates_after_staging_before_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    real_assert = confined_io.ConfinedFileLease.assert_current
+    checks = 0
+
+    def refuse_final_check(held: confined_io.ConfinedFileLease) -> None:
+        nonlocal checks
+        checks += 1
+        real_assert(held)
+        if checks == 2:
+            raise ContractViolation("injected final revalidation refusal")
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(confined_io.ConfinedFileLease, "assert_current", refuse_final_check)
+            with pytest.raises(ContractViolation, match="final revalidation"):
+                lease.replace(b"after")
+        assert checks == 2
+        lease.assert_current()
+        assert lease.content == b"before"
+        lease.replace(b"after")
+        assert lease.content == b"after"
+    finally:
+        lease.close()
+    assert target.read_bytes() == b"after"
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_lease_marks_post_publication_failure_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    real_writer = confined_io._write_windows_at  # noqa: SLF001 - native backend witness
+    published = False
+
+    def publish_then_fail(
+        lease: confined_io.ConfinedFileLease,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: Callable[[], None] | None = None,
+        retain_published_handle: bool = False,
+    ) -> int | None:
+        nonlocal published
+        real_writer(
+            lease,
+            data,
+            replace=replace,
+            before_publish=before_publish,
+            retain_published_handle=False,
+        )
+        published = True
+        raise OSError("injected failure after publication")
+
+    monkeypatch.setattr(confined_io, "_write_windows_at", publish_then_fail)
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        with pytest.raises(OSError, match="after publication"):
+            lease.replace(b"after")
+        assert published is True
+        assert target.read_bytes() == b"after"
+        with pytest.raises(ContractViolation, match="publication outcome is uncertain") as exc_info:
+            lease.assert_current()
+        assert exc_info.value.detail == {
+            "what": "test journal",
+            "path": str(target),
+            "reason": "publication_uncertain",
+        }
+    finally:
+        lease.close()
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_lease_retains_created_handle_until_safe_delete(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    lease = lease_confined_file(
+        root,
+        target,
+        max_bytes=1024,
+        what="test journal",
+        allow_absent=True,
+    )
+    try:
+        lease.replace(b"owned")
+        assert lease.identity is not None
+        peer = root / "peer.json"
+        peer.write_bytes(b"owned")
+        replacement_blocked = False
+        try:
+            peer.replace(target)
+        except PermissionError:
+            replacement_blocked = True
+        if replacement_blocked:
+            lease.assert_current()
+            lease.remove()
+            assert not target.exists()
+            assert peer.read_bytes() == b"owned"
+        else:
+            with pytest.raises(ContractViolation, match="identity changed"):
+                lease.remove()
+            assert target.read_bytes() == b"owned"
+    finally:
+        lease.close()
+
+    owned = root / "owned.json"
+    with lease_confined_file(
+        root,
+        owned,
+        max_bytes=1024,
+        what="owned target",
+        allow_absent=True,
+    ) as owned_lease:
+        owned_lease.replace(b"owned")
+        owned_lease.assert_current()
+        owned_lease.remove()
+    assert not owned.exists()
 
 
 def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:
@@ -444,6 +846,40 @@ def test_confined_writer_cleanup_failure_cannot_leave_payload_temp(
     assert destination.read_bytes() == b"winner"
     assert not list(root.glob(".lc-*.tmp"))
     assert any("FILE_DELETE_ON_CLOSE remains active" in note for note in refusal.value.__notes__)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows post-publication durability")
+def test_windows_post_rename_flush_failure_preserves_published_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    destination = root / "managed.json"
+    destination.write_bytes(b"before")
+    kernel32 = getattr(confined_io, "_kernel32")  # noqa: B009 - absent on POSIX type paths
+    real_flush = kernel32.FlushFileBuffers
+    flush_calls = 0
+    disposed = False
+
+    def fail_second_flush(handle: int) -> int:
+        nonlocal flush_calls
+        flush_calls += 1
+        return 0 if flush_calls == 2 else real_flush(handle)
+
+    def record_dispose(_handle: int) -> None:
+        nonlocal disposed
+        disposed = True
+
+    monkeypatch.setattr(kernel32, "FlushFileBuffers", fail_second_flush)
+    monkeypatch.setattr(confined_io, "_dispose_windows_file", record_dispose)
+
+    with pytest.raises(OSError, match=r"managed\.json"):
+        replace_file(root, destination, b"after", what="managed test target")
+
+    assert disposed is False
+    assert destination.read_bytes() == b"after"
 
 
 def test_confined_writer_preserves_one_concurrent_winner(tmp_path: Path) -> None:
@@ -873,6 +1309,7 @@ def test_there_is_no_command_that_executes_or_promotes() -> None:
         "memory",
         "reconcile",
         "shadow",
+        "host",
     }
     for forbidden in ("run", "execute", "apply", "promote", "deploy", "sync", "push", "fetch"):
         assert forbidden not in commands

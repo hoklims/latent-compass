@@ -172,17 +172,55 @@ It writes nothing to stdout, is fail-open, runs asynchronously and never gives
 its decision back to the model, route or permission system. Codex and Claude
 use physically separate configurations and stores.
 
-The reversible installer edits only the two existing hook configuration files,
-after creating timestamped backups:
+The reversible installer preflights every selected host before it changes any
+file, then creates timestamped backups for existing files:
 
 ```text
-python -m latent_compass.shadow_install install \
-  --runtime-python <isolated-runtime-python> \
-  --hook-script <installed-host-wrapper> \
-  --project-root <allowed-repository-root>
+latent-compass host install --host codex \
+  --project-root <allowed-repository-root> \
+  --project-alias <stable-project-alias> --dry-run --json
 
-python -m latent_compass.shadow_install remove
+latent-compass host install --host codex \
+  --project-root <allowed-repository-root> \
+  --project-alias <stable-project-alias> --json
+
+latent-compass host status --host codex \
+  --project-root <allowed-repository-root> --json
+
+latent-compass host remove --host codex \
+  --project-alias <stable-project-alias> --dry-run --json
+
+latent-compass host recover --dry-run --json
+latent-compass host recover --json
 ```
+
+The installed tool environment's interpreter runs a packaged wrapper resource
+that the installer materializes in the selected host store, so `uv tool install
+.` provides a persistent runtime without depending on the source checkout. The legacy `python -m
+latent_compass.shadow_install` entry point and its explicit `--runtime-python`
+and `--hook-script` options remain available for controlled deployments.
+Removing one project keeps every other project registration and leaves the
+hooks active. Removing the final registration removes only Latent Compass hook
+groups and the host registration file; observation journals remain available.
+Before its first mutation, install or remove writes a minimal pending journal
+containing paths and before/after digests, but no copied hook contents. An
+interrupted transaction makes later install/remove previews return
+`recovery_required`. `host recover --dry-run --json` reports the exact repair;
+apply performs only those actions. If current bytes match neither recorded
+state, recovery returns `pending_transaction_conflict`, preserves the file and
+its backup, and requires operator inspection. Run the original setup again
+after recovery succeeds.
+
+The installer's portable filesystem boundary rejects paths that are already
+redirected through symbolic links or Windows reparse points, and it refuses a
+parent substitution encountered while opening a path. It does not claim to
+contain a local peer that can rename an already-open profile directory during
+the operation: POSIX directory descriptors continue to address a directory
+after it has been moved. Run host installation and recovery only while other
+processes with permission to rename the selected profile directories are
+quiescent. File creation remains exclusive; updates are revalidated immediately
+before atomic replacement, with backups and the pending journal retained for
+recovery when completion is uncertain.
 
 Codex binds trust to the current hook definition. A newly installed or changed
 hook therefore remains skipped until an operator reviews it through Codex's
@@ -207,8 +245,11 @@ without being displayed. It never launches Git, a model, a network request or
 an operational recommendation. Its
 states are `NOT_CONFIGURED`, `HOST_CONFIGURATION_INVALID`,
 `SHADOW_CONFIGURATION_INVALID`, `DISABLED`, `PROJECT_NOT_REGISTERED`,
-`HOOKS_MISSING`, `RUNTIME_MISSING`, `NO_OBSERVATIONS`, `OBSERVING` and
-`DEGRADED`. A truncated scan is explicitly `DEGRADED`; its counts are partial.
+`HOOKS_MISSING`, `RUNTIME_MISSING`, `NO_OBSERVATIONS`, `OBSERVATION_UNKNOWN`,
+`OBSERVING` and `DEGRADED`. Windows reports `OBSERVATION_UNKNOWN` when an event
+directory exists because this release has no handle-bound Windows directory
+enumerator; all derived observation metrics are `null`, never zero or false.
+A truncated scan is explicitly `DEGRADED`; its counts are partial.
 Trust is reported
 as `UNKNOWN` because filesystem inspection cannot replace the host's own trust
 review.

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from collections import Counter
 from datetime import datetime
@@ -14,14 +16,46 @@ from typing import Final, Literal, TextIO
 
 from latent_compass import __version__
 from latent_compass.canonical import seal
-from latent_compass.shadow_harness import DEFAULT_CONFIG_NAME, ShadowProject, load_shadow_config
+from latent_compass.confined_io import (
+    confined_directory_exists,
+    list_confined_json_files,
+    read_confined_file,
+)
+from latent_compass.errors import ContractViolation
+from latent_compass.shadow_harness import (
+    DEFAULT_CONFIG_NAME,
+    ShadowProject,
+    decode_host_json,
+    host_command_home_is_eligible,
+    load_shadow_config,
+    parse_host_hook_command,
+    validate_host_settings,
+)
 
 Host = Literal["codex", "claude"]
 HOSTS: Final[tuple[Host, ...]] = ("codex", "claude")
 EXPECTED_EVENTS: Final = frozenset({"SessionStart", "PreToolUse", "PostToolUse"})
 MAX_EVENT_FILES: Final = 10_000
 MAX_EVENT_BYTES: Final = 1_048_576
-_HOOK_MARKERS: Final = ("latent-compass-shadow-hook.py", "latent_compass.shadow_harness")
+_HOOK_EVENTS: Final = {
+    "codex": {
+        "SessionStart": "startup|resume|clear",
+        "PreToolUse": (
+            "^(?:apply_patch|functions\\.exec|functions\\.wait|view_image|web\\.run|write_stdin)$"
+        ),
+        "PostToolUse": (
+            "Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.exec"
+        ),
+    },
+    "claude": {
+        "SessionStart": "startup|resume",
+        "PreToolUse": (
+            "^(?:Agent|Bash|Edit|Glob|Grep|MultiEdit|NotebookEdit|Read|WebFetch|WebSearch|Write)$"
+        ),
+        "PostToolUse": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+    },
+}
+_OWNERSHIP_NAME: Final = "ownership.json"
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _SEAL = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERDICTS: Final = frozenset({"ADVICE", "ABSTAIN", "ESCALATE"})
@@ -49,19 +83,67 @@ _RECORD_FIELDS: Final = frozenset(
 )
 
 
-def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
-    pattern = (
-        r"^& '([^']+)' '([^']+)' --host codex$"
-        if host == "codex"
-        else r'^"([^"]+)" "([^"]+)" --host claude$'
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(path))  # noqa: PTH100 - must not follow links
+
+
+def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, bool]:
+    path = store / _OWNERSHIP_NAME
+    if not path.is_file():
+        return None, None, True
+    try:
+        raw = read_confined_file(
+            store, path, max_bytes=MAX_EVENT_BYTES, what="shadow ownership manifest"
+        )
+        payload = decode_host_json(raw.decode("utf-8"))
+    except (
+        OSError,
+        ContractViolation,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
+        return None, None, False
+    valid = (
+        isinstance(payload, dict)
+        and set(payload) == {"schema_version", "host", "command", "wrapper_digest"}
+        and type(payload.get("schema_version")) is int
+        and payload.get("schema_version") == 2
+        and payload.get("host") == host
+        and isinstance(payload.get("command"), str)
+        and isinstance(payload.get("wrapper_digest"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is not None
+        and (parsed := parse_host_hook_command(str(payload.get("command")), host)) is not None
+        and host_command_home_is_eligible(parsed[2], store.parents[1])
     )
-    match = re.fullmatch(pattern, command)
-    if match is None:
-        return None
-    runtime, wrapper = Path(match.group(1)), Path(match.group(2))
-    if wrapper.name != "latent-compass-shadow-hook.py":
-        return None
-    return runtime, wrapper
+    if not valid:
+        return None, None, False
+    assert isinstance(payload, dict)
+    return str(payload["command"]), str(payload["wrapper_digest"]), True
+
+
+def _expected_group(event: str, host: Host, command: str) -> dict[str, object]:
+    group: dict[str, object] = {
+        "hooks": [{"type": "command", "command": command, "async": True, "timeout": 10}]
+    }
+    matcher = _HOOK_EVENTS[host][event]
+    if matcher is not None:
+        group["matcher"] = matcher
+    return group
+
+
+def _wrapper_matches(root: Path, path: Path, expected_digest: str | None) -> bool:
+    try:
+        content = read_confined_file(
+            root,
+            path,
+            max_bytes=MAX_EVENT_BYTES,
+            what="owned shadow wrapper",
+        )
+        return expected_digest == f"sha256:{hashlib.sha256(content).hexdigest()}"
+    except (OSError, ContractViolation):
+        return False
 
 
 def _host_settings(home: Path, host: Host) -> Path:
@@ -72,53 +154,116 @@ def _store_root(home: Path, host: Host) -> Path:
     return home / f".{host}" / "latent-compass-shadow"
 
 
-def _hook_state(path: Path, host: Host) -> dict[str, object]:
+def _is_reparse_point(info: os.stat_result) -> bool:
+    return bool(getattr(info, "st_file_attributes", 0) & 0x400)
+
+
+def _entry_kind_safe(path: Path, *, directory: bool) -> bool:
+    if not os.path.lexists(path):
+        return False
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+        return False
+    return stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+
+
+def _parents_safe(path: Path) -> bool:
+    absolute = Path(os.path.abspath(path))  # noqa: PTH100 - resolve would follow links
+    for parent in reversed(absolute.parents):
+        if not os.path.lexists(parent):
+            continue
+        if not _entry_kind_safe(parent, directory=True):
+            return False
+    return True
+
+
+def _regular_file_safe_or_absent(path: Path) -> bool:
+    return _parents_safe(path) and (
+        not os.path.lexists(path) or _entry_kind_safe(path, directory=False)
+    )
+
+
+def _lexically_within(root: Path, candidate: Path) -> bool:
+    root_absolute = Path(os.path.abspath(root))  # noqa: PTH100 - lexical boundary
+    candidate_absolute = Path(os.path.abspath(candidate))  # noqa: PTH100 - lexical boundary
+    return candidate_absolute.is_relative_to(root_absolute)
+
+
+def _host_paths_safe(home: Path, host: Host) -> bool:
+    root = Path(os.path.abspath(home))  # noqa: PTH100 - resolve would follow links
+    if not _parents_safe(root):
+        return False
+    if os.path.lexists(root) and not _entry_kind_safe(root, directory=True):
+        return False
+    host_root = root / f".{host}"
+    store = host_root / "latent-compass-shadow"
+    settings = _host_settings(root, host)
+    for directory in (host_root, store, store / "runtime"):
+        if os.path.lexists(directory) and not _entry_kind_safe(directory, directory=True):
+            return False
+    for leaf in (settings, store / _OWNERSHIP_NAME, store / DEFAULT_CONFIG_NAME):
+        if os.path.lexists(leaf) and not _entry_kind_safe(leaf, directory=False):
+            return False
+    return True
+
+
+def _hook_state(
+    path: Path,
+    host: Host,
+    owned_command: str | None,
+    wrapper_digest: str | None,
+    home: Path,
+    store: Path,
+) -> dict[str, object]:
     if not path.is_file():
         return {"configuration_present": False, "events": [], "runtime_present": None}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raw = read_confined_file(home, path, max_bytes=MAX_EVENT_BYTES, what="host hook settings")
+        payload = validate_host_settings(decode_host_json(raw.decode("utf-8")))
+    except (
+        OSError,
+        ContractViolation,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
         return {
             "configuration_present": True,
             "configuration_valid": False,
             "events": [],
             "runtime_present": None,
         }
-    hooks = payload.get("hooks") if isinstance(payload, dict) else None
-    if not isinstance(hooks, dict):
-        return {
-            "configuration_present": True,
-            "configuration_valid": False,
-            "events": [],
-            "runtime_present": None,
-        }
+    hooks = payload["hooks"]
+    assert isinstance(hooks, dict)
     events: set[str] = set()
     runtime_states: list[bool] = []
     wrapper_states: list[bool] = []
     for event, groups in hooks.items():
-        if not isinstance(event, str) or not isinstance(groups, list):
-            continue
+        assert isinstance(event, str)
+        assert isinstance(groups, list)
         for group in groups:
-            handlers = group.get("hooks") if isinstance(group, dict) else None
-            if not isinstance(handlers, list):
+            if owned_command is None or event not in _HOOK_EVENTS[host]:
                 continue
-            for handler in handlers:
-                command = handler.get("command") if isinstance(handler, dict) else None
-                if not (
-                    isinstance(handler, dict)
-                    and handler.get("type") == "command"
-                    and handler.get("async") is True
-                    and isinstance(command, str)
-                    and any(marker in command for marker in _HOOK_MARKERS)
-                ):
-                    continue
-                parsed = _parse_hook_command(command, host)
-                if parsed is None:
-                    continue
-                runtime, wrapper = parsed
-                events.add(event)
+            if group != _expected_group(event, host, owned_command):
+                continue
+            if event in events:
+                return {
+                    "configuration_present": True,
+                    "configuration_valid": False,
+                    "events": [],
+                    "runtime_present": None,
+                    "wrapper_present": None,
+                }
+            parsed = parse_host_hook_command(owned_command, host)
+            assert parsed is not None
+            runtime, wrapper, _selected_home = parsed
+            events.add(event)
+            try:
                 runtime_states.append(runtime.is_file())
-                wrapper_states.append(wrapper.is_file())
+            except OSError:
+                runtime_states.append(False)
+            wrapper_states.append(_wrapper_matches(store, wrapper, wrapper_digest))
     runtime_present = all(runtime_states) if runtime_states else None
     wrapper_present = all(wrapper_states) if wrapper_states else None
     return {
@@ -136,14 +281,22 @@ def _project_for_root(
     candidate = project_root.resolve(strict=False)
     for project in projects:
         root = Path(project.root).resolve(strict=False)
-        if candidate == root or candidate.is_relative_to(root):
+        if candidate == root:
             return project
     return None
 
 
 def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict[str, object]:
     root = store / "events" / alias
-    if not root.is_dir():
+    try:
+        root_exists = confined_directory_exists(
+            store,
+            root,
+            what="shadow event directory",
+        )
+    except (OSError, ContractViolation):
+        return {"unsafe_event_store": True}
+    if not root_exists:
         return {
             "event_count": 0,
             "session_count": 0,
@@ -151,8 +304,24 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             "last_observed_at": None,
             "invalid_event_count": 0,
             "truncated": False,
+            "unsafe_event_store": False,
         }
-    paths, truncated = _bounded_json_paths(root)
+    try:
+        paths, truncated = list_confined_json_files(
+            store,
+            root,
+            max_entries=MAX_EVENT_FILES,
+            what="shadow event directory",
+        )
+    except ContractViolation as exc:
+        if (
+            isinstance(exc.detail, dict)
+            and exc.detail.get("reason") == "windows_handle_bound_enumeration_unavailable"
+        ):
+            return {"observation_unknown": True}
+        return {"unsafe_event_store": True}
+    except OSError:
+        return {"unsafe_event_store": True}
     verdicts: Counter[str] = Counter()
     sessions: set[str] = set()
     last_observed_at: str | None = None
@@ -160,17 +329,20 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
     invalid = 0
     for path in paths:
         try:
-            with path.open("rb") as handle:
-                raw = handle.read(MAX_EVENT_BYTES + 1)
+            if not _entry_kind_safe(path, directory=False):
+                return {"unsafe_event_store": True}
+            raw = read_confined_file(
+                store,
+                path,
+                max_bytes=MAX_EVENT_BYTES + 1,
+                what="shadow event record",
+            )
             if len(raw) > MAX_EVENT_BYTES:
                 invalid += 1
                 continue
-            record = json.loads(
-                raw.decode("utf-8"),
-                parse_constant=lambda value: (_ for _ in ()).throw(
-                    ValueError(f"non-finite JSON constant {value}")
-                ),
-            )
+            record = decode_host_json(raw.decode("utf-8"))
+        except ContractViolation:
+            return {"unsafe_event_store": True}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             invalid += 1
             continue
@@ -208,8 +380,9 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             or not _valid_timestamp(observed_at)
             or not isinstance(session_seal, str)
             or _SEAL.fullmatch(session_seal) is None
-            or verdict not in _VERDICTS
             or not isinstance(decision, dict)
+            or not isinstance(verdict, str)
+            or verdict not in _VERDICTS
             or decision.get("execution_authority") is not False
             or decision.get("empirical_claim") is not False
         ):
@@ -227,32 +400,8 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
         "last_observed_at": last_observed_at,
         "invalid_event_count": invalid,
         "truncated": truncated,
+        "unsafe_event_store": False,
     }
-
-
-def _bounded_json_paths(root: Path) -> tuple[list[Path], bool]:
-    pending = [root]
-    paths: list[Path] = []
-    visited = 0
-    while pending:
-        directory = pending.pop()
-        try:
-            entries = os.scandir(directory)
-        except OSError:
-            return sorted(paths, key=lambda item: item.as_posix()), True
-        with entries:
-            for entry in entries:
-                visited += 1
-                if visited > MAX_EVENT_FILES:
-                    return sorted(paths, key=lambda item: item.as_posix()), True
-                try:
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False) and entry.name.endswith(".json"):
-                        paths.append(Path(entry.path))
-                except OSError:
-                    return sorted(paths, key=lambda item: item.as_posix()), True
-    return sorted(paths, key=lambda item: item.as_posix()), False
 
 
 def _valid_timestamp(value: str) -> bool:
@@ -264,10 +413,38 @@ def _valid_timestamp(value: str) -> bool:
 
 
 def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, object]:
-    settings = _hook_state(_host_settings(home, host), host)
+    store = _store_root(home, host)
+    paths_safe = _host_paths_safe(home, host)
+    owned_command, wrapper_digest, ownership_valid = (
+        _owned_command(store, host) if paths_safe else (None, None, False)
+    )
+    if paths_safe and owned_command is not None:
+        parsed = parse_host_hook_command(owned_command, host)
+        if parsed is None:
+            paths_safe = False
+        else:
+            _, wrapper, selected_home = parsed
+            if not host_command_home_is_eligible(selected_home, home):
+                paths_safe = False
+            else:
+                paths_safe = _lexically_within(store, wrapper) and _regular_file_safe_or_absent(
+                    wrapper
+                )
+        if not paths_safe:
+            ownership_valid = False
+    settings = (
+        _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest, home, store)
+        if paths_safe
+        else {
+            "configuration_present": False,
+            "configuration_valid": False,
+            "events": [],
+            "runtime_present": None,
+            "wrapper_present": None,
+        }
+    )
     configured_events = settings["events"]
     assert isinstance(configured_events, list)
-    store = _store_root(home, host)
     config_path = store / DEFAULT_CONFIG_NAME
     base: dict[str, object] = {
         "host": host,
@@ -278,7 +455,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         "hook_trust": "UNKNOWN",
         "project_registered": False,
         "project_alias": None,
-        "store_present": store.is_dir(),
+        "store_present": store.is_dir() if paths_safe else False,
         "event_count": 0,
         "session_count": 0,
         "verdicts": {},
@@ -286,14 +463,27 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         "invalid_event_count": 0,
         "truncated": False,
     }
-    if settings.get("configuration_valid") is False:
+    if not paths_safe or not ownership_valid or settings.get("configuration_valid") is False:
         base["status"] = "HOST_CONFIGURATION_INVALID"
         return base
     if not config_path.is_file():
         return base
     try:
-        config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raw_config = read_confined_file(
+            store,
+            config_path,
+            max_bytes=MAX_EVENT_BYTES,
+            what="shadow host configuration",
+        )
+        config = load_shadow_config(decode_host_json(raw_config.decode("utf-8")))
+    except (
+        OSError,
+        ContractViolation,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
         base["status"] = "SHADOW_CONFIGURATION_INVALID"
         return base
     if not config.enabled:
@@ -315,7 +505,24 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
     if base["runtime_present"] is not True or base["wrapper_present"] is not True:
         base["status"] = "RUNTIME_MISSING"
         return base
-    base.update(_event_summary(store, alias, host=host, host_id=str(config.host_id)))
+    summary = _event_summary(store, alias, host=host, host_id=str(config.host_id))
+    if summary.get("unsafe_event_store") is True:
+        base["status"] = "HOST_CONFIGURATION_INVALID"
+        return base
+    if summary.get("observation_unknown") is True:
+        base.update(
+            {
+                "event_count": None,
+                "session_count": None,
+                "verdicts": None,
+                "last_observed_at": None,
+                "invalid_event_count": None,
+                "truncated": None,
+            }
+        )
+        base["status"] = "OBSERVATION_UNKNOWN"
+        return base
+    base.update(summary)
     base["status"] = "OBSERVING" if base["event_count"] else "NO_OBSERVATIONS"
     if base["invalid_event_count"]:
         base["status"] = "DEGRADED"
@@ -346,13 +553,25 @@ def render_text(report: dict[str, object]) -> str:
     for snapshot in hosts:
         assert isinstance(snapshot, dict)
         verdicts = snapshot["verdicts"]
-        assert isinstance(verdicts, dict)
-        counts = ", ".join(f"{name} {count}" for name, count in verdicts.items()) or "none"
+        counts = (
+            "unknown"
+            if verdicts is None
+            else ", ".join(f"{name} {count}" for name, count in verdicts.items()) or "none"
+            if isinstance(verdicts, dict)
+            else "unknown"
+        )
+        events = "unknown" if snapshot["event_count"] is None else snapshot["event_count"]
+        sessions = "unknown" if snapshot["session_count"] is None else snapshot["session_count"]
+        last = (
+            "unknown"
+            if snapshot["status"] == "OBSERVATION_UNKNOWN"
+            else snapshot["last_observed_at"] or "never"
+        )
         lines.append(
             f"{str(snapshot['host']).title()}: {snapshot['status']} · "
-            f"hooks {snapshot['hooks_present']}/3 · events {snapshot['event_count']} · "
-            f"sessions {snapshot['session_count']} · "
-            f"last {snapshot['last_observed_at'] or 'never'} · "
+            f"hooks {snapshot['hooks_present']}/3 · events {events} · "
+            f"sessions {sessions} · "
+            f"last {last} · "
             f"verdicts {counts}"
         )
         if snapshot["hook_trust"] == "UNKNOWN":

@@ -7,7 +7,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "latent-compass"
-version = "0.2.0"
+version = "0.3.0"
 description = "Shadow-mode contracts and an append-only episode ledger for coding agents: validates and records supplied advisories, never executes, promotes or decides."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -42,10 +42,15 @@ dev = [
   # The build backend, mirrored from [build-system] so its closure is locked
   # and licence-audited rather than resolved fresh and unexamined at build time.
   "hatchling==1.32.0",
+  "pyyaml>=6,<7",
+  "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/latent_compass"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"examples/_latent_compass_shadow_hook_impl.py" = "latent_compass/_assets/shadow_hook.py.txt"
 
 [tool.hatch.build.targets.sdist]
 include = [

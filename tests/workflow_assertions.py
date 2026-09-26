@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any, cast
+
+import yaml
+
+
+class _WorkflowLoader(yaml.SafeLoader):
+    pass
+
+
+_WorkflowLoader.yaml_implicit_resolvers = {
+    key: [resolver for resolver in value if resolver[0] != "tag:yaml.org,2002:bool"]
+    for key, value in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_WorkflowLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|false)$", re.IGNORECASE),
+    list("tTfF"),
+)
+
+
+def workflow(path: Path) -> dict[str, Any]:
+    loader = _WorkflowLoader(path.read_text(encoding="utf-8"))
+    try:
+        payload = loader.get_single_data()
+    finally:
+        loader.dispose()
+    if not isinstance(payload, dict):
+        raise AssertionError(f"{path.name} must contain a YAML mapping")
+    return cast(dict[str, Any], payload)
+
+
+def job(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, dict) or not isinstance(jobs.get(name), dict):
+        raise AssertionError(f"workflow job {name!r} is missing")
+    return cast(dict[str, Any], jobs[name])
+
+
+def step(job_payload: dict[str, Any], name: str) -> dict[str, Any]:
+    steps = job_payload.get("steps")
+    if not isinstance(steps, list):
+        raise AssertionError("workflow job steps are missing")
+    matches = [item for item in steps if isinstance(item, dict) and item.get("name") == name]
+    if len(matches) != 1:
+        raise AssertionError(f"workflow step {name!r} must occur exactly once")
+    return cast(dict[str, Any], matches[0])
+
+
+def assert_required(mapping: dict[str, Any]) -> None:
+    """Assert a job or step cannot be disabled or allowed to fail."""
+    assert "if" not in mapping
+    assert mapping.get("continue-on-error", False) is False
+
+
+def assert_run(job_payload: dict[str, Any], name: str, command: str) -> dict[str, Any]:
+    candidate = step(job_payload, name)
+    assert_required(candidate)
+    assert candidate.get("run") == command
+    return candidate
+
+
+def assert_conditional_run(
+    job_payload: dict[str, Any], name: str, command: str, condition: str
+) -> dict[str, Any]:
+    candidate = step(job_payload, name)
+    assert candidate.get("continue-on-error", False) is False
+    assert candidate.get("if") == condition
+    assert candidate.get("run") == command
+    return candidate
+
+
+def needs(job_payload: dict[str, Any]) -> set[str]:
+    raw = job_payload.get("needs", [])
+    if isinstance(raw, str):
+        return {raw}
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return set(raw)
+    raise AssertionError("workflow job needs must be a string or string array")
