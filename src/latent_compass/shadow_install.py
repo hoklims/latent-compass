@@ -309,6 +309,14 @@ def _transaction_snapshot(home: Path, plan: dict[str, object]) -> dict[Path, byt
         current = _regular_file_bytes_or_none(observation["path"], home=observation["root"])
         if current != observation["content"]:
             raise ValueError(f"concurrent change detected for {observation['path']}")
+    runtime_python = cast(Path | None, plan.get("_runtime_python"))
+    if runtime_python is not None:
+        try:
+            runtime_present = runtime_python.is_file()
+        except OSError:
+            runtime_present = False
+        if not runtime_present:
+            raise ValueError(f"runtime disappeared before transaction: {runtime_python}")
     return snapshots
 
 
@@ -381,11 +389,14 @@ def _apply_frozen_operations(
             _remove_confined(home, path, what="managed host file", expected=before)
         else:
             if before is None:
+                journal_state[0] = _set_create_publication_state(
+                    home, journal_path, journal_state[0], path, "attempted"
+                )
                 attempted_creates.add(path)
             _atomic_bytes(path, after, home=home, expected=before)
             if before is None:
-                journal_state[0] = _confirm_create_publication(
-                    home, journal_path, journal_state[0], path
+                journal_state[0] = _set_create_publication_state(
+                    home, journal_path, journal_state[0], path, "confirmed"
                 )
         written[path] = after
 
@@ -394,19 +405,29 @@ def _pending_transaction_path(home: Path) -> Path:
     return home / _PENDING_TRANSACTION_NAME
 
 
-def _confirm_create_publication(
-    home: Path, journal_path: Path, journal_content: bytes, path: Path
+def _set_create_publication_state(
+    home: Path,
+    journal_path: Path,
+    journal_content: bytes,
+    path: Path,
+    state: str,
 ) -> bytes:
     payload = json.loads(journal_content.decode("utf-8"))
     assert isinstance(payload, dict)
     entries = cast(list[dict[str, object]], payload["entries"])
     for entry in entries:
         if Path(str(entry["path"])) == path:
-            entry["publication_confirmed"] = True
+            entry["publication_state"] = state
             break
     replacement = _json_bytes(payload)
     _atomic_bytes(journal_path, replacement, home=home, expected=journal_content)
     return replacement
+
+
+def _confirm_create_publication(
+    home: Path, journal_path: Path, journal_content: bytes, path: Path
+) -> bytes:
+    return _set_create_publication_state(home, journal_path, journal_content, path, "confirmed")
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -487,7 +508,9 @@ def _begin_transaction(
                     if item["action"] in {"update", "delete"}
                     else None
                 ),
-                "publication_confirmed": item["action"] != "create",
+                "publication_state": (
+                    "planned" if item["action"] == "create" else "not_applicable"
+                ),
             }
         )
     journal = {
@@ -546,10 +569,25 @@ def _decode_pending_transaction(
                 "backup_path",
                 "publication_confirmed",
             },
+            {
+                "path",
+                "before_sha256",
+                "after_sha256",
+                "backup_path",
+                "publication_state",
+            },
         ):
             raise ValueError("invalid pending transaction entry")
         if "publication_confirmed" in raw and not isinstance(raw["publication_confirmed"], bool):
             raise ValueError("invalid pending transaction publication provenance")
+        if raw.get("publication_state") not in {
+            None,
+            "planned",
+            "attempted",
+            "confirmed",
+            "not_applicable",
+        }:
+            raise ValueError("invalid pending transaction publication state")
         path = _assert_safe_path_under(root, Path(str(raw.get("path", ""))))
         if path not in allowed_paths:
             raise ValueError("pending transaction path is not a managed host target")
@@ -589,8 +627,9 @@ def _observe_recovery_targets(
     if not isinstance(payload, dict):
         raise ValueError("pending transaction journal must contain a JSON object")
     publication_confirmed = {
-        _lexical_absolute(Path(str(entry["path"]))): cast(
-            bool, entry.get("publication_confirmed", False)
+        _lexical_absolute(Path(str(entry["path"]))): (
+            entry.get("publication_state") == "confirmed"
+            or entry.get("publication_confirmed") is True
         )
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
@@ -1614,6 +1653,7 @@ def plan_install_shadow_hooks(
         "recovery": pending_recovery,
         "_operations": operations,
         "_observations": observations,
+        "_runtime_python": runtime_python,
     }
     if backup_tag is not None:
         conflicts.extend(_backup_conflicts(plan, backup_tag))
@@ -1655,6 +1695,7 @@ def install_shadow_hooks(
     if plan["changed"] is False:
         plan.pop("_operations", None)
         plan.pop("_observations", None)
+        plan.pop("_runtime_python", None)
         plan["dry_run"] = False
         plan["states"] = host_status(
             home=home, project_root=project_root, hosts=hosts, dry_run=False
@@ -1663,6 +1704,7 @@ def install_shadow_hooks(
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
     plan.pop("_observations", None)
+    plan.pop("_runtime_python", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
     journal_state: list[bytes] = []
@@ -1717,7 +1759,7 @@ def install_shadow_hooks(
             cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
         return plan
-    if journal_path.is_file():
+    if journal_path is not None:
         assert journal_state
         cast(list[dict[str, str]], plan["conflicts"]).extend(
             _complete_transaction_journal(home, journal_path, journal_state[0])
@@ -1996,7 +2038,7 @@ def remove_shadow_hooks(
             cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
         return plan
-    if journal_path.is_file():
+    if journal_path is not None:
         assert journal_state
         cast(list[dict[str, str]], plan["conflicts"]).extend(
             _complete_transaction_journal(home, journal_path, journal_state[0])
