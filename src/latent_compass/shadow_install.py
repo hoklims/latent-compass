@@ -1119,6 +1119,16 @@ def _recover_pending_transaction(
                 ]
         if not apply:
             return []
+        try:
+            journal_lease.assert_current()
+        except ContractViolation as exc:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(journal_path),
+                    "detail": f"journal changed before recovery mutation: {exc}",
+                }
+            ]
         for observation in observations:
             current = observation["current"]
             if _bytes_digest(current) != observation["after_digest"]:

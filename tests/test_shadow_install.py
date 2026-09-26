@@ -4115,6 +4115,99 @@ def test_recovery_refuses_journal_replacement_before_any_target_mutation(
     assert journal.read_bytes() == journal_before
 
 
+@pytest.mark.parametrize("replacement", ["none", "different", "same-bytes"])
+def test_recovery_revalidates_journal_after_backup_inputs_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    home = tmp_path / "home"
+    hooks = home / ".codex" / "hooks.json"
+    before = b'{"hooks":{"PreToolUse":[]}}\n'
+    after = b'{"hooks":{"PreToolUse":[{"hooks":[]}]}}\n'
+    hooks.parent.mkdir(parents=True)
+    hooks.write_bytes(before)
+    backup_tag = "recovery-boundary"
+    backup = _backup(hooks, backup_tag, home=home, expected=before)
+    hooks.write_bytes(after)
+    journal = home / ".latent-compass-shadow.pending.json"
+    payload = {
+        "schema_version": 1,
+        "operation": "install",
+        "backup_tag": backup_tag,
+        "entries": [
+            {
+                "path": str(hooks),
+                "before_sha256": _bytes_digest(before),
+                "after_sha256": _bytes_digest(after),
+                "backup_path": str(backup),
+                "publication_state": "not_applicable",
+            }
+        ],
+    }
+    _exclusive_json(journal, payload)
+    journal_a = journal.read_bytes()
+    journal_b = (
+        journal_a
+        if replacement == "same-bytes"
+        else _json_bytes({**payload, "operation": "remove"})
+    )
+    real_assert_current = confined_io.ConfinedFileLease.assert_current
+    peer_path: Path | None = None
+    replacement_blocked = False
+    swapped = False
+    peer_identity: tuple[int, int] | None = None
+
+    def swap_journal_during_backup_revalidation(
+        lease: confined_io.ConfinedFileLease,
+    ) -> None:
+        nonlocal peer_identity, peer_path, replacement_blocked, swapped
+        if lease.path == backup and replacement != "none" and not swapped:
+            peer = tmp_path / f"peer-{replacement}.json"
+            peer_path = peer
+            peer.write_bytes(journal_b)
+            peer_info = peer.stat()
+            peer_identity = (peer_info.st_dev, peer_info.st_ino)
+            try:
+                peer.replace(journal)
+            except PermissionError:
+                if os.name != "nt":
+                    raise
+                replacement_blocked = True
+            else:
+                swapped = True
+        real_assert_current(lease)
+
+    monkeypatch.setattr(
+        confined_io.ConfinedFileLease,
+        "assert_current",
+        swap_journal_during_backup_revalidation,
+    )
+    result = recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert backup.read_bytes() == before
+    if replacement == "none":
+        assert conflicts == []
+        assert hooks.read_bytes() == before
+        assert not journal.exists()
+    elif os.name == "nt":
+        assert conflicts == []
+        assert replacement_blocked is True
+        assert swapped is False
+        assert hooks.read_bytes() == before
+        assert not journal.exists()
+        assert peer_path is not None
+        assert peer_path.read_bytes() == journal_b
+    else:
+        assert conflicts[0]["code"] == "pending_transaction_conflict", conflicts
+        assert "changed before recovery mutation" in str(conflicts[0]["detail"])
+        assert swapped is True
+        assert peer_identity is not None
+        journal_info = journal.stat()
+        assert (journal_info.st_dev, journal_info.st_ino) == peer_identity
+        assert journal.read_bytes() == journal_b
+        assert hooks.read_bytes() == after
+
+
 @pytest.mark.parametrize("defect", ["empty", "operation", "duplicate", "unknown-path"])
 def test_recover_rejects_semantically_invalid_journal_entries(tmp_path: Path, defect: str) -> None:
     home = tmp_path / "home"
