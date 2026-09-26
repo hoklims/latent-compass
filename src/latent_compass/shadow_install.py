@@ -362,6 +362,7 @@ def _apply_frozen_operations(
     written: dict[Path, bytes | None],
     journal_path: Path,
     journal_state: list[bytes],
+    attempted_creates: set[Path],
 ) -> None:
     for operation in operations:
         if operation["action"] == "unchanged":
@@ -379,6 +380,8 @@ def _apply_frozen_operations(
             assert before is not None
             _remove_confined(home, path, what="managed host file", expected=before)
         else:
+            if before is None:
+                attempted_creates.add(path)
             _atomic_bytes(path, after, home=home, expected=before)
             if before is None:
                 journal_state[0] = _confirm_create_publication(
@@ -587,7 +590,7 @@ def _observe_recovery_targets(
         raise ValueError("pending transaction journal must contain a JSON object")
     publication_confirmed = {
         _lexical_absolute(Path(str(entry["path"]))): cast(
-            bool, entry.get("publication_confirmed", True)
+            bool, entry.get("publication_confirmed", False)
         )
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
@@ -1510,6 +1513,11 @@ def plan_install_shadow_hooks(
             )
             owned_command = owned[0] if owned is not None else None
             owned_digest = owned[1] if owned is not None else None
+            if owned_command is not None:
+                parsed_owned = _parse_owned_command(owned_command, host)
+                if parsed_owned is None:
+                    raise ValueError("invalid Latent Compass hook ownership command")
+                _assert_safe_path_under(config_path.parent, parsed_owned[1])
             if packaged_hook is not None and wrapper_before is not None:
                 if not _owned_command(owned_command, host=host, wrapper=installed_hook):
                     conflicts.append({"code": "wrapper_collision", "path": str(installed_hook)})
@@ -1658,6 +1666,7 @@ def install_shadow_hooks(
     journal_path: Path | None = None
     journal_content: bytes | None = None
     journal_state: list[bytes] = []
+    attempted_creates: set[Path] = set()
     try:
         journal_path, journal_content = _begin_transaction(
             home=home, operation="install", backup_tag=backup_tag, plan=plan
@@ -1671,6 +1680,7 @@ def install_shadow_hooks(
             written=written,
             journal_path=journal_path,
             journal_state=journal_state,
+            attempted_creates=attempted_creates,
         )
     except (OSError, ValueError) as exc:
         unresolved = _rollback_transaction(home, snapshots, written)
@@ -1690,7 +1700,19 @@ def install_shadow_hooks(
             collision_cleanup = (
                 _complete_transaction_journal(home, journal_path, active_journal)
                 if isinstance(exc, _DefiniteWriteRefusalError) and not unresolved
-                else _prune_unconfirmed_creates(home, journal_path, active_journal, written)
+                else _prune_unconfirmed_creates(
+                    home,
+                    journal_path,
+                    active_journal,
+                    {
+                        **written,
+                        **(
+                            dict.fromkeys(attempted_creates)
+                            if not isinstance(exc, _DefiniteWriteRefusalError)
+                            else {}
+                        ),
+                    },
+                )
             )
             cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
@@ -1923,6 +1945,7 @@ def remove_shadow_hooks(
     journal_path: Path | None = None
     journal_content: bytes | None = None
     journal_state: list[bytes] = []
+    attempted_creates: set[Path] = set()
     try:
         journal_path, journal_content = _begin_transaction(
             home=home, operation="remove", backup_tag=backup_tag, plan=plan
@@ -1936,6 +1959,7 @@ def remove_shadow_hooks(
             written=written,
             journal_path=journal_path,
             journal_state=journal_state,
+            attempted_creates=attempted_creates,
         )
     except (OSError, ValueError) as exc:
         unresolved = _rollback_transaction(home, snapshots, written)
@@ -1955,7 +1979,19 @@ def remove_shadow_hooks(
             collision_cleanup = (
                 _complete_transaction_journal(home, journal_path, active_journal)
                 if isinstance(exc, _DefiniteWriteRefusalError) and not unresolved
-                else _prune_unconfirmed_creates(home, journal_path, active_journal, written)
+                else _prune_unconfirmed_creates(
+                    home,
+                    journal_path,
+                    active_journal,
+                    {
+                        **written,
+                        **(
+                            dict.fromkeys(attempted_creates)
+                            if not isinstance(exc, _DefiniteWriteRefusalError)
+                            else {}
+                        ),
+                    },
+                )
             )
             cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False

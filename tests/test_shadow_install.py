@@ -2769,6 +2769,7 @@ def test_recovery_description_uses_preflight_target_observation(
                         "before_sha256": None,
                         "after_sha256": _bytes_digest(state_x),
                         "backup_path": None,
+                        "publication_confirmed": True,
                     }
                 ],
             }
