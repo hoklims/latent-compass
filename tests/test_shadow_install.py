@@ -474,13 +474,21 @@ def test_backup_race_preserves_third_party_destination(
     real_open = os.open
     injected = False
 
-    def race_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+    def race_open(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
         nonlocal injected
         if Path(path) == destination and not injected:
             injected = True
             descriptor = real_open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             os.write(descriptor, third_party)
             os.close(descriptor)
+        if dir_fd is not None:
+            return real_open(path, flags, mode, dir_fd=dir_fd)
         return real_open(path, flags, mode)
 
     monkeypatch.setattr(os, "open", race_open)
