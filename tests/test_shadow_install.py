@@ -1869,6 +1869,38 @@ def test_relative_home_freezes_absolute_wrapper_and_transaction_paths(
     assert not (tmp_path / ".latent-compass-shadow.pending.json").exists()
 
 
+def test_relative_runtime_is_serialized_as_lexical_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = home / ".claude" / "settings.json"
+    _write(settings, {"hooks": {"PreToolUse": []}})
+    runtime = tmp_path / "tools" / "python"
+    runtime.parent.mkdir()
+    runtime.write_bytes(b"runtime-fixture")
+
+    installed = install_shadow_hooks(
+        home=home,
+        runtime_python=Path("tools/python"),
+        project_root=project,
+        project_alias="relative-runtime",
+        backup_tag="relative-runtime",
+        hosts=("claude",),
+    )
+    ownership = json.loads(
+        (home / ".claude" / "latent-compass-shadow" / "ownership.json").read_text(encoding="utf-8")
+    )
+    arguments = shlex.split(str(ownership["command"]))
+    monkeypatch.chdir(project)
+
+    assert installed["conflicts"] == []
+    assert Path(arguments[0]) == runtime
+    assert Path(arguments[0]).is_file()
+
+
 def test_remove_revalidates_custom_hook_dependency_before_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3354,6 +3386,61 @@ def test_removal_refuses_standard_wrapper_groups_without_ownership_manifest(
     assert "ownership manifest is required" in str(conflicts[0]["detail"])
     assert hooks.read_bytes() == hooks_before
     assert (store / "config.json").read_bytes() == config_before
+
+
+def test_removal_refuses_unowned_config_without_owned_hook_groups(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    foreign_settings = {
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "foreign", "hooks": [{"type": "command", "command": "keep"}]}
+            ]
+        }
+    }
+    _write(hooks, foreign_settings)
+    store = home / ".codex" / "latent-compass-shadow"
+    config = store / "config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        json.dumps(
+            {
+                "contract_version": "1.0.0",
+                "enabled": True,
+                "host_id": "codex-local",
+                "agent_family": "codex",
+                "projects": [
+                    {
+                        "root": str(project),
+                        "alias": "unowned",
+                        "capabilities": [
+                            {"capability_id": "Read", "kind": "TOOL", "cost_ceiling": 0}
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    hooks_before = hooks.read_bytes()
+    config_before = config.read_bytes()
+
+    result = remove_shadow_hooks(
+        home=home,
+        project_root=project,
+        project_alias="unowned",
+        backup_tag="unowned-remove",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "configuration_collision"
+    assert "ownership manifest is required" in str(conflicts[0]["detail"])
+    assert hooks.read_bytes() == hooks_before
+    assert config.read_bytes() == config_before
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
 
 
 def test_status_keeps_loading_and_approval_unknown(tmp_path: Path) -> None:

@@ -1338,6 +1338,7 @@ def plan_install_shadow_hooks(
 ) -> dict[str, object]:
     """Preflight every selected host and return the complete no-write plan."""
     home = _lexical_absolute(home)
+    runtime_python = _lexical_absolute(runtime_python)
     if hook_script is not None:
         hook_script = _lexical_absolute(hook_script)
     conflicts: list[dict[str, str]] = []
@@ -1726,6 +1727,10 @@ def plan_remove_shadow_hooks(
                 home=home,
                 raw=ownership_before,
             )
+            if ownership_before is None:
+                if config_before is None:
+                    continue
+                raise ValueError("ownership manifest is required before removing host registration")
             owned_command = owned[0] if owned is not None else None
             owned_digest = owned[1] if owned is not None else None
             parsed_owned = (
