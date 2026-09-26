@@ -432,7 +432,11 @@ def test_confined_lease_detects_file_created_after_absent_observation(tmp_path: 
             ContractViolation, match=r"(?:appeared|changed) after observation"
         ) as exc_info:
             lease.assert_current()
-        assert exc_info.value.detail["reason"] == "identity"
+        assert exc_info.value.detail == {
+            "what": "test journal",
+            "path": str(target),
+            "reason": "identity",
+        }
         assert target.read_bytes() == b"peer"
     finally:
         lease.close()
