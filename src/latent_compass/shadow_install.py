@@ -327,14 +327,27 @@ def _prune_unconfirmed_creates(
 
 def _transaction_snapshot(home: Path, plan: dict[str, object]) -> dict[Path, bytes | None]:
     snapshots: dict[Path, bytes | None] = {}
+    leases = cast(dict[Path, ConfinedFileLease], plan.get("_leases", {}))
+    for held_lease in leases.values():
+        held_lease.assert_current()
     for operation in cast(list[_FileOperation], plan["_operations"]):
         path = operation["path"]
-        current = _regular_file_bytes_or_none(path, home=home)
+        observed_lease = leases.get(_lexical_absolute(path))
+        current = (
+            observed_lease.content
+            if observed_lease is not None
+            else _regular_file_bytes_or_none(path, home=home)
+        )
         if current != operation["before"]:
             raise ValueError(f"concurrent change detected for {path}")
         snapshots[path] = current
     for observation in cast(list[_ReadObservation], plan.get("_observations", [])):
-        current = _regular_file_bytes_or_none(observation["path"], home=observation["root"])
+        observed_lease = leases.get(_lexical_absolute(observation["path"]))
+        current = (
+            observed_lease.content
+            if observed_lease is not None
+            else _regular_file_bytes_or_none(observation["path"], home=observation["root"])
+        )
         if current != observation["content"]:
             raise ValueError(f"concurrent change detected for {observation['path']}")
     runtime_python = cast(Path | None, plan.get("_runtime_python"))
@@ -369,11 +382,19 @@ def _rollback_transaction(
     journal_path: Path | None = None,
     journal_state: list[bytes] | None = None,
     journal_lease: ConfinedFileLease | None = None,
+    file_leases: dict[Path, ConfinedFileLease] | None = None,
 ) -> list[Path]:
     unresolved: list[Path] = []
     for path, after_content in written.items():
         try:
-            current = _regular_file_bytes_or_none(path, home=home)
+            target_lease = (
+                file_leases.get(_lexical_absolute(path)) if file_leases is not None else None
+            )
+            if target_lease is not None:
+                target_lease.assert_current()
+                current = target_lease.content
+            else:
+                current = _regular_file_bytes_or_none(path, home=home)
             if current != after_content:
                 if current == snapshots[path]:
                     continue
@@ -394,15 +415,21 @@ def _rollback_transaction(
                                 home, journal_path, journal_state[0], path, "revoked"
                             )
                         )
-                    _remove_confined(
-                        home,
-                        path,
-                        what="managed host rollback target",
-                        expected=after_content,
-                    )
+                    if target_lease is not None:
+                        target_lease.remove()
+                    else:
+                        _remove_confined(
+                            home,
+                            path,
+                            what="managed host rollback target",
+                            expected=after_content,
+                        )
             else:
-                _atomic_bytes(path, before_content, home=home, expected=after_content)
-        except (OSError, ValueError):
+                if target_lease is not None:
+                    target_lease.replace(before_content)
+                else:
+                    _atomic_bytes(path, before_content, home=home, expected=after_content)
+        except (OSError, ValueError, ContractViolation):
             unresolved.append(path)
     return unresolved
 
@@ -418,6 +445,7 @@ def _apply_frozen_operations(
     journal_state: list[bytes],
     attempted_creates: set[Path],
     journal_lease: ConfinedFileLease | None = None,
+    file_leases: dict[Path, ConfinedFileLease] | None = None,
 ) -> None:
     for operation in operations:
         if operation["action"] == "unchanged":
@@ -428,12 +456,27 @@ def _apply_frozen_operations(
         if snapshots[path] != before:
             raise ValueError(f"transaction snapshot changed for {path}")
         _assert_safe_path_under(home, path)
-        _assert_safe_path_under(home, _backup_destination(path, backup_tag))
+        backup_path = _backup_destination(path, backup_tag)
+        _assert_safe_path_under(home, backup_path)
+        target_lease = file_leases.get(_lexical_absolute(path)) if file_leases is not None else None
         if before is not None:
-            _backup(path, backup_tag, home=home, expected=before)
+            backup_lease = (
+                file_leases.get(_lexical_absolute(backup_path)) if file_leases is not None else None
+            )
+            if backup_lease is not None:
+                if backup_lease.content is not None:
+                    raise ValueError(
+                        f"backup destination changed before transaction: {backup_path}"
+                    )
+                backup_lease.replace(before)
+            else:
+                _backup(path, backup_tag, home=home, expected=before)
         if after is None:
             assert before is not None
-            _remove_confined(home, path, what="managed host file", expected=before)
+            if target_lease is not None:
+                target_lease.remove()
+            else:
+                _remove_confined(home, path, what="managed host file", expected=before)
         else:
             if before is None:
                 journal_state[0] = (
@@ -444,7 +487,10 @@ def _apply_frozen_operations(
                     )
                 )
                 attempted_creates.add(path)
-            _atomic_bytes(path, after, home=home, expected=before)
+            if target_lease is not None:
+                target_lease.replace(after)
+            else:
+                _atomic_bytes(path, after, home=home, expected=before)
             if before is None:
                 journal_state[0] = (
                     _set_create_publication_state_lease(journal_lease, path, "confirmed")
@@ -536,6 +582,44 @@ def _regular_file_bytes_or_none(path: Path, *, home: Path | None = None) -> byte
         )
     except ContractViolation as exc:
         raise ValueError(str(exc)) from exc
+
+
+def _observe_confined_file(
+    path: Path,
+    *,
+    root: Path,
+    leases: dict[Path, ConfinedFileLease] | None,
+    what: str,
+) -> bytes | None:
+    if leases is None:
+        return _regular_file_bytes_or_none(path, home=root)
+    absolute = _lexical_absolute(path)
+    existing = leases.get(absolute)
+    if existing is not None:
+        return existing.content
+    try:
+        lease = lease_confined_file(
+            root,
+            absolute,
+            max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+            what=what,
+            allow_absent=True,
+        )
+    except ContractViolation:
+        if _path_entry_exists(absolute):
+            raise
+        return _regular_file_bytes_or_none(absolute, home=root)
+    leases[absolute] = lease
+    return lease.content
+
+
+def _close_file_leases(leases: dict[Path, ConfinedFileLease]) -> None:
+    for lease in leases.values():
+        lease.close()
+
+
+def _pop_plan_leases(plan: dict[str, object]) -> dict[Path, ConfinedFileLease]:
+    return cast(dict[Path, ConfinedFileLease], plan.pop("_leases", {}))
 
 
 def _lexical_absolute(path: Path) -> Path:
@@ -1194,14 +1278,36 @@ def _backup_destination(path: Path, tag: str) -> Path:
     return path.with_name(f"{path.name}.bak-latent-compass-{tag}")
 
 
-def _backup_conflicts(plan: dict[str, object], tag: str) -> list[dict[str, str]]:
+def _backup_conflicts(
+    plan: dict[str, object],
+    tag: str,
+    *,
+    home: Path | None = None,
+    leases: dict[Path, ConfinedFileLease] | None = None,
+) -> list[dict[str, str]]:
     conflicts: list[dict[str, str]] = []
     for item in cast(list[dict[str, object]], plan["files"]):
         if item["action"] not in {"update", "delete"}:
             continue
         path = Path(str(item["path"]))
         destination = _backup_destination(path, tag)
-        if _path_entry_exists(destination):
+        if home is not None and leases is not None:
+            try:
+                content = _observe_confined_file(
+                    destination,
+                    root=home,
+                    leases=leases,
+                    what="host transaction backup destination",
+                )
+                collision = content is not None
+            except (OSError, ValueError, ContractViolation) as exc:
+                conflicts.append(
+                    {"code": "backup_collision", "path": str(destination), "detail": str(exc)}
+                )
+                continue
+        else:
+            collision = _path_entry_exists(destination)
+        if collision:
             conflicts.append({"code": "backup_collision", "path": str(destination)})
     return conflicts
 
@@ -1727,6 +1833,7 @@ def plan_install_shadow_hooks(
     hosts: tuple[Host, ...],
     hook_script: Path | None = None,
     backup_tag: str | None = None,
+    _retain_leases: bool = False,
 ) -> dict[str, object]:
     """Preflight every selected host and return the complete no-write plan."""
     home = _lexical_absolute(home)
@@ -1776,6 +1883,7 @@ def plan_install_shadow_hooks(
     files: list[dict[str, object]] = []
     operations: list[_FileOperation] = []
     observations: list[_ReadObservation] = []
+    leases: dict[Path, ConfinedFileLease] | None = {} if _retain_leases else None
     packaged_hook: str | None = None
     if hook_script is None:
         try:
@@ -1801,12 +1909,27 @@ def plan_install_shadow_hooks(
             continue
         ownership_path = config_path.with_name(_OWNERSHIP_NAME)
         try:
-            settings_before = _regular_file_bytes_or_none(settings_path, home=home)
+            settings_before = _observe_confined_file(
+                settings_path,
+                root=home,
+                leases=leases,
+                what="host hook settings",
+            )
             if settings_before is None:
                 conflicts.append({"code": "host_configuration_missing", "path": str(settings_path)})
                 continue
-            ownership_before = _regular_file_bytes_or_none(ownership_path, home=home)
-            config_before = _regular_file_bytes_or_none(config_path, home=home)
+            ownership_before = _observe_confined_file(
+                ownership_path,
+                root=home,
+                leases=leases,
+                what="shadow ownership manifest",
+            )
+            config_before = _observe_confined_file(
+                config_path,
+                root=home,
+                leases=leases,
+                what="shadow host configuration",
+            )
             installed_hook = (
                 hook_script
                 if hook_script is not None
@@ -1853,9 +1976,11 @@ def plan_install_shadow_hooks(
                         }
                     )
                     continue
-            wrapper_before = _regular_file_bytes_or_none(
+            wrapper_before = _observe_confined_file(
                 installed_hook,
-                home=home if hook_script is None else config_path.parent,
+                root=home if hook_script is None else config_path.parent,
+                leases=leases,
+                what="owned shadow wrapper",
             )
             if hook_script is not None and not any(
                 item["path"] == installed_hook for item in observations
@@ -1886,8 +2011,11 @@ def plan_install_shadow_hooks(
                 if parsed_owned is None:
                     raise ValueError("invalid Latent Compass hook ownership command")
                 previous_wrapper = _assert_safe_path_under(config_path.parent, parsed_owned[1])
-                previous_wrapper_bytes = _regular_file_bytes_or_none(
-                    previous_wrapper, home=config_path.parent
+                previous_wrapper_bytes = _observe_confined_file(
+                    previous_wrapper,
+                    root=config_path.parent,
+                    leases=leases,
+                    what="previous owned shadow wrapper",
                 )
                 if _bytes_digest(previous_wrapper_bytes) != owned_digest:
                     conflicts.append(
@@ -1942,7 +2070,13 @@ def plan_install_shadow_hooks(
                 target_wrapper=installed_hook,
                 raw=settings_before,
             )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            ContractViolation,
+        ) as exc:
             conflicts.append(
                 {
                     "code": "configuration_collision",
@@ -1960,7 +2094,13 @@ def plan_install_shadow_hooks(
                 project_alias=project_alias,
                 raw=config_before,
             )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            ContractViolation,
+        ) as exc:
             conflicts.append(
                 {"code": "configuration_collision", "path": str(config_path), "detail": str(exc)}
             )
@@ -2000,9 +2140,10 @@ def plan_install_shadow_hooks(
         "_observations": observations,
         "_runtime_python": runtime_python,
         "_project_root": project_root,
+        "_leases": leases or {},
     }
     if backup_tag is not None:
-        conflicts.extend(_backup_conflicts(plan, backup_tag))
+        conflicts.extend(_backup_conflicts(plan, backup_tag, home=home, leases=leases))
     return plan
 
 
@@ -2026,13 +2167,16 @@ def install_shadow_hooks(
         hosts=hosts,
         hook_script=hook_script,
         backup_tag=backup_tag,
+        _retain_leases=True,
     )
     if plan["conflicts"]:
+        _close_file_leases(_pop_plan_leases(plan))
         plan["dry_run"] = False
         return plan
     try:
         snapshots = _transaction_snapshot(home, plan)
     except (OSError, ValueError, ContractViolation) as exc:
+        _close_file_leases(_pop_plan_leases(plan))
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "concurrent_change", "path": "", "detail": str(exc)}
         )
@@ -2043,6 +2187,7 @@ def install_shadow_hooks(
         plan.pop("_observations", None)
         plan.pop("_runtime_python", None)
         plan.pop("_project_root", None)
+        _close_file_leases(_pop_plan_leases(plan))
         plan["dry_run"] = False
         plan["states"] = host_status(
             home=home, project_root=project_root, hosts=hosts, dry_run=False
@@ -2050,6 +2195,7 @@ def install_shadow_hooks(
         return plan
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
+    file_leases = _pop_plan_leases(plan)
     plan.pop("_observations", None)
     plan.pop("_runtime_python", None)
     plan.pop("_project_root", None)
@@ -2076,6 +2222,7 @@ def install_shadow_hooks(
             journal_state=journal_state,
             attempted_creates=attempted_creates,
             journal_lease=journal_lease,
+            file_leases=file_leases,
         )
     except (OSError, ValueError, ContractViolation) as exc:
         unresolved = _rollback_transaction(
@@ -2085,6 +2232,7 @@ def install_shadow_hooks(
             journal_path=journal_path,
             journal_state=journal_state,
             journal_lease=journal_lease,
+            file_leases=file_leases,
         )
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
@@ -2099,11 +2247,13 @@ def install_shadow_hooks(
             )
         if journal_lease is not None:
             journal_lease.close()
+        _close_file_leases(file_leases)
         plan["dry_run"] = False
         return plan
     except BaseException:
         if journal_lease is not None:
             journal_lease.close()
+        _close_file_leases(file_leases)
         raise
     if journal_lease is not None:
         assert journal_state
@@ -2111,6 +2261,7 @@ def install_shadow_hooks(
             _complete_transaction_journal_lease(journal_lease)
         )
         journal_lease.close()
+    _close_file_leases(file_leases)
     plan["dry_run"] = False
     plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
         "states"
@@ -2125,6 +2276,7 @@ def plan_remove_shadow_hooks(
     project_root: Path | None = None,
     project_alias: str | None = None,
     backup_tag: str | None = None,
+    _retain_leases: bool = False,
 ) -> dict[str, object]:
     """Plan project-level removal while retaining every unrelated registration."""
     home = _lexical_absolute(home)
@@ -2159,6 +2311,7 @@ def plan_remove_shadow_hooks(
     files: list[dict[str, object]] = []
     operations: list[_FileOperation] = []
     observations: list[_ReadObservation] = []
+    leases: dict[Path, ConfinedFileLease] | None = {} if _retain_leases else None
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
         try:
             _validate_host_paths(
@@ -2178,11 +2331,28 @@ def plan_remove_shadow_hooks(
             continue
         ownership_path = config_path.with_name(_OWNERSHIP_NAME)
         try:
-            settings_before = _regular_file_bytes_or_none(settings_path, home=home)
-            ownership_before = _regular_file_bytes_or_none(ownership_path, home=home)
-            config_before = _regular_file_bytes_or_none(config_path, home=home)
+            settings_before = _observe_confined_file(
+                settings_path, root=home, leases=leases, what="host hook settings"
+            )
+            ownership_before = _observe_confined_file(
+                ownership_path,
+                root=home,
+                leases=leases,
+                what="shadow ownership manifest",
+            )
+            config_before = _observe_confined_file(
+                config_path,
+                root=home,
+                leases=leases,
+                what="shadow host configuration",
+            )
             managed_wrapper = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
-            managed_wrapper_before = _regular_file_bytes_or_none(managed_wrapper, home=home)
+            managed_wrapper_before = _observe_confined_file(
+                managed_wrapper,
+                root=home,
+                leases=leases,
+                what="managed shadow wrapper",
+            )
             owned = _ownership_from_manifest(
                 ownership_path,
                 host=host,
@@ -2204,7 +2374,12 @@ def plan_remove_shadow_hooks(
                 owned_wrapper_before = (
                     managed_wrapper_before
                     if _path_identity(owned_wrapper) == _path_identity(managed_wrapper)
-                    else _regular_file_bytes_or_none(owned_wrapper, home=config_path.parent)
+                    else _observe_confined_file(
+                        owned_wrapper,
+                        root=config_path.parent,
+                        leases=leases,
+                        what="owned shadow wrapper",
+                    )
                 )
                 if (
                     owned_wrapper_before is not None
@@ -2226,7 +2401,13 @@ def plan_remove_shadow_hooks(
                 )
             else:
                 next_config = None
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            ContractViolation,
+        ) as exc:
             conflicts.append(
                 {"code": "configuration_collision", "path": str(config_path), "detail": str(exc)}
             )
@@ -2251,7 +2432,13 @@ def plan_remove_shadow_hooks(
                 if settings_before is not None and remove_hooks
                 else None
             )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            ValueError,
+            ContractViolation,
+        ) as exc:
             conflicts.append(
                 {
                     "code": "configuration_collision",
@@ -2290,9 +2477,10 @@ def plan_remove_shadow_hooks(
         "recovery": pending_recovery,
         "_operations": operations,
         "_observations": observations,
+        "_leases": leases or {},
     }
     if backup_tag is not None:
-        conflicts.extend(_backup_conflicts(plan, backup_tag))
+        conflicts.extend(_backup_conflicts(plan, backup_tag, home=home, leases=leases))
     return plan
 
 
@@ -2311,13 +2499,16 @@ def remove_shadow_hooks(
         project_root=project_root,
         project_alias=project_alias,
         backup_tag=backup_tag,
+        _retain_leases=True,
     )
     if plan["conflicts"]:
+        _close_file_leases(_pop_plan_leases(plan))
         plan["dry_run"] = False
         return plan
     try:
         snapshots = _transaction_snapshot(home, plan)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, ContractViolation) as exc:
+        _close_file_leases(_pop_plan_leases(plan))
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "concurrent_change", "path": "", "detail": str(exc)}
         )
@@ -2326,10 +2517,12 @@ def remove_shadow_hooks(
     if plan["changed"] is False:
         plan.pop("_operations", None)
         plan.pop("_observations", None)
+        _close_file_leases(_pop_plan_leases(plan))
         plan["dry_run"] = False
         return plan
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
+    file_leases = _pop_plan_leases(plan)
     plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
@@ -2354,6 +2547,7 @@ def remove_shadow_hooks(
             journal_state=journal_state,
             attempted_creates=attempted_creates,
             journal_lease=journal_lease,
+            file_leases=file_leases,
         )
     except (OSError, ValueError, ContractViolation) as exc:
         unresolved = _rollback_transaction(
@@ -2363,6 +2557,7 @@ def remove_shadow_hooks(
             journal_path=journal_path,
             journal_state=journal_state,
             journal_lease=journal_lease,
+            file_leases=file_leases,
         )
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
@@ -2377,11 +2572,13 @@ def remove_shadow_hooks(
             )
         if journal_lease is not None:
             journal_lease.close()
+        _close_file_leases(file_leases)
         plan["dry_run"] = False
         return plan
     except BaseException:
         if journal_lease is not None:
             journal_lease.close()
+        _close_file_leases(file_leases)
         raise
     if journal_lease is not None:
         assert journal_state
@@ -2389,6 +2586,7 @@ def remove_shadow_hooks(
             _complete_transaction_journal_lease(journal_lease)
         )
         journal_lease.close()
+    _close_file_leases(file_leases)
     plan["dry_run"] = False
     return plan
 

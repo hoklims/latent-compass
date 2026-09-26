@@ -24,6 +24,7 @@ import os
 import secrets
 import stat
 import sys
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -693,8 +694,6 @@ def _lease_replace_posix(lease: ConfinedFileLease, data: bytes) -> None:
     try:
         if lease.exists:
             assert lease._file_handle is not None
-            os.close(lease._file_handle)
-            lease._file_handle = None
             os.replace(
                 temporary_name,
                 lease.path.name,
@@ -714,6 +713,8 @@ def _lease_replace_posix(lease: ConfinedFileLease, data: bytes) -> None:
     finally:
         with suppress(FileNotFoundError):
             os.unlink(temporary_name, dir_fd=lease._parent_handle)
+    if lease._file_handle is not None:
+        os.close(lease._file_handle)
     lease._file_handle = os.open(
         lease.path.name,
         os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
@@ -1626,7 +1627,11 @@ if sys.platform == "win32":
             _kernel32.CloseHandle(handle)
             raise ContractViolation(
                 f"{lease.what} appeared after observation",
-                detail={"what": lease.what, "path": str(lease.path)},
+                detail={
+                    "what": lease.what,
+                    "path": str(lease.path),
+                    "reason": "identity",
+                },
             )
         assert lease._file_handle is not None
         assert lease.identity is not None
@@ -1642,7 +1647,13 @@ if sys.platform == "win32":
                 detail={"what": lease.what, "path": str(lease.path)},
             )
 
-    def _write_windows_at(lease: ConfinedFileLease, data: bytes, *, replace: bool) -> None:
+    def _write_windows_at(
+        lease: ConfinedFileLease,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
         temporary: int | None = None
         published = False
         temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
@@ -1668,6 +1679,8 @@ if sys.platform == "win32":
             if not _kernel32.FlushFileBuffers(temporary):
                 error = ctypes.get_last_error()
                 raise OSError(error, ctypes.FormatError(error), str(lease.path))
+            if before_publish is not None:
+                before_publish()
             if replace:
                 _rename_windows_file(temporary, lease._parent_handle, lease.path.name, lease.path)
             else:
@@ -1687,10 +1700,18 @@ if sys.platform == "win32":
 
     def _lease_replace_windows(lease: ConfinedFileLease, data: bytes) -> None:
         replace = lease.exists
-        if lease._file_handle is not None:
-            _kernel32.CloseHandle(lease._file_handle)
-            lease._file_handle = None
-        _write_windows_at(lease, data, replace=replace)
+
+        def release_original() -> None:
+            if lease._file_handle is not None:
+                _kernel32.CloseHandle(lease._file_handle)
+                lease._file_handle = None
+
+        _write_windows_at(
+            lease,
+            data,
+            replace=replace,
+            before_publish=release_original if replace else None,
+        )
         lease._file_handle = _nt_create_relative(
             lease._parent_handle,
             lease.path.name,

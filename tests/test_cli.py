@@ -428,8 +428,11 @@ def test_confined_lease_detects_file_created_after_absent_observation(tmp_path: 
     )
     try:
         target.write_bytes(b"peer")
-        with pytest.raises(ContractViolation, match="appeared after observation"):
+        with pytest.raises(
+            ContractViolation, match=r"(?:appeared|changed) after observation"
+        ) as exc_info:
             lease.assert_current()
+        assert exc_info.value.detail["reason"] == "identity"
         assert target.read_bytes() == b"peer"
     finally:
         lease.close()
@@ -497,6 +500,44 @@ def test_confined_lease_context_closes_handles_on_failure(tmp_path: Path) -> Non
     replacement.write_bytes(b"after")
     replacement.replace(target)
     assert target.read_bytes() == b"after"
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_lease_keeps_original_until_publish_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    peer = root / "peer.json"
+    peer.write_bytes(b"peer")
+    reached = False
+
+    def fail_before_publish(
+        lease: object,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: object = None,
+    ) -> None:
+        nonlocal reached
+        del lease, data, replace, before_publish
+        reached = True
+        with pytest.raises(PermissionError):
+            peer.replace(target)
+        raise OSError("injected pre-publication failure")
+
+    monkeypatch.setattr("latent_compass.confined_io._write_windows_at", fail_before_publish)
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        with pytest.raises(OSError, match="pre-publication"):
+            lease.replace(b"after")
+        assert reached is True
+        lease.assert_current()
+        assert lease.content == b"before"
+    finally:
+        lease.close()
 
 
 def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:
