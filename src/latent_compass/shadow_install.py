@@ -19,6 +19,8 @@ from typing import Final, TextIO, TypedDict, cast
 from latent_compass import __version__
 from latent_compass.canonical import canonical_text, seal
 from latent_compass.confined_io import (
+    confined_directory_exists,
+    plan_confined_target,
     read_confined_file,
     remove_file,
     replace_file,
@@ -450,6 +452,15 @@ def _is_reparse_point(info: os.stat_result) -> bool:
 
 def _regular_file_bytes_or_none(path: Path, *, home: Path | None = None) -> bytes | None:
     if not _path_entry_exists(path):
+        if home is not None:
+            try:
+                confined_directory_exists(
+                    home,
+                    path.parent,
+                    what="host transaction input parent",
+                )
+            except ContractViolation as exc:
+                raise ValueError(str(exc)) from exc
         return None
     try:
         return read_confined_file(
@@ -1262,7 +1273,7 @@ def _planned_host_payload(
     hooks = cast(dict[str, object], payload["hooks"])
     for groups_raw in hooks.values():
         if not isinstance(groups_raw, list):
-            continue
+            raise ValueError("hook event entries must be an array")
         for group in groups_raw:
             handlers = group.get("hooks") if isinstance(group, dict) else None
             if not isinstance(handlers, list):
@@ -1454,6 +1465,7 @@ def _validate_host_paths(
     wrapper_path = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
     targets = (settings_path, config_path, ownership_path, wrapper_path)
     for target in targets:
+        plan_confined_target(home, target, what="managed host target")
         _assert_safe_path_under(home, target)
         if backup_tag is not None:
             _assert_safe_path_under(home, _backup_destination(target, backup_tag))
@@ -1568,6 +1580,21 @@ def plan_install_shadow_hooks(
             )
             managed_wrapper = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
             if hook_script is not None:
+                try:
+                    plan_confined_target(
+                        config_path.parent,
+                        installed_hook,
+                        what="custom hook script",
+                    )
+                except ContractViolation as exc:
+                    conflicts.append(
+                        {
+                            "code": "hook_script_location_unsupported",
+                            "path": str(installed_hook),
+                            "detail": str(exc),
+                        }
+                    )
+                    continue
                 if _path_identity(installed_hook) in {
                     _path_identity(settings_path),
                     _path_identity(config_path),

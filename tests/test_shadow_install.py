@@ -3269,7 +3269,7 @@ def test_install_refuses_custom_wrapper_outside_selected_host_store(
     )
     conflicts = cast(list[dict[str, object]], installed["conflicts"])
     assert conflicts[0]["code"] == "hook_script_location_unsupported"
-    assert "escapes the selected home" in str(conflicts[0]["detail"])
+    assert "inside the root" in str(conflicts[0]["detail"])
     assert json.loads(hooks.read_text(encoding="utf-8")) == {"hooks": {"PreToolUse": []}}
     assert custom_wrapper.read_text(encoding="utf-8") == "# custom fixture\n"
     assert not (home / ".codex" / "latent-compass-shadow" / "ownership.json").exists()
