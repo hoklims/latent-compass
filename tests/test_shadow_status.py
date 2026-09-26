@@ -635,6 +635,25 @@ def test_status_refuses_linked_event_tree_entries(tmp_path: Path, surface: str) 
     assert report["event_count"] == 0
 
 
+def test_status_refuses_linked_events_parent_when_alias_is_absent(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    events = store / "events"
+    outside = tmp_path / "outside-events"
+    outside.mkdir()
+    try:
+        events.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.fail(f"directory symlink support is required for this security witness: {exc}")
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["event_count"] == 0
+
+
 def test_status_refuses_event_file_swapped_to_symlink_before_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -422,7 +422,12 @@ def _decode_pending_transaction(
     return decoded
 
 
-def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict[str, str]]:
+def _recover_pending_transaction(
+    home: Path,
+    *,
+    apply: bool = True,
+    journal_raw: bytes | None = None,
+) -> list[dict[str, str]]:
     journal_path = _pending_transaction_path(home)
     if not _path_entry_exists(journal_path):
         return []
@@ -437,7 +442,8 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
             }
         ]
     try:
-        journal_raw = _regular_file_bytes_or_none(journal_path, home=home)
+        if journal_raw is None:
+            journal_raw = _regular_file_bytes_or_none(journal_path, home=home)
         if journal_raw is None:
             raise ValueError("pending transaction journal vanished during validation")
         decoded = _decode_pending_transaction(home, journal_raw)
@@ -538,10 +544,14 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
         ]
 
 
-def _pending_recovery_description(home: Path) -> dict[str, object]:
+def _pending_recovery_description(
+    home: Path, *, journal_raw: bytes | None = None
+) -> dict[str, object]:
     path = _pending_transaction_path(home)
     try:
-        raw = _regular_file_bytes_or_none(path, home=home)
+        raw = (
+            journal_raw if journal_raw is not None else _regular_file_bytes_or_none(path, home=home)
+        )
         if raw is None:
             return {"pending": False, "files": []}
         decoded = _decode_pending_transaction(home, raw)
@@ -605,8 +615,13 @@ def _pending_recovery_description(home: Path) -> dict[str, object]:
         }
 
 
-def _recovery_description(home: Path, conflicts: list[dict[str, str]]) -> dict[str, object]:
-    description = _pending_recovery_description(home)
+def _recovery_description(
+    home: Path,
+    conflicts: list[dict[str, str]],
+    *,
+    journal_raw: bytes | None = None,
+) -> dict[str, object]:
+    description = _pending_recovery_description(home, journal_raw=journal_raw)
     detail = description.pop("invalid_detail", None)
     if isinstance(detail, str):
         conflicts.append(
@@ -617,6 +632,33 @@ def _recovery_description(home: Path, conflicts: list[dict[str, str]]) -> dict[s
             }
         )
     return description
+
+
+def _pending_recovery_preview(
+    home: Path,
+) -> tuple[list[dict[str, str]], dict[str, object], bytes | None]:
+    journal_path = _pending_transaction_path(home)
+    if not _path_entry_exists(journal_path):
+        return [], {"pending": False, "files": []}, None
+    try:
+        _assert_safe_path_under(home, journal_path)
+        journal_raw = _regular_file_bytes_or_none(journal_path, home=home)
+        if journal_raw is None:
+            raise ValueError("pending transaction journal vanished during validation")
+    except (OSError, ValueError) as exc:
+        conflict = {
+            "code": "pending_transaction_invalid",
+            "path": str(journal_path),
+            "detail": str(exc),
+        }
+        return [conflict], {"pending": True, "files": []}, None
+    conflicts = _recover_pending_transaction(home, apply=False, journal_raw=journal_raw)
+    recovery = (
+        _recovery_description(home, conflicts, journal_raw=journal_raw)
+        if not conflicts
+        else {"pending": True, "files": []}
+    )
+    return conflicts, recovery, journal_raw
 
 
 def _backup(
@@ -1148,8 +1190,8 @@ def plan_install_shadow_hooks(
     """Preflight every selected host and return the complete no-write plan."""
     conflicts: list[dict[str, str]] = []
     pending = _pending_transaction_path(home)
-    if _path_entry_exists(pending):
-        conflicts.extend(_recover_pending_transaction(home, apply=False))
+    pending_conflicts, pending_recovery, pending_raw = _pending_recovery_preview(home)
+    conflicts.extend(pending_conflicts)
     if not runtime_python.is_file():
         conflicts.append({"code": "runtime_missing", "path": str(runtime_python)})
     if not project_root.is_dir():
@@ -1158,12 +1200,8 @@ def plan_install_shadow_hooks(
         conflicts.append({"code": "hook_script_missing", "path": str(hook_script)})
     if not hosts or len(set(hosts)) != len(hosts):
         conflicts.append({"code": "invalid_hosts", "path": ""})
-    if _path_entry_exists(pending):
-        recovery = (
-            _recovery_description(home, conflicts)
-            if not conflicts
-            else {"pending": True, "files": []}
-        )
+    if pending_raw is not None or pending_conflicts:
+        recovery = pending_recovery if not conflicts else {"pending": True, "files": []}
         if not conflicts:
             conflicts.append(
                 {
@@ -1312,7 +1350,7 @@ def plan_install_shadow_hooks(
         "next_steps": ["Review and approve the exact Codex hook definition with /hooks before use."]
         if "codex" in hosts
         else [],
-        "recovery": _recovery_description(home, conflicts),
+        "recovery": pending_recovery,
         "_payloads": payloads,
     }
     if backup_tag is not None:
@@ -1446,14 +1484,10 @@ def plan_remove_shadow_hooks(
     """Plan project-level removal while retaining every unrelated registration."""
     conflicts: list[dict[str, str]] = []
     pending = _pending_transaction_path(home)
-    if _path_entry_exists(pending):
-        conflicts.extend(_recover_pending_transaction(home, apply=False))
-    if _path_entry_exists(pending):
-        recovery = (
-            _recovery_description(home, conflicts)
-            if not conflicts
-            else {"pending": True, "files": []}
-        )
+    pending_conflicts, pending_recovery, pending_raw = _pending_recovery_preview(home)
+    conflicts.extend(pending_conflicts)
+    if pending_raw is not None or pending_conflicts:
+        recovery = pending_recovery if not conflicts else {"pending": True, "files": []}
         if not conflicts:
             conflicts.append(
                 {
@@ -1576,7 +1610,7 @@ def plan_remove_shadow_hooks(
         "files": files,
         "conflicts": conflicts,
         "next_steps": [],
-        "recovery": _recovery_description(home, conflicts),
+        "recovery": pending_recovery,
         "_payloads": payloads,
     }
     if backup_tag is not None:
@@ -1683,10 +1717,7 @@ def remove_shadow_hooks(
 
 
 def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
-    conflicts = _recover_pending_transaction(home, apply=False)
-    recovery = (
-        _recovery_description(home, conflicts) if not conflicts else {"pending": True, "files": []}
-    )
+    conflicts, recovery, journal_raw = _pending_recovery_preview(home)
     files = cast(list[dict[str, object]], recovery.get("files", []))
     return {
         "schema_version": 1,
@@ -1703,15 +1734,17 @@ def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
             else []
         ),
         "recovery": recovery,
+        "_journal_raw": journal_raw,
     }
 
 
 def recover_shadow_hooks(*, home: Path) -> dict[str, object]:
     plan = plan_recover_shadow_hooks(home=home)
+    journal_raw = cast(bytes | None, plan.pop("_journal_raw"))
     if plan["conflicts"]:
         plan["dry_run"] = False
         return plan
-    conflicts = _recover_pending_transaction(home)
+    conflicts = _recover_pending_transaction(home, journal_raw=journal_raw)
     if conflicts:
         cast(list[dict[str, str]], plan["conflicts"]).extend(conflicts)
     plan["dry_run"] = False

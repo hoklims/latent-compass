@@ -238,6 +238,16 @@ def list_confined_json_files(
     return sorted(paths, key=lambda item: item.as_posix()), truncated
 
 
+def confined_directory_exists(root: Path, target: Path, *, what: str) -> bool:
+    """Check a confined directory through non-following directory handles."""
+    absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
+    absolute_target = plan_confined_target(absolute_root, target, what=what)
+    relative = Path(os.path.relpath(absolute_target, absolute_root))
+    if _is_windows_runtime():
+        return _directory_exists_windows(absolute_root, relative, what=what)
+    return _directory_exists_posix(absolute_root, relative, what=what)
+
+
 def _write_all(descriptor: int, data: bytes) -> None:
     view = memoryview(data)
     while view:
@@ -572,6 +582,40 @@ def _list_posix_json(
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+def _directory_exists_posix(root: Path, relative: Path, *, what: str) -> bool:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        anchor = Path(root.anchor)
+        current = os.open(anchor, directory_flags)
+        descriptors.append(current)
+        traversed = anchor
+        for component in (*root.parts[1:], *relative.parts):
+            traversed /= component
+            try:
+                child = os.open(component, directory_flags, dir_fd=current)
+            except FileNotFoundError:
+                return False
+            except OSError as exc:
+                raise ContractViolation(
+                    f"{what} contains a directory component that cannot be opened safely",
+                    detail={"what": what, "path": str(traversed)},
+                ) from exc
+            descriptors.append(child)
+            current = child
+        return True
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+if sys.platform != "win32":
+
+    def _directory_exists_windows(root: Path, relative: Path, *, what: str) -> bool:
+        del root, relative, what
+        raise RuntimeError("Windows directory handles are unavailable on this platform")
 
 
 if sys.platform == "win32":
@@ -1175,5 +1219,42 @@ if sys.platform == "win32":
         finally:
             if file_handle is not None:
                 _kernel32.CloseHandle(file_handle)
+            for handle in reversed(handles):
+                _kernel32.CloseHandle(handle)
+
+    def _directory_exists_windows(root: Path, relative: Path, *, what: str) -> bool:
+        handles: list[int] = []
+        try:
+            anchor = Path(root.anchor)
+            current = _open_windows_anchor(anchor, what=what)
+            handles.append(current)
+            traversed = anchor
+            for component in (*root.parts[1:], *relative.parts):
+                traversed /= component
+                try:
+                    child = _nt_create_relative(
+                        current,
+                        component,
+                        access=_DIRECTORY_TRAVERSE_ACCESS,
+                        disposition=_FILE_OPEN,
+                        options=_FILE_DIRECTORY_FILE,
+                        path=traversed,
+                    )
+                except FileNotFoundError:
+                    return False
+                except OSError as exc:
+                    raise ContractViolation(
+                        f"{what} contains a directory component that cannot be opened safely",
+                        detail={"what": what, "path": str(traversed)},
+                    ) from exc
+                try:
+                    _reject_reparse(child, traversed, what=what)
+                except BaseException:
+                    _kernel32.CloseHandle(child)
+                    raise
+                handles.append(child)
+                current = child
+            return True
+        finally:
             for handle in reversed(handles):
                 _kernel32.CloseHandle(handle)

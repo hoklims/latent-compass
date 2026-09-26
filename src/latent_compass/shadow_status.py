@@ -17,7 +17,11 @@ from typing import Final, Literal, TextIO
 
 from latent_compass import __version__
 from latent_compass.canonical import seal
-from latent_compass.confined_io import list_confined_json_files, read_confined_file
+from latent_compass.confined_io import (
+    confined_directory_exists,
+    list_confined_json_files,
+    read_confined_file,
+)
 from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import DEFAULT_CONFIG_NAME, ShadowProject, load_shadow_config
 
@@ -278,7 +282,15 @@ def _project_for_root(
 
 def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict[str, object]:
     root = store / "events" / alias
-    if not os.path.lexists(root):
+    try:
+        root_exists = confined_directory_exists(
+            store,
+            root,
+            what="shadow event directory",
+        )
+    except (OSError, ContractViolation):
+        return {"unsafe_event_store": True}
+    if not root_exists:
         return {
             "event_count": 0,
             "session_count": 0,
@@ -288,8 +300,6 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             "truncated": False,
             "unsafe_event_store": False,
         }
-    if not _parents_safe(root) or not _entry_kind_safe(root, directory=True):
-        return {"unsafe_event_store": True}
     try:
         paths, truncated = list_confined_json_files(
             store,

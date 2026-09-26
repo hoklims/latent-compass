@@ -2085,13 +2085,14 @@ def test_deeply_nested_journal_returns_structured_invalid_conflict(tmp_path: Pat
     assert journal.read_bytes() == before
 
 
-def test_recovery_preview_revalidates_journal_second_read(
+def test_recovery_preview_preflights_replacement_journal_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
     project.mkdir()
-    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
     plan = plan_install_shadow_hooks(
         home=home,
         runtime_python=Path(sys.executable),
@@ -2105,25 +2106,40 @@ def test_recovery_preview_revalidates_journal_second_read(
         backup_tag="swap",
         plan=plan,
     )
+    current_digest = f"sha256:{hashlib.sha256(hooks.read_bytes()).hexdigest()}"
+    replacement = {
+        "schema_version": 1,
+        "operation": "remove",
+        "backup_tag": "replacement",
+        "entries": [
+            {
+                "path": str(hooks),
+                "before_sha256": "sha256:" + "1" * 64,
+                "after_sha256": current_digest,
+                "backup_path": str(hooks.with_name("hooks.json.bak-latent-compass-replacement")),
+            }
+        ],
+    }
     real_reader = _regular_file_bytes_or_none
-    journal_reads = 0
+    swapped = False
 
-    def replace_second_journal_read(path: Path, *, home: Path | None = None) -> bytes | None:
-        nonlocal journal_reads
-        if path == journal:
-            journal_reads += 1
-            if journal_reads == 2:
-                return b"{}\n"
+    def replace_before_journal_read(path: Path, *, home: Path | None = None) -> bytes | None:
+        nonlocal swapped
+        if path == journal and not swapped:
+            swapped = True
+            journal.write_text(json.dumps(replacement), encoding="utf-8")
         return real_reader(path, home=home)
 
     monkeypatch.setattr(
         "latent_compass.shadow_install._regular_file_bytes_or_none",
-        replace_second_journal_read,
+        replace_before_journal_read,
     )
     report = plan_recover_shadow_hooks(home=home)
 
     conflicts = cast(list[dict[str, object]], report["conflicts"])
-    assert conflicts[0]["code"] == "pending_transaction_invalid"
+    assert conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "backup is missing" in str(conflicts[0]["detail"])
+    assert swapped is True
     assert journal.is_file()
 
 
