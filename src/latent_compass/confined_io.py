@@ -224,7 +224,7 @@ def lease_confined_file(
     absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
     absolute_target = plan_confined_target(absolute_root, target, what=what)
     relative = Path(os.path.relpath(absolute_target, absolute_root))
-    if sys.platform == "win32":
+    if _is_windows_runtime():
         return _lease_open_windows(
             absolute_root,
             relative,
@@ -232,7 +232,7 @@ def lease_confined_file(
             what=what,
             allow_absent=allow_absent,
         )
-    return _lease_open_posix(  # type: ignore[unreachable]
+    return _lease_open_posix(
         absolute_root,
         relative,
         max_bytes=checked_max_bytes,
@@ -927,6 +927,36 @@ def _list_posix_json(
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+if sys.platform != "win32":
+
+    def _lease_open_windows(
+        root: Path,
+        relative: Path,
+        *,
+        max_bytes: int,
+        what: str,
+        allow_absent: bool,
+    ) -> ConfinedFileLease:
+        del root, relative, max_bytes, what, allow_absent
+        raise RuntimeError("Windows confined leases are unavailable on this platform")
+
+    def _lease_assert_windows(lease: ConfinedFileLease) -> None:
+        del lease
+        raise RuntimeError("Windows confined leases are unavailable on this platform")
+
+    def _lease_replace_windows(lease: ConfinedFileLease, data: bytes) -> None:
+        del lease, data
+        raise RuntimeError("Windows confined leases are unavailable on this platform")
+
+    def _lease_remove_windows(lease: ConfinedFileLease) -> None:
+        del lease
+        raise RuntimeError("Windows confined leases are unavailable on this platform")
+
+    def _lease_close_windows(lease: ConfinedFileLease) -> None:
+        del lease
+        raise RuntimeError("Windows confined leases are unavailable on this platform")
 
 
 def _directory_exists_posix(root: Path, relative: Path, *, what: str) -> bool:
