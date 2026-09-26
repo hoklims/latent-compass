@@ -129,7 +129,14 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
         and re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is not None
         and (parsed := _parse_hook_command(str(payload.get("command")), host)) is not None
         and (
-            parsed[2] is None or _lexical_absolute(parsed[2]) == _lexical_absolute(store.parents[1])
+            (
+                parsed[2] is None
+                and _lexical_absolute(store.parents[1]) == _lexical_absolute(Path.home())
+            )
+            or (
+                parsed[2] is not None
+                and _lexical_absolute(parsed[2]) == _lexical_absolute(store.parents[1])
+            )
         )
     )
     return (
@@ -444,8 +451,11 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
             paths_safe = False
         else:
             _, wrapper, selected_home = parsed
-            if selected_home is not None and _lexical_absolute(selected_home) != _lexical_absolute(
-                home
+            if (
+                selected_home is None and _lexical_absolute(home) != _lexical_absolute(Path.home())
+            ) or (
+                selected_home is not None
+                and _lexical_absolute(selected_home) != _lexical_absolute(home)
             ):
                 paths_safe = False
             else:

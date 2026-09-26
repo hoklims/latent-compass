@@ -360,6 +360,8 @@ def _apply_frozen_operations(
     snapshots: dict[Path, bytes | None],
     backup_tag: str,
     written: dict[Path, bytes | None],
+    journal_path: Path,
+    journal_state: list[bytes],
 ) -> None:
     for operation in operations:
         if operation["action"] == "unchanged":
@@ -378,11 +380,30 @@ def _apply_frozen_operations(
             _remove_confined(home, path, what="managed host file", expected=before)
         else:
             _atomic_bytes(path, after, home=home, expected=before)
+            if before is None:
+                journal_state[0] = _confirm_create_publication(
+                    home, journal_path, journal_state[0], path
+                )
         written[path] = after
 
 
 def _pending_transaction_path(home: Path) -> Path:
     return home / _PENDING_TRANSACTION_NAME
+
+
+def _confirm_create_publication(
+    home: Path, journal_path: Path, journal_content: bytes, path: Path
+) -> bytes:
+    payload = json.loads(journal_content.decode("utf-8"))
+    assert isinstance(payload, dict)
+    entries = cast(list[dict[str, object]], payload["entries"])
+    for entry in entries:
+        if Path(str(entry["path"])) == path:
+            entry["publication_confirmed"] = True
+            break
+    replacement = _json_bytes(payload)
+    _atomic_bytes(journal_path, replacement, home=home, expected=journal_content)
+    return replacement
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -463,6 +484,7 @@ def _begin_transaction(
                     if item["action"] in {"update", "delete"}
                     else None
                 ),
+                "publication_confirmed": item["action"] != "create",
             }
         )
     journal = {
@@ -512,13 +534,19 @@ def _decode_pending_transaction(
     seen_paths: set[Path] = set()
     decoded: list[tuple[Path, str | None, str | None, Path | None]] = []
     for raw in entries:
-        if not isinstance(raw, dict) or set(raw) != {
-            "path",
-            "before_sha256",
-            "after_sha256",
-            "backup_path",
-        }:
+        if not isinstance(raw, dict) or set(raw) not in (
+            {"path", "before_sha256", "after_sha256", "backup_path"},
+            {
+                "path",
+                "before_sha256",
+                "after_sha256",
+                "backup_path",
+                "publication_confirmed",
+            },
+        ):
             raise ValueError("invalid pending transaction entry")
+        if "publication_confirmed" in raw and not isinstance(raw["publication_confirmed"], bool):
+            raise ValueError("invalid pending transaction publication provenance")
         path = _assert_safe_path_under(root, Path(str(raw.get("path", ""))))
         if path not in allowed_paths:
             raise ValueError("pending transaction path is not a managed host target")
@@ -553,6 +581,16 @@ def _observe_recovery_targets(
     home: Path, journal_raw: bytes
 ) -> tuple[list[dict[str, str]], list[_RecoveryObservation]]:
     observations: list[_RecoveryObservation] = []
+    _decode_pending_transaction(home, journal_raw)
+    payload = json.loads(journal_raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("pending transaction journal must contain a JSON object")
+    publication_confirmed = {
+        _lexical_absolute(Path(str(entry["path"]))): cast(
+            bool, entry.get("publication_confirmed", True)
+        )
+        for entry in cast(list[dict[str, object]], payload["entries"])
+    }
     for path, before_digest, after_digest, backup in _decode_pending_transaction(home, journal_raw):
         current = _regular_file_bytes_or_none(path, home=home)
         current_digest = _bytes_digest(current)
@@ -562,6 +600,18 @@ def _observe_recovery_targets(
                     "code": "pending_transaction_conflict",
                     "path": str(path),
                     "detail": "current bytes match neither transaction state; preserve and inspect",
+                }
+            ], []
+        if (
+            before_digest is None
+            and current_digest == after_digest
+            and not publication_confirmed[path]
+        ):
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(path),
+                    "detail": "create publication is unconfirmed; preserve and inspect",
                 }
             ], []
         backup_content = (
@@ -1607,16 +1657,20 @@ def install_shadow_hooks(
     plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
+    journal_state: list[bytes] = []
     try:
         journal_path, journal_content = _begin_transaction(
             home=home, operation="install", backup_tag=backup_tag, plan=plan
         )
+        journal_state = [journal_content]
         _apply_frozen_operations(
             home=home,
             operations=operations,
             snapshots=snapshots,
             backup_tag=backup_tag,
             written=written,
+            journal_path=journal_path,
+            journal_state=journal_state,
         )
     except (OSError, ValueError) as exc:
         unresolved = _rollback_transaction(home, snapshots, written)
@@ -1631,23 +1685,20 @@ def install_shadow_hooks(
                     "detail": "current bytes changed after this transaction wrote the path",
                 }
             )
-        if (
-            isinstance(exc, _DefiniteWriteRefusalError)
-            and journal_path is not None
-            and journal_content is not None
-        ):
+        active_journal = journal_state[0] if journal_state else journal_content
+        if journal_path is not None and active_journal is not None:
             collision_cleanup = (
-                _complete_transaction_journal(home, journal_path, journal_content)
-                if not unresolved
-                else _prune_unconfirmed_creates(home, journal_path, journal_content, written)
+                _complete_transaction_journal(home, journal_path, active_journal)
+                if isinstance(exc, _DefiniteWriteRefusalError) and not unresolved
+                else _prune_unconfirmed_creates(home, journal_path, active_journal, written)
             )
             cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
-        assert journal_content is not None
+        assert journal_state
         cast(list[dict[str, str]], plan["conflicts"]).extend(
-            _complete_transaction_journal(home, journal_path, journal_content)
+            _complete_transaction_journal(home, journal_path, journal_state[0])
         )
     plan["dry_run"] = False
     plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
@@ -1871,16 +1922,20 @@ def remove_shadow_hooks(
     plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
+    journal_state: list[bytes] = []
     try:
         journal_path, journal_content = _begin_transaction(
             home=home, operation="remove", backup_tag=backup_tag, plan=plan
         )
+        journal_state = [journal_content]
         _apply_frozen_operations(
             home=home,
             operations=operations,
             snapshots=snapshots,
             backup_tag=backup_tag,
             written=written,
+            journal_path=journal_path,
+            journal_state=journal_state,
         )
     except (OSError, ValueError) as exc:
         unresolved = _rollback_transaction(home, snapshots, written)
@@ -1895,23 +1950,20 @@ def remove_shadow_hooks(
                     "detail": "current bytes changed after this transaction wrote the path",
                 }
             )
-        if (
-            isinstance(exc, _DefiniteWriteRefusalError)
-            and journal_path is not None
-            and journal_content is not None
-        ):
+        active_journal = journal_state[0] if journal_state else journal_content
+        if journal_path is not None and active_journal is not None:
             collision_cleanup = (
-                _complete_transaction_journal(home, journal_path, journal_content)
-                if not unresolved
-                else _prune_unconfirmed_creates(home, journal_path, journal_content, written)
+                _complete_transaction_journal(home, journal_path, active_journal)
+                if isinstance(exc, _DefiniteWriteRefusalError) and not unresolved
+                else _prune_unconfirmed_creates(home, journal_path, active_journal, written)
             )
             cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
-        assert journal_content is not None
+        assert journal_state
         cast(list[dict[str, str]], plan["conflicts"]).extend(
-            _complete_transaction_journal(home, journal_path, journal_content)
+            _complete_transaction_journal(home, journal_path, journal_state[0])
         )
     plan["dry_run"] = False
     return plan

@@ -28,6 +28,7 @@ from latent_compass.shadow_install import (
     _bytes_digest,
     _command,
     _command_references_wrapper,
+    _confirm_create_publication,
     _default_project_alias,
     _exclusive_json,
     _ExpectedUnset,
@@ -2082,6 +2083,42 @@ def test_install_collision_after_journal_preserves_peer_and_clears_stale_recover
     assert not journal.exists()
 
 
+def test_recovery_preserves_unconfirmed_future_create_after_interruption(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="interrupted",
+    )
+    snapshots = _transaction_snapshot(home, plan)
+    journal, journal_content = _begin_transaction(
+        home=home, operation="install", backup_tag="interrupted", plan=plan
+    )
+    operations = cast(list[dict[str, Any]], plan["_operations"])
+    wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
+    wrapper_after = next(item["after"] for item in operations if item["path"] == wrapper)
+    assert isinstance(wrapper_after, bytes)
+    _atomic_bytes(wrapper, wrapper_after, home=home, expected=None)
+    _confirm_create_publication(home, journal, journal_content, wrapper)
+    config = home / ".codex" / "latent-compass-shadow" / "config.json"
+    config_after = next(item["after"] for item in operations if item["path"] == config)
+    assert isinstance(config_after, bytes)
+    config.write_bytes(config_after)
+
+    recovery = recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], recovery["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "unconfirmed" in str(conflicts[0]["detail"])
+    assert config.read_bytes() == config_after
+    assert journal.is_file()
+
+
 def test_install_rollback_preserves_concurrent_change_to_unwritten_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2197,7 +2234,7 @@ def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path)
         backup_tag="crash",
     )
     snapshots = _transaction_snapshot(home, plan)
-    journal, _journal_content = _begin_transaction(
+    journal, journal_content = _begin_transaction(
         home=home,
         operation="install",
         backup_tag="crash",
@@ -2205,6 +2242,7 @@ def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path)
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
     _atomic_text(wrapper, _packaged_hook_text())
+    _confirm_create_publication(home, journal, journal_content, wrapper)
 
     install_arguments = [
         "install",
@@ -2268,7 +2306,7 @@ def test_recovery_preflights_all_backups_before_first_mutation(tmp_path: Path) -
         backup_tag="crash",
     )
     snapshots = _transaction_snapshot(home, plan)
-    journal, _journal_content = _begin_transaction(
+    journal, journal_content = _begin_transaction(
         home=home,
         operation="install",
         backup_tag="crash",
@@ -2276,6 +2314,7 @@ def test_recovery_preflights_all_backups_before_first_mutation(tmp_path: Path) -
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
     _atomic_text(wrapper, _packaged_hook_text())
+    _confirm_create_publication(home, journal, journal_content, wrapper)
     operations = cast(list[dict[str, Any]], plan["_operations"])
     settings_after = next(item["after"] for item in operations if item["path"] == hooks)
     assert isinstance(settings_after, bytes)
@@ -2305,7 +2344,7 @@ def test_recovery_preserves_created_file_changed_before_delete(
         backup_tag="crash",
     )
     snapshots = _transaction_snapshot(home, plan)
-    journal, _journal_content = _begin_transaction(
+    journal, journal_content = _begin_transaction(
         home=home,
         operation="install",
         backup_tag="crash",
@@ -2313,6 +2352,7 @@ def test_recovery_preserves_created_file_changed_before_delete(
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
     _atomic_text(wrapper, _packaged_hook_text())
+    _confirm_create_publication(home, journal, journal_content, wrapper)
     foreign = b"# foreign after recovery preflight\n"
     real_remove = _remove_confined
     swapped = False
@@ -2835,7 +2875,7 @@ def test_recovery_refuses_journal_replacement_before_any_target_mutation(
         backup_tag="preview-a",
     )
     snapshots = _transaction_snapshot(home, plan)
-    journal, _journal_a = _begin_transaction(
+    journal, journal_a = _begin_transaction(
         home=home,
         operation="install",
         backup_tag="preview-a",
@@ -2849,6 +2889,7 @@ def test_recovery_refuses_journal_replacement_before_any_target_mutation(
     )
     assert isinstance(wrapper_after, bytes)
     _atomic_bytes(wrapper, wrapper_after)
+    _confirm_create_publication(home, journal, journal_a, wrapper)
     replacement = {
         "schema_version": 1,
         "operation": "install",
