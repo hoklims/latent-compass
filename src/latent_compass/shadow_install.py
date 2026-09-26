@@ -1075,6 +1075,28 @@ def _recover_pending_transaction(
             conflicts, observations = _observe_recovery_targets(home, journal_lease.content)
             if conflicts:
                 return conflicts
+        revoked_owned_creates: set[Path] = set()
+        if apply:
+            try:
+                journal_lease.assert_current()
+            except ContractViolation as exc:
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(journal_path),
+                        "detail": f"pending transaction journal changed during preflight: {exc}",
+                    }
+                ]
+            for observation in observations:
+                if (
+                    observation["before_digest"] is None
+                    and _bytes_digest(observation["current"]) == observation["after_digest"]
+                    and observation["publication_state"] == "confirmed"
+                ):
+                    _set_create_publication_state_lease(
+                        journal_lease, observation["path"], "revoked"
+                    )
+                    revoked_owned_creates.add(observation["path"])
         for observation in observations:
             try:
                 target_lease = observation["target_lease"]
@@ -1099,23 +1121,13 @@ def _recover_pending_transaction(
                 ]
         if not apply:
             return []
-        try:
-            journal_lease.assert_current()
-        except ContractViolation as exc:
-            return [
-                {
-                    "code": "pending_transaction_conflict",
-                    "path": str(journal_path),
-                    "detail": f"pending transaction journal changed during preflight: {exc}",
-                }
-            ]
         for observation in observations:
             current = observation["current"]
             if _bytes_digest(current) != observation["after_digest"]:
                 continue
             if observation["before_digest"] is None:
                 assert current is not None
-                if observation["publication_state"] != "confirmed":
+                if observation["path"] not in revoked_owned_creates:
                     return [
                         {
                             "code": "pending_transaction_conflict",
@@ -1123,7 +1135,6 @@ def _recover_pending_transaction(
                             "detail": "create publication authority is not confirmed",
                         }
                     ]
-                _set_create_publication_state_lease(journal_lease, observation["path"], "revoked")
                 target_lease = observation["target_lease"]
                 assert target_lease is not None
                 target_lease.remove()

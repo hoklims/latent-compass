@@ -3251,6 +3251,76 @@ def test_recovery_preserves_created_file_changed_before_delete(
     assert journal.is_file()
 
 
+def test_recovery_revokes_before_identity_check_and_never_deletes_same_byte_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="identity-revoke",
+    )
+    snapshots = _transaction_snapshot(home, plan)
+    journal, journal_content = _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="identity-revoke",
+        plan=plan,
+    )
+    wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
+    owned = _packaged_hook_text().encode("utf-8")
+    _atomic_bytes(wrapper, owned, home=home, expected=None)
+    _confirm_create_publication(home, journal, journal_content, wrapper)
+    peer = tmp_path / "peer-wrapper.py"
+    peer.write_bytes(owned)
+    peer_stat = peer.stat()
+    peer_identity = (peer_stat.st_dev, peer_stat.st_ino)
+    replacement_blocked = False
+    real_session = _pending_recovery_session
+
+    def observe_then_substitute(selected_home: Path) -> tuple[Any, ...]:
+        nonlocal replacement_blocked
+        session = real_session(selected_home)
+        try:
+            peer.replace(wrapper)
+        except PermissionError:
+            replacement_blocked = True
+        return session
+
+    with monkeypatch.context() as fault:
+        fault.setattr(shadow_install, "_pending_recovery_session", observe_then_substitute)
+        first = recover_shadow_hooks(home=home)
+    second = recover_shadow_hooks(home=home)
+
+    if os.name == "nt":
+        assert replacement_blocked is True
+        assert first["conflicts"] == []
+        assert second["conflicts"] == []
+        assert not wrapper.exists()
+        assert peer.read_bytes() == owned
+        assert not journal.exists()
+    else:
+        assert replacement_blocked is False
+        for report in (first, second):
+            conflicts = cast(list[dict[str, object]], report["conflicts"])
+            assert conflicts[0]["code"] == "pending_transaction_conflict"
+        first_conflicts = cast(list[dict[str, object]], first["conflicts"])
+        second_conflicts = cast(list[dict[str, object]], second["conflicts"])
+        assert "changed after preflight" in str(first_conflicts[0]["detail"])
+        assert "unconfirmed" in str(second_conflicts[0]["detail"])
+        wrapper_stat = wrapper.stat()
+        assert (wrapper_stat.st_dev, wrapper_stat.st_ino) == peer_identity
+        payload = json.loads(journal.read_text(encoding="utf-8"))
+        entry = next(item for item in payload["entries"] if item["path"] == str(wrapper))
+        assert entry["publication_state"] == "revoked"
+        assert journal.is_file()
+
+
 def test_recovery_revokes_create_authority_before_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

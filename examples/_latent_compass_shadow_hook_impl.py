@@ -18,6 +18,7 @@ from latent_compass.shadow_harness import (
     DEFAULT_CONFIG_NAME,
     MAX_HOOK_BYTES,
     ShadowHarnessConfig,
+    decode_host_json,
     default_store_root,
     load_shadow_config,
 )
@@ -83,13 +84,13 @@ def main(
         raw = stdin.read(MAX_HOOK_BYTES + 1)
         if len(raw.encode("utf-8")) > MAX_HOOK_BYTES:
             raise RuntimeError("hook_payload_too_large")
-        payload = json.loads(raw)
+        payload = decode_host_json(raw)
         if not isinstance(payload, dict):
             raise RuntimeError("hook_payload_not_object")
         store = default_store_root(args.host, args.home)
         config_path = store / DEFAULT_CONFIG_NAME
         config = load_shadow_config(
-            json.loads(
+            decode_host_json(
                 read_confined_file(
                     store,
                     config_path,
