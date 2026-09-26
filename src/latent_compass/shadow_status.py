@@ -116,7 +116,7 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
             store, path, max_bytes=MAX_EVENT_BYTES, what="shadow ownership manifest"
         )
         payload = json.loads(raw.decode("utf-8"))
-    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return None, None, False
     valid = (
         isinstance(payload, dict)
@@ -244,7 +244,7 @@ def _hook_state(
     try:
         raw = read_confined_file(home, path, max_bytes=MAX_EVENT_BYTES, what="host hook settings")
         payload = json.loads(raw.decode("utf-8"))
-    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return {
             "configuration_present": True,
             "configuration_valid": False,
@@ -512,7 +512,14 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
             what="shadow host configuration",
         )
         config = load_shadow_config(json.loads(raw_config.decode("utf-8")))
-    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    except (
+        OSError,
+        ContractViolation,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
         base["status"] = "SHADOW_CONFIGURATION_INVALID"
         return base
     if not config.enabled:

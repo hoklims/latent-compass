@@ -578,6 +578,54 @@ def test_windows_lease_keeps_original_until_publish_boundary(
         lease.close()
 
 
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_lease_marks_post_publication_failure_uncertain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    real_writer = confined_io._write_windows_at  # noqa: SLF001 - native backend witness
+    published = False
+
+    def publish_then_fail(
+        lease: confined_io.ConfinedFileLease,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
+        nonlocal published
+        real_writer(
+            lease,
+            data,
+            replace=replace,
+            before_publish=before_publish,
+        )
+        published = True
+        raise OSError("injected failure after publication")
+
+    monkeypatch.setattr(confined_io, "_write_windows_at", publish_then_fail)
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        with pytest.raises(OSError, match="after publication"):
+            lease.replace(b"after")
+        assert published is True
+        assert target.read_bytes() == b"after"
+        with pytest.raises(ContractViolation, match="publication outcome is uncertain") as exc_info:
+            lease.assert_current()
+        assert exc_info.value.detail == {
+            "what": "test journal",
+            "path": str(target),
+            "reason": "publication_uncertain",
+        }
+    finally:
+        lease.close()
+
+
 def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

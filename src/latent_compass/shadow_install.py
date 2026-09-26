@@ -459,6 +459,22 @@ def _apply_frozen_operations(
         backup_path = _backup_destination(path, backup_tag)
         _assert_safe_path_under(home, backup_path)
         target_lease = file_leases.get(_lexical_absolute(path)) if file_leases is not None else None
+        if target_lease is None and before is None and file_leases is not None:
+            target_lease = lease_confined_file(
+                home,
+                path,
+                max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+                what="managed host transaction target",
+                allow_absent=True,
+                create_parents=True,
+            )
+            if target_lease.content is not None:
+                target_lease.close()
+                raise ContractViolation(
+                    "managed host transaction target appeared after preflight",
+                    detail={"what": "managed host transaction target", "path": str(path)},
+                )
+            file_leases[_lexical_absolute(path)] = target_lease
         if before is not None:
             backup_lease = (
                 file_leases.get(_lexical_absolute(backup_path)) if file_leases is not None else None
@@ -851,8 +867,12 @@ def _observe_recovery_targets(
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
     publication_states = {
-        _lexical_absolute(Path(str(entry["path"]))): cast(
-            str | None, entry.get("publication_state")
+        _lexical_absolute(Path(str(entry["path"]))): (
+            cast(str, entry["publication_state"])
+            if isinstance(entry.get("publication_state"), str)
+            else "confirmed"
+            if entry.get("publication_confirmed") is True
+            else None
         )
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
@@ -2119,6 +2139,7 @@ def plan_install_shadow_hooks(
             json.JSONDecodeError,
             ValueError,
             ContractViolation,
+            RecursionError,
         ) as exc:
             conflicts.append(
                 {
@@ -2143,6 +2164,7 @@ def plan_install_shadow_hooks(
             json.JSONDecodeError,
             ValueError,
             ContractViolation,
+            RecursionError,
         ) as exc:
             conflicts.append(
                 {"code": "configuration_collision", "path": str(config_path), "detail": str(exc)}
@@ -2482,6 +2504,7 @@ def plan_remove_shadow_hooks(
             json.JSONDecodeError,
             ValueError,
             ContractViolation,
+            RecursionError,
         ) as exc:
             conflicts.append(
                 {"code": "configuration_collision", "path": str(config_path), "detail": str(exc)}
@@ -2513,6 +2536,7 @@ def plan_remove_shadow_hooks(
             json.JSONDecodeError,
             ValueError,
             ContractViolation,
+            RecursionError,
         ) as exc:
             conflicts.append(
                 {

@@ -77,6 +77,7 @@ class ConfinedFileLease:
         self.identity = identity
         self._backend = backend
         self._closed = False
+        self._publication_uncertain = False
 
     @property
     def exists(self) -> bool:
@@ -84,6 +85,15 @@ class ConfinedFileLease:
 
     def assert_current(self) -> None:
         self._ensure_open()
+        if self._publication_uncertain:
+            raise ContractViolation(
+                f"{self.what} publication outcome is uncertain",
+                detail={
+                    "what": self.what,
+                    "path": str(self.path),
+                    "reason": "publication_uncertain",
+                },
+            )
         if self._backend == "windows":
             _lease_assert_windows(self)
         else:
@@ -219,6 +229,7 @@ def lease_confined_file(
     max_bytes: int,
     what: str,
     allow_absent: bool = False,
+    create_parents: bool = False,
 ) -> ConfinedFileLease:
     """Open a confined file once and retain its namespace/content observation."""
     checked_max_bytes = _require_positive_read_limit(max_bytes, what=what)
@@ -232,6 +243,7 @@ def lease_confined_file(
             max_bytes=checked_max_bytes,
             what=what,
             allow_absent=allow_absent,
+            create_parents=create_parents,
         )
     return _lease_open_posix(
         absolute_root,
@@ -239,6 +251,7 @@ def lease_confined_file(
         max_bytes=checked_max_bytes,
         what=what,
         allow_absent=allow_absent,
+        create_parents=create_parents,
     )
 
 
@@ -579,6 +592,7 @@ def _lease_open_posix(
     max_bytes: int,
     what: str,
     allow_absent: bool,
+    create_parents: bool,
 ) -> ConfinedFileLease:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
@@ -591,8 +605,14 @@ def _lease_open_posix(
         traversed = Path(root.anchor)
         for component in (*root.parts[1:], *relative.parts[:-1]):
             traversed /= component
-            current = _open_directory_posix_readonly(
-                current, component, traversed, what=what, directory_flags=directory_flags
+            current = (
+                _open_or_create_directory_posix(
+                    current, component, traversed, what=what, directory_flags=directory_flags
+                )
+                if create_parents
+                else _open_directory_posix_readonly(
+                    current, component, traversed, what=what, directory_flags=directory_flags
+                )
             )
             descriptors.append(current)
         try:
@@ -940,8 +960,9 @@ if sys.platform != "win32":
         max_bytes: int,
         what: str,
         allow_absent: bool,
+        create_parents: bool,
     ) -> ConfinedFileLease:
-        del root, relative, max_bytes, what, allow_absent
+        del root, relative, max_bytes, what, allow_absent, create_parents
         raise RuntimeError("Windows confined leases are unavailable on this platform")
 
     def _lease_assert_windows(lease: ConfinedFileLease) -> None:
@@ -959,6 +980,16 @@ if sys.platform != "win32":
     def _lease_close_windows(lease: ConfinedFileLease) -> None:
         del lease
         raise RuntimeError("Windows confined leases are unavailable on this platform")
+
+    def _write_windows_at(
+        lease: ConfinedFileLease,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
+        del lease, data, replace, before_publish
+        raise RuntimeError("Windows confined writes are unavailable on this platform")
 
 
 def _directory_exists_posix(root: Path, relative: Path, *, what: str) -> bool:
@@ -1546,6 +1577,7 @@ if sys.platform == "win32":
         max_bytes: int,
         what: str,
         allow_absent: bool,
+        create_parents: bool,
     ) -> ConfinedFileLease:
         handles: list[int] = []
         file_handle: int | None = None
@@ -1556,7 +1588,11 @@ if sys.platform == "win32":
             traversed = Path(root.anchor)
             for component in (*root.parts[1:], *relative.parts[:-1]):
                 traversed /= component
-                current = _open_directory_windows_readonly(current, component, traversed, what=what)
+                current = (
+                    _open_or_create_directory_windows(current, component, traversed, what=what)
+                    if create_parents
+                    else _open_directory_windows_readonly(current, component, traversed, what=what)
+                )
                 handles.append(current)
             try:
                 file_handle = _nt_create_relative(
@@ -1701,33 +1737,42 @@ if sys.platform == "win32":
 
     def _lease_replace_windows(lease: ConfinedFileLease, data: bytes) -> None:
         replace = lease.exists
+        original_released = False
 
         def release_original() -> None:
+            nonlocal original_released
             if lease._file_handle is not None:
                 _kernel32.CloseHandle(lease._file_handle)
                 lease._file_handle = None
+            original_released = True
 
-        _write_windows_at(
-            lease,
-            data,
-            replace=replace,
-            before_publish=release_original if replace else None,
-        )
-        lease._file_handle = _nt_create_relative(
-            lease._parent_handle,
-            lease.path.name,
-            access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
-            disposition=_FILE_OPEN,
-            options=_FILE_NON_DIRECTORY_FILE,
-            path=lease.path,
-            share_access=_SHARE_READ,
-        )
-        lease.content, lease.identity = _read_windows_lease_handle(
-            lease._file_handle,
-            max_bytes=lease.max_bytes,
-            path=lease.path,
-            what=lease.what,
-        )
+        try:
+            _write_windows_at(
+                lease,
+                data,
+                replace=replace,
+                before_publish=release_original if replace else None,
+            )
+            lease._file_handle = _nt_create_relative(
+                lease._parent_handle,
+                lease.path.name,
+                access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
+                disposition=_FILE_OPEN,
+                options=_FILE_NON_DIRECTORY_FILE,
+                path=lease.path,
+                share_access=_SHARE_READ,
+            )
+            lease.content, lease.identity = _read_windows_lease_handle(
+                lease._file_handle,
+                max_bytes=lease.max_bytes,
+                path=lease.path,
+                what=lease.what,
+            )
+        except BaseException:
+            if not replace or original_released:
+                lease._publication_uncertain = True
+            raise
+        lease._publication_uncertain = False
         if lease.content != data:
             raise ContractViolation(
                 f"{lease.what} changed during publication",

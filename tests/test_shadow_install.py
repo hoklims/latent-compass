@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -22,7 +23,6 @@ from latent_compass.confined_io import write_new_file as confined_write
 from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
-    _EXPECTED_UNSET,
     _atomic_bytes,
     _atomic_text,
     _backup,
@@ -33,7 +33,6 @@ from latent_compass.shadow_install import (
     _confirm_create_publication,
     _default_project_alias,
     _exclusive_json,
-    _ExpectedUnset,
     _json_bytes,
     _merged_host_config,
     _observe_recovery_targets,
@@ -1047,14 +1046,14 @@ def test_install_rolls_back_all_files_when_late_atomic_write_fails(
         },
     )
     before = hooks.read_bytes()
-    real_atomic_bytes = _atomic_bytes
+    real_replace = confined_io.ConfinedFileLease.replace
 
-    def fail_on_config(path: Path, content: bytes, **kwargs: Any) -> None:
-        if path.name == "config.json":
+    def fail_on_config(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        if lease.path.name == "config.json":
             raise OSError("injected config write failure")
-        real_atomic_bytes(path, content, **kwargs)
+        real_replace(lease, data)
 
-    monkeypatch.setattr(shadow_install, "_atomic_bytes", fail_on_config)
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", fail_on_config)
 
     result = install_shadow_hooks(
         home=home,
@@ -1086,14 +1085,14 @@ def test_rollback_revocation_preserves_later_same_byte_peer_file(
     wrapper = (
         home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
     )
-    real_atomic_bytes = _atomic_bytes
+    real_replace = confined_io.ConfinedFileLease.replace
 
-    def fail_on_config(path: Path, content: bytes, **kwargs: Any) -> None:
-        if path.name == "config.json":
+    def fail_on_config(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        if lease.path.name == "config.json":
             raise OSError("injected config write failure")
-        real_atomic_bytes(path, content, **kwargs)
+        real_replace(lease, data)
 
-    monkeypatch.setattr(shadow_install, "_atomic_bytes", fail_on_config)
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", fail_on_config)
     result = install_shadow_hooks(
         home=home,
         runtime_python=Path(sys.executable),
@@ -1245,15 +1244,20 @@ def test_install_preserves_journal_when_published_bytes_change_before_rollback(
     _write(hooks, {"hooks": {"PreToolUse": []}})
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     third_party = b'{"third_party":true}\n'
-    real_atomic_bytes = _atomic_bytes
+    real_replace = confined_io.ConfinedFileLease.replace
+    substitution_blocked = False
 
-    def publish_substitute_then_fail(path: Path, content: bytes, **kwargs: Any) -> None:
-        real_atomic_bytes(path, content, **kwargs)
-        if path == config:
-            path.write_bytes(third_party)
+    def publish_substitute_then_fail(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        nonlocal substitution_blocked
+        real_replace(lease, data)
+        if lease.path == config:
+            try:
+                config.write_bytes(third_party)
+            except PermissionError:
+                substitution_blocked = True
             raise OSError("injected post-publication observation failure")
 
-    monkeypatch.setattr(shadow_install, "_atomic_bytes", publish_substitute_then_fail)
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", publish_substitute_then_fail)
     result = install_shadow_hooks(
         home=home,
         runtime_python=Path(sys.executable),
@@ -1264,7 +1268,13 @@ def test_install_preserves_journal_when_published_bytes_change_before_rollback(
 
     conflicts = cast(list[dict[str, object]], result["conflicts"])
     assert [item["code"] for item in conflicts] == ["apply_failed"]
-    assert config.read_bytes() == third_party
+    if os.name == "nt":
+        assert substitution_blocked is True
+        assert config.is_file()
+        assert config.read_bytes() != third_party
+    else:
+        assert substitution_blocked is False
+        assert config.read_bytes() == third_party
     assert (home / ".latent-compass-shadow.pending.json").is_file()
 
 
@@ -1671,6 +1681,7 @@ def test_install_binds_payload_and_digest_to_one_planning_read(
         max_bytes: int,
         what: str,
         allow_absent: bool = False,
+        create_parents: bool = False,
     ) -> confined_io.ConfinedFileLease:
         nonlocal hook_observations
         if target == hooks:
@@ -1681,6 +1692,7 @@ def test_install_binds_payload_and_digest_to_one_planning_read(
             max_bytes=max_bytes,
             what=what,
             allow_absent=allow_absent,
+            create_parents=create_parents,
         )
 
     monkeypatch.setattr(shadow_install, "lease_confined_file", count_hook_observation)
@@ -1875,6 +1887,141 @@ def test_recovery_closes_target_lease_when_backup_observation_fails(
     peer.write_bytes(b"peer")
     peer.replace(target)
     assert target.read_bytes() == b"peer"
+
+
+def test_fresh_store_rollback_preserves_same_byte_peer_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    peer = tmp_path / "peer-wrapper.py"
+    real_replace = confined_io.ConfinedFileLease.replace
+    peer_identity: tuple[int, int] | None = None
+    substitution_blocked = False
+
+    def substitute_then_fail(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        nonlocal peer_identity, substitution_blocked
+        if lease.path == hooks:
+            raise OSError("injected late settings failure")
+        real_replace(lease, data)
+        if lease.path == wrapper and peer_identity is None:
+            peer.write_bytes(data)
+            peer_stat = peer.stat()
+            peer_identity = (peer_stat.st_dev, peer_stat.st_ino)
+            try:
+                peer.replace(wrapper)
+            except PermissionError:
+                substitution_blocked = True
+
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", substitute_then_fail)
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="fresh-peer",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert peer_identity is not None
+    if os.name == "nt":
+        assert substitution_blocked is True
+        assert [item["code"] for item in conflicts] == ["apply_failed"]
+        assert not wrapper.exists()
+    else:
+        assert substitution_blocked is False
+        assert [item["code"] for item in conflicts] == ["apply_failed", "rollback_conflict"]
+        assert wrapper.is_file()
+        wrapper_stat = wrapper.stat()
+        assert (wrapper_stat.st_dev, wrapper_stat.st_ino) == peer_identity
+    assert (home / ".latent-compass-shadow.pending.json").is_file()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows publication semantics")
+def test_windows_uncertain_journal_publication_returns_structured_rollback_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    journal = home / ".latent-compass-shadow.pending.json"
+    real_writer = confined_io._write_windows_at  # noqa: SLF001 - native backend witness
+    journal_publications = 0
+
+    def fail_later_journal_publication(
+        lease: confined_io.ConfinedFileLease,
+        data: bytes,
+        *,
+        replace: bool,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
+        nonlocal journal_publications
+        real_writer(
+            lease,
+            data,
+            replace=replace,
+            before_publish=before_publish,
+        )
+        if lease.path == journal:
+            journal_publications += 1
+            if journal_publications == 4:
+                raise OSError("injected journal failure after publication")
+
+    monkeypatch.setattr(confined_io, "_write_windows_at", fail_later_journal_publication)
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="uncertain-journal",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert journal_publications == 4
+    assert [item["code"] for item in conflicts] == ["apply_failed", "rollback_conflict"]
+    assert "journal failure after publication" in str(conflicts[0]["detail"])
+    assert journal.is_file()
+
+
+def test_deep_host_json_returns_structured_install_and_status_refusal(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    deep_json = '{"hooks":' + "[" * 10_000 + "0" + "]" * 10_000 + "}"
+    hooks.write_text(deep_json, encoding="utf-8")
+
+    install = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="deep-json",
+        hosts=("codex",),
+    )
+    install_conflicts = cast(list[dict[str, object]], install["conflicts"])
+    assert install_conflicts[0]["code"] == "configuration_collision"
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+    status = host_status(home=home, project_root=project, hosts=("codex",), dry_run=False)
+    state = cast(dict[str, dict[str, object]], status["states"])["codex"]
+    assert state["installed"] is False
+    assert state["configured"] is False
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    assert snapshots[0]["status"] == "HOST_CONFIGURATION_INVALID"
+
+    peer = tmp_path / "peer-hooks.json"
+    peer.write_text(deep_json, encoding="utf-8")
+    peer.replace(hooks)
+    assert hooks.read_text(encoding="utf-8") == deep_json
 
 
 def test_install_revalidates_custom_hook_script_dependency_before_journal(
@@ -2400,25 +2547,25 @@ def test_install_collision_after_journal_preserves_peer_and_retains_uncertain_re
     hooks_before = hooks.read_bytes()
     foreign_hooks = b'{"hooks":{"PreToolUse":[{"matcher":"foreign","hooks":[]}]}}'
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
-    real_atomic = _atomic_bytes
+    real_replace = confined_io.ConfinedFileLease.replace
     peer_bytes: bytes | None = None
+    hook_substitution_blocked = False
 
     def peer_create_during_apply(
-        path: Path,
-        content: bytes,
-        *,
-        home: Path | None = None,
-        expected: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
+        lease: confined_io.ConfinedFileLease,
+        data: bytes,
     ) -> None:
-        nonlocal peer_bytes
-        if path == config and expected is None and peer_bytes is None:
-            peer_bytes = content
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(content)
-            hooks.write_bytes(foreign_hooks)
-        real_atomic(path, content, home=home, expected=expected)
+        nonlocal peer_bytes, hook_substitution_blocked
+        if lease.path == config and lease.content is None and peer_bytes is None:
+            peer_bytes = data
+            config.write_bytes(data)
+            try:
+                hooks.write_bytes(foreign_hooks)
+            except PermissionError:
+                hook_substitution_blocked = True
+        real_replace(lease, data)
 
-    monkeypatch.setattr(shadow_install, "_atomic_bytes", peer_create_during_apply)
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", peer_create_during_apply)
     result = install_shadow_hooks(
         home=home,
         runtime_python=Path(sys.executable),
@@ -2439,6 +2586,7 @@ def test_install_collision_after_journal_preserves_peer_and_retains_uncertain_re
     )
     assert config_entry["publication_state"] == "attempted"
     assert hooks.read_bytes() == (hooks_before if os.name == "nt" else foreign_hooks)
+    assert hook_substitution_blocked is (os.name == "nt")
     recovery = recover_shadow_hooks(home=home)
     recovery_conflicts = cast(list[dict[str, object]], recovery["conflicts"])
     assert recovery_conflicts[0]["code"] == "pending_transaction_conflict"
@@ -2494,15 +2642,14 @@ def test_install_rollback_preserves_concurrent_change_to_unwritten_file(
     hooks_before = hooks.read_bytes()
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     third_party = b'{"third_party":true}\n'
-    real_atomic_bytes = _atomic_bytes
+    real_replace = confined_io.ConfinedFileLease.replace
 
-    def inject_on_config(path: Path, content: bytes, **kwargs: Any) -> None:
-        if path == config and not config.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(third_party)
-        real_atomic_bytes(path, content, **kwargs)
+    def inject_on_config(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        if lease.path == config and lease.content is None and not config.exists():
+            config.write_bytes(third_party)
+        real_replace(lease, data)
 
-    monkeypatch.setattr(shadow_install, "_atomic_bytes", inject_on_config)
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", inject_on_config)
 
     result = install_shadow_hooks(
         home=home,
@@ -2534,14 +2681,14 @@ def test_install_preserves_leaf_created_after_snapshot_before_publication(
     _write(hooks, {"hooks": {"PreToolUse": []}})
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     third_party = b'{"third_party":true}\n'
-    original_writer = confined_write
+    real_replace = confined_io.ConfinedFileLease.replace
 
-    def inject_leaf_then_publish(root: Path, target: Path, data: bytes, *, what: str) -> Path:
-        if target == config and not config.exists():
+    def inject_leaf_then_publish(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        if lease.path == config and lease.content is None and not config.exists():
             config.write_bytes(third_party)
-        return original_writer(root, target, data, what=what)
+        real_replace(lease, data)
 
-    monkeypatch.setattr("latent_compass.shadow_install.write_new_file", inject_leaf_then_publish)
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "replace", inject_leaf_then_publish)
 
     result = install_shadow_hooks(
         home=home,
@@ -3233,6 +3380,12 @@ def test_recovery_description_uses_preflight_target_observation(
     assert target_reads == 1
     assert hooks.read_bytes() == state_x
     assert journal.is_file()
+
+    applied = recover_shadow_hooks(home=home)
+
+    assert applied["conflicts"] == []
+    assert not hooks.exists()
+    assert not journal.exists()
 
 
 def test_recovery_preview_preflights_replacement_journal_bytes(
