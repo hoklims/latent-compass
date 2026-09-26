@@ -470,6 +470,40 @@ def test_confined_lease_detects_same_byte_identity_replacement(tmp_path: Path) -
     assert target.read_bytes() == b"same"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="native POSIX descriptor semantics")
+def test_posix_lease_revalidates_after_staging_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    peer = root / "peer.json"
+    peer.write_bytes(b"before")
+    peer_identity = peer.stat().st_ino
+    real_fsync = os.fsync
+    substituted = False
+
+    def substitute_during_staging(descriptor: int) -> None:
+        nonlocal substituted
+        if not substituted:
+            peer.replace(target)
+            substituted = True
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(os, "fsync", substitute_during_staging)
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    try:
+        with pytest.raises(ContractViolation, match="identity changed after observation"):
+            lease.replace(b"after")
+    finally:
+        lease.close()
+
+    assert substituted is True
+    assert target.read_bytes() == b"before"
+    assert target.stat().st_ino == peer_identity
+
+
 def test_confined_lease_refreshes_after_replace_and_remove(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

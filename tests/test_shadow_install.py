@@ -36,6 +36,7 @@ from latent_compass.shadow_install import (
     _ExpectedUnset,
     _json_bytes,
     _merged_host_config,
+    _observe_recovery_targets,
     _packaged_hook_text,
     _path_entry_exists,
     _pending_recovery_preview,
@@ -1768,6 +1769,112 @@ def test_install_revalidates_backup_absence_before_journal(
     assert conflicts[0]["code"] == "concurrent_change"
     assert backup.read_bytes() == b"peer-backup"
     assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+def test_install_refuses_peer_journal_appearing_at_transaction_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    hooks_before = hooks.read_bytes()
+    journal = home / ".latent-compass-shadow.pending.json"
+    peer_journal: bytes | None = None
+    real_replace = confined_io.ConfinedFileLease.replace
+
+    def create_same_byte_peer_before_publish(
+        lease: confined_io.ConfinedFileLease, data: bytes
+    ) -> None:
+        nonlocal peer_journal
+        if lease.path == journal and lease.content is None and peer_journal is None:
+            peer_journal = data
+            journal.write_bytes(data)
+        real_replace(lease, data)
+
+    monkeypatch.setattr(
+        confined_io.ConfinedFileLease, "replace", create_same_byte_peer_before_publish
+    )
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="peer-journal",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert "after observation" in str(conflicts[0]["detail"])
+    assert peer_journal is not None
+    assert journal.read_bytes() == peer_journal
+    assert hooks.read_bytes() == hooks_before
+    assert not (home / ".codex" / "latent-compass-shadow" / "config.json").exists()
+    assert not list(home.rglob("*.bak-latent-compass-peer-journal"))
+
+
+def test_recovery_closes_target_lease_when_backup_observation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    target = home / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    before = b"before"
+    target.write_bytes(before)
+    backup_tag = "lease-cleanup"
+    backup = target.with_name(f"hooks.json.bak-latent-compass-{backup_tag}")
+    backup.mkdir()
+    journal_raw = _json_bytes(
+        {
+            "schema_version": 1,
+            "operation": "install",
+            "backup_tag": backup_tag,
+            "entries": [
+                {
+                    "path": str(target),
+                    "before_sha256": _bytes_digest(before),
+                    "after_sha256": _bytes_digest(b"after"),
+                    "backup_path": str(backup),
+                    "publication_state": "not_applicable",
+                }
+            ],
+        }
+    )
+    real_lease = confined_io.lease_confined_file
+    captured: list[confined_io.ConfinedFileLease] = []
+
+    def capture_target_lease(
+        root: Path,
+        path: Path,
+        *,
+        max_bytes: int,
+        what: str,
+        allow_absent: bool = False,
+    ) -> confined_io.ConfinedFileLease:
+        lease = real_lease(
+            root,
+            path,
+            max_bytes=max_bytes,
+            what=what,
+            allow_absent=allow_absent,
+        )
+        if path == target:
+            captured.append(lease)
+        return lease
+
+    monkeypatch.setattr(shadow_install, "lease_confined_file", capture_target_lease)
+
+    with pytest.raises((OSError, ContractViolation)):
+        _observe_recovery_targets(home, journal_raw)
+
+    assert len(captured) == 1
+    with pytest.raises(RuntimeError, match="lease is closed"):
+        captured[0].assert_current()
+    peer = tmp_path / "peer-hooks.json"
+    peer.write_bytes(b"peer")
+    peer.replace(target)
+    assert target.read_bytes() == b"peer"
 
 
 def test_install_revalidates_custom_hook_script_dependency_before_journal(

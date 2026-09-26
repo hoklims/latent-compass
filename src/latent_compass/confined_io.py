@@ -692,6 +692,7 @@ def _lease_replace_posix(lease: ConfinedFileLease, data: bytes) -> None:
     finally:
         os.close(descriptor)
     try:
+        _lease_assert_posix(lease)
         if lease.exists:
             assert lease._file_handle is not None
             os.replace(

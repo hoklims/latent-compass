@@ -679,6 +679,7 @@ def _begin_transaction_lease(
     operation: str,
     backup_tag: str,
     plan: dict[str, object],
+    observed_lease: ConfinedFileLease | None = None,
 ) -> ConfinedFileLease:
     entries: list[dict[str, object]] = []
     for item in cast(list[dict[str, object]], plan["files"]):
@@ -709,7 +710,7 @@ def _begin_transaction_lease(
     path = _pending_transaction_path(home)
     _assert_safe_path_under(home, path)
     content = _json_bytes(journal)
-    lease = lease_confined_file(
+    lease = observed_lease or lease_confined_file(
         home,
         path,
         max_bytes=_MAX_TRANSACTION_FILE_BYTES,
@@ -717,6 +718,11 @@ def _begin_transaction_lease(
         allow_absent=True,
     )
     try:
+        if lease.path != path or lease.content is not None:
+            raise ContractViolation(
+                "host transaction journal appeared after preflight",
+                detail={"what": "host transaction journal", "path": str(path)},
+            )
         lease.replace(content)
         return lease
     except BaseException:
@@ -850,10 +856,14 @@ def _observe_recovery_targets(
         )
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
+    target_lease: ConfinedFileLease | None = None
+    backup_lease: ConfinedFileLease | None = None
     try:
         for path, before_digest, after_digest, backup in _decode_pending_transaction(
             home, journal_raw
         ):
+            target_lease = None
+            backup_lease = None
             try:
                 target_lease = lease_confined_file(
                     home,
@@ -956,7 +966,13 @@ def _observe_recovery_targets(
                     "backup_lease": backup_lease,
                 }
             )
+            target_lease = None
+            backup_lease = None
     except BaseException:
+        if target_lease is not None:
+            target_lease.close()
+        if backup_lease is not None:
+            backup_lease.close()
         _close_recovery_observations(observations)
         raise
     return [], observations
@@ -1884,6 +1900,33 @@ def plan_install_shadow_hooks(
     operations: list[_FileOperation] = []
     observations: list[_ReadObservation] = []
     leases: dict[Path, ConfinedFileLease] | None = {} if _retain_leases else None
+    if leases is not None:
+        try:
+            pending_after_preview = _observe_confined_file(
+                pending,
+                root=home,
+                leases=leases,
+                what="host transaction journal",
+            )
+            if pending_after_preview is not None:
+                conflicts.append(
+                    {
+                        "code": "recovery_required",
+                        "path": str(pending),
+                        "detail": (
+                            "pending transaction journal appeared after preflight; "
+                            f'run latent-compass host recover --home "{home}" --dry-run --json'
+                        ),
+                    }
+                )
+        except (OSError, ValueError, ContractViolation) as exc:
+            conflicts.append(
+                {
+                    "code": "pending_transaction_invalid",
+                    "path": str(pending),
+                    "detail": str(exc),
+                }
+            )
     packaged_hook: str | None = None
     if hook_script is None:
         try:
@@ -2196,6 +2239,7 @@ def install_shadow_hooks(
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
     file_leases = _pop_plan_leases(plan)
+    pending_lease = file_leases.pop(_lexical_absolute(_pending_transaction_path(home)), None)
     plan.pop("_observations", None)
     plan.pop("_runtime_python", None)
     plan.pop("_project_root", None)
@@ -2206,7 +2250,11 @@ def install_shadow_hooks(
     attempted_creates: set[Path] = set()
     try:
         journal_lease = _begin_transaction_lease(
-            home=home, operation="install", backup_tag=backup_tag, plan=plan
+            home=home,
+            operation="install",
+            backup_tag=backup_tag,
+            plan=plan,
+            observed_lease=pending_lease,
         )
         journal_path = journal_lease.path
         journal_content = journal_lease.content
@@ -2312,6 +2360,33 @@ def plan_remove_shadow_hooks(
     operations: list[_FileOperation] = []
     observations: list[_ReadObservation] = []
     leases: dict[Path, ConfinedFileLease] | None = {} if _retain_leases else None
+    if leases is not None:
+        try:
+            pending_after_preview = _observe_confined_file(
+                pending,
+                root=home,
+                leases=leases,
+                what="host transaction journal",
+            )
+            if pending_after_preview is not None:
+                conflicts.append(
+                    {
+                        "code": "recovery_required",
+                        "path": str(pending),
+                        "detail": (
+                            "pending transaction journal appeared after preflight; "
+                            f'run latent-compass host recover --home "{home}" --dry-run --json'
+                        ),
+                    }
+                )
+        except (OSError, ValueError, ContractViolation) as exc:
+            conflicts.append(
+                {
+                    "code": "pending_transaction_invalid",
+                    "path": str(pending),
+                    "detail": str(exc),
+                }
+            )
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
         try:
             _validate_host_paths(
@@ -2523,6 +2598,7 @@ def remove_shadow_hooks(
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
     file_leases = _pop_plan_leases(plan)
+    pending_lease = file_leases.pop(_lexical_absolute(_pending_transaction_path(home)), None)
     plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
@@ -2531,7 +2607,11 @@ def remove_shadow_hooks(
     attempted_creates: set[Path] = set()
     try:
         journal_lease = _begin_transaction_lease(
-            home=home, operation="remove", backup_tag=backup_tag, plan=plan
+            home=home,
+            operation="remove",
+            backup_tag=backup_tag,
+            plan=plan,
+            observed_lease=pending_lease,
         )
         journal_path = journal_lease.path
         journal_content = journal_lease.content
