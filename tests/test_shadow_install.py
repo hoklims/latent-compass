@@ -24,11 +24,13 @@ from latent_compass.shadow_install import (
     _atomic_text,
     _backup,
     _begin_transaction,
+    _bytes_digest,
     _command,
     _command_references_wrapper,
     _default_project_alias,
     _exclusive_json,
     _ExpectedUnset,
+    _json_bytes,
     _merged_host_config,
     _packaged_hook_text,
     _path_entry_exists,
@@ -1604,6 +1606,44 @@ def test_install_binds_payload_and_digest_to_one_planning_read(
     assert not (home / ".latent-compass-shadow.pending.json").exists()
 
 
+def test_install_revalidates_custom_hook_script_dependency_before_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    custom_hook = home / ".codex" / "latent-compass-shadow" / "custom-hook.py"
+    custom_hook.parent.mkdir(parents=True)
+    custom_hook.write_bytes(b"custom-a")
+    real_snapshot = _transaction_snapshot
+
+    def replace_custom_hook_before_validation(
+        selected_home: Path, plan: dict[str, object]
+    ) -> dict[Path, bytes | None]:
+        custom_hook.write_bytes(b"custom-b")
+        return real_snapshot(selected_home, plan)
+
+    monkeypatch.setattr(
+        shadow_install, "_transaction_snapshot", replace_custom_hook_before_validation
+    )
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        hook_script=custom_hook,
+        project_root=project,
+        backup_tag="custom-race",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "concurrent_change"
+    assert custom_hook.read_bytes() == b"custom-b"
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+    assert not (custom_hook.parent / "ownership.json").exists()
+
+
 def test_install_validates_unchanged_dependencies_before_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1976,7 +2016,7 @@ def test_recovery_reports_backup_vanishing_after_preflight(
         nonlocal backup_reads
         if path == backup:
             backup_reads += 1
-            if backup_reads == 3:
+            if backup_reads == 2:
                 backup.unlink()
         return real_reader(path, home=home)
 
@@ -1986,7 +2026,7 @@ def test_recovery_reports_backup_vanishing_after_preflight(
 
     conflicts = cast(list[dict[str, object]], result["conflicts"])
     assert conflicts[0]["code"] == "pending_transaction_conflict"
-    assert "vanished after preflight" in str(conflicts[0]["detail"])
+    assert "changed after preflight" in str(conflicts[0]["detail"])
     assert (home / ".latent-compass-shadow.pending.json").is_file()
 
 
@@ -2209,6 +2249,100 @@ def test_deeply_nested_journal_returns_structured_invalid_conflict(tmp_path: Pat
     assert journal.read_bytes() == before
 
 
+def test_recovery_refuses_journal_created_after_empty_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_bytes(b"peer-owned")
+    journal = home / ".latent-compass-shadow.pending.json"
+    peer_journal = _json_bytes(
+        {
+            "schema_version": 1,
+            "operation": "install",
+            "backup_tag": "peer",
+            "entries": [
+                {
+                    "path": str(hooks),
+                    "before_sha256": None,
+                    "after_sha256": _bytes_digest(hooks.read_bytes()),
+                    "backup_path": None,
+                }
+            ],
+        }
+    )
+    real_preview = _pending_recovery_preview
+
+    def preview_then_create(selected_home: Path) -> tuple[Any, ...]:
+        preview = real_preview(selected_home)
+        journal.write_bytes(peer_journal)
+        return preview
+
+    monkeypatch.setattr(shadow_install, "_pending_recovery_preview", preview_then_create)
+    report = recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], report["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "changed after preview" in str(conflicts[0]["detail"])
+    assert hooks.read_bytes() == b"peer-owned"
+    assert journal.read_bytes() == peer_journal
+
+
+def test_recovery_description_uses_preflight_target_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    state_x = b"transaction-after"
+    state_y = b"foreign-after-preflight"
+    hooks.write_bytes(state_x)
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_bytes(
+        _json_bytes(
+            {
+                "schema_version": 1,
+                "operation": "install",
+                "backup_tag": "observe-once",
+                "entries": [
+                    {
+                        "path": str(hooks),
+                        "before_sha256": None,
+                        "after_sha256": _bytes_digest(state_x),
+                        "backup_path": None,
+                    }
+                ],
+            }
+        )
+    )
+    real_reader = _regular_file_bytes_or_none
+    target_reads = 0
+
+    def replace_after_preflight(path: Path, *, home: Path | None = None) -> bytes | None:
+        nonlocal target_reads
+        content = real_reader(path, home=home)
+        if path == hooks:
+            target_reads += 1
+            if target_reads == 1:
+                hooks.write_bytes(state_y)
+        return content
+
+    monkeypatch.setattr(shadow_install, "_regular_file_bytes_or_none", replace_after_preflight)
+    conflicts, recovery, journal_raw, observations = _pending_recovery_preview(home)
+
+    assert conflicts == []
+    recovery_files = cast(list[dict[str, object]], recovery["files"])
+    assert recovery_files[0]["before_sha256"] == _bytes_digest(state_x)
+    assert target_reads == 1
+    apply_conflicts = _recover_pending_transaction(
+        home, journal_raw=journal_raw, observations=observations
+    )
+    assert apply_conflicts[0]["code"] == "pending_transaction_conflict"
+    assert hooks.read_bytes() == state_y
+    assert journal.is_file()
+
+
 def test_recovery_preview_preflights_replacement_journal_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2315,7 +2449,7 @@ def test_recovery_refuses_journal_replacement_before_any_target_mutation(
 
     def preview_then_replace(
         selected_home: Path,
-    ) -> tuple[list[dict[str, str]], dict[str, object], bytes | None]:
+    ) -> tuple[Any, ...]:
         result = real_preview(selected_home)
         journal.write_bytes(replacement_bytes)
         return result

@@ -99,6 +99,21 @@ class _FileOperation(TypedDict):
     after: bytes | None
 
 
+class _ReadObservation(TypedDict):
+    path: Path
+    root: Path
+    content: bytes | None
+
+
+class _RecoveryObservation(TypedDict):
+    path: Path
+    before_digest: str | None
+    after_digest: str | None
+    backup: Path | None
+    current: bytes | None
+    backup_content: bytes | None
+
+
 def _json_bytes(payload: object) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
@@ -251,6 +266,10 @@ def _transaction_snapshot(home: Path, plan: dict[str, object]) -> dict[Path, byt
         if current != operation["before"]:
             raise ValueError(f"concurrent change detected for {path}")
         snapshots[path] = current
+    for observation in cast(list[_ReadObservation], plan.get("_observations", [])):
+        current = _regular_file_bytes_or_none(observation["path"], home=observation["root"])
+        if current != observation["content"]:
+            raise ValueError(f"concurrent change detected for {observation['path']}")
     return snapshots
 
 
@@ -485,128 +504,121 @@ def _decode_pending_transaction(
     return decoded
 
 
+def _observe_recovery_targets(
+    home: Path, journal_raw: bytes
+) -> tuple[list[dict[str, str]], list[_RecoveryObservation]]:
+    observations: list[_RecoveryObservation] = []
+    for path, before_digest, after_digest, backup in _decode_pending_transaction(home, journal_raw):
+        current = _regular_file_bytes_or_none(path, home=home)
+        current_digest = _bytes_digest(current)
+        if current_digest not in {before_digest, after_digest}:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(path),
+                    "detail": "current bytes match neither transaction state; preserve and inspect",
+                }
+            ], []
+        backup_content = (
+            _regular_file_bytes_or_none(backup, home=home) if backup is not None else None
+        )
+        if backup_content is not None and _bytes_digest(backup_content) != before_digest:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(backup),
+                    "detail": "recovery backup digest mismatch",
+                }
+            ], []
+        if current_digest == after_digest and before_digest is not None and backup_content is None:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(path),
+                    "detail": "required recovery backup is missing",
+                }
+            ], []
+        observations.append(
+            {
+                "path": path,
+                "before_digest": before_digest,
+                "after_digest": after_digest,
+                "backup": backup,
+                "current": current,
+                "backup_content": backup_content,
+            }
+        )
+    return [], observations
+
+
 def _recover_pending_transaction(
     home: Path,
     *,
     apply: bool = True,
-    journal_raw: bytes | None = None,
+    journal_raw: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
+    observations: list[_RecoveryObservation] | None = None,
 ) -> list[dict[str, str]]:
     journal_path = _pending_transaction_path(home)
-    if not _path_entry_exists(journal_path):
-        return []
     try:
         _assert_safe_path_under(home, journal_path)
-    except (OSError, ValueError) as exc:
-        return [
-            {
-                "code": "pending_transaction_invalid",
-                "path": str(journal_path),
-                "detail": str(exc),
-            }
-        ]
-    try:
-        expected_journal = journal_raw
-        if journal_raw is None or apply:
-            current_journal = _regular_file_bytes_or_none(journal_path, home=home)
-            if expected_journal is not None and current_journal != expected_journal:
+        current_journal = _regular_file_bytes_or_none(journal_path, home=home)
+        if not isinstance(journal_raw, _ExpectedUnset) and current_journal != journal_raw:
+            return [
+                {
+                    "code": "pending_transaction_conflict",
+                    "path": str(journal_path),
+                    "detail": "pending transaction journal changed after preview",
+                }
+            ]
+        if current_journal is None:
+            return []
+        expected_journal = current_journal
+        if observations is None:
+            conflicts, observations = _observe_recovery_targets(home, expected_journal)
+            if conflicts:
+                return conflicts
+        for observation in observations:
+            current = _regular_file_bytes_or_none(observation["path"], home=home)
+            if current != observation["current"]:
                 return [
                     {
                         "code": "pending_transaction_conflict",
-                        "path": str(journal_path),
-                        "detail": "pending transaction journal changed after preview",
+                        "path": str(observation["path"]),
+                        "detail": "current bytes changed after recovery preflight",
                     }
                 ]
-            journal_raw = current_journal
-        if journal_raw is None:
-            raise ValueError("pending transaction journal vanished during validation")
-        decoded = _decode_pending_transaction(home, journal_raw)
-        for path, before_digest, after_digest, backup in decoded:
-            current = _regular_file_bytes_or_none(path, home=home)
-            current_digest = _bytes_digest(current)
-            if current_digest not in {before_digest, after_digest}:
-                return [
-                    {
-                        "code": "pending_transaction_conflict",
-                        "path": str(path),
-                        "detail": (
-                            "current bytes match neither transaction state; preserve and inspect"
-                        ),
-                    }
-                ]
+            backup = observation["backup"]
             backup_content = (
                 _regular_file_bytes_or_none(backup, home=home) if backup is not None else None
             )
-            if backup_content is not None and _bytes_digest(backup_content) != before_digest:
+            if backup_content != observation["backup_content"]:
                 return [
                     {
                         "code": "pending_transaction_conflict",
                         "path": str(backup),
-                        "detail": "recovery backup digest mismatch",
-                    }
-                ]
-            if (
-                current_digest == after_digest
-                and before_digest is not None
-                and backup_content is None
-            ):
-                return [
-                    {
-                        "code": "pending_transaction_conflict",
-                        "path": str(path),
-                        "detail": "required recovery backup is missing",
+                        "detail": "recovery backup changed after preflight",
                     }
                 ]
         if not apply:
             return []
-        for path, before_digest, after_digest, backup in decoded:
-            current = _regular_file_bytes_or_none(path, home=home)
-            current_digest = _bytes_digest(current)
-            if current_digest not in {before_digest, after_digest}:
-                return [
-                    {
-                        "code": "pending_transaction_conflict",
-                        "path": str(path),
-                        "detail": "current bytes changed after recovery preflight",
-                    }
-                ]
-            if current_digest == after_digest:
-                if before_digest is None:
-                    if _path_entry_exists(path):
-                        assert current is not None
-                        _remove_confined(
-                            home,
-                            path,
-                            what="managed host recovery target",
-                            expected=current,
-                        )
-                else:
-                    if backup is None:
-                        return [
-                            {
-                                "code": "pending_transaction_conflict",
-                                "path": str(path),
-                                "detail": "required recovery backup is missing",
-                            }
-                        ]
-                    backup_content = _regular_file_bytes_or_none(backup, home=home)
-                    if backup_content is None:
-                        return [
-                            {
-                                "code": "pending_transaction_conflict",
-                                "path": str(backup),
-                                "detail": "required recovery backup vanished after preflight",
-                            }
-                        ]
-                    if _bytes_digest(backup_content) != before_digest:
-                        return [
-                            {
-                                "code": "pending_transaction_conflict",
-                                "path": str(backup),
-                                "detail": "recovery backup digest mismatch",
-                            }
-                        ]
-                    _atomic_bytes(path, backup_content, home=home, expected=current)
-        return _complete_transaction_journal(home, journal_path, journal_raw)
+        for observation in observations:
+            path = observation["path"]
+            current = observation["current"]
+            if _bytes_digest(current) != observation["after_digest"]:
+                continue
+            if observation["before_digest"] is None:
+                assert current is not None
+                _remove_confined(
+                    home,
+                    path,
+                    what="managed host recovery target",
+                    expected=current,
+                )
+            else:
+                backup_content = observation["backup_content"]
+                assert backup_content is not None
+                _atomic_bytes(path, backup_content, home=home, expected=current)
+        return _complete_transaction_journal(home, journal_path, expected_journal)
     except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
         return [
             {
@@ -618,20 +630,18 @@ def _recover_pending_transaction(
 
 
 def _pending_recovery_description(
-    home: Path, *, journal_raw: bytes | None = None
+    observations: list[_RecoveryObservation],
 ) -> dict[str, object]:
-    path = _pending_transaction_path(home)
     try:
-        raw = (
-            journal_raw if journal_raw is not None else _regular_file_bytes_or_none(path, home=home)
-        )
-        if raw is None:
+        if not observations:
             return {"pending": False, "files": []}
-        decoded = _decode_pending_transaction(home, raw)
         files: list[dict[str, object]] = []
         final_files: list[dict[str, object]] = []
-        for target, before_digest, after_digest, _backup in decoded:
-            current = _regular_file_bytes_or_none(target, home=home)
+        for observation in observations:
+            target = observation["path"]
+            before_digest = observation["before_digest"]
+            after_digest = observation["after_digest"]
+            current = observation["current"]
             current_digest = _bytes_digest(current)
             action = (
                 "unchanged"
@@ -691,10 +701,9 @@ def _pending_recovery_description(
 def _recovery_description(
     home: Path,
     conflicts: list[dict[str, str]],
-    *,
-    journal_raw: bytes | None = None,
+    observations: list[_RecoveryObservation],
 ) -> dict[str, object]:
-    description = _pending_recovery_description(home, journal_raw=journal_raw)
+    description = _pending_recovery_description(observations)
     detail = description.pop("invalid_detail", None)
     if isinstance(detail, str):
         conflicts.append(
@@ -709,10 +718,15 @@ def _recovery_description(
 
 def _pending_recovery_preview(
     home: Path,
-) -> tuple[list[dict[str, str]], dict[str, object], bytes | None]:
+) -> tuple[
+    list[dict[str, str]],
+    dict[str, object],
+    bytes | None,
+    list[_RecoveryObservation],
+]:
     journal_path = _pending_transaction_path(home)
     if not _path_entry_exists(journal_path):
-        return [], {"pending": False, "files": []}, None
+        return [], {"pending": False, "files": []}, None, []
     try:
         _assert_safe_path_under(home, journal_path)
         journal_raw = _regular_file_bytes_or_none(journal_path, home=home)
@@ -724,14 +738,24 @@ def _pending_recovery_preview(
             "path": str(journal_path),
             "detail": str(exc),
         }
-        return [conflict], {"pending": True, "files": []}, None
-    conflicts = _recover_pending_transaction(home, apply=False, journal_raw=journal_raw)
+        return [conflict], {"pending": True, "files": []}, None, []
+    try:
+        conflicts, observations = _observe_recovery_targets(home, journal_raw)
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
+        conflicts = [
+            {
+                "code": "pending_transaction_invalid",
+                "path": str(journal_path),
+                "detail": str(exc),
+            }
+        ]
+        observations = []
     recovery = (
-        _recovery_description(home, conflicts, journal_raw=journal_raw)
+        _recovery_description(home, conflicts, observations)
         if not conflicts
         else {"pending": True, "files": []}
     )
-    return conflicts, recovery, journal_raw
+    return conflicts, recovery, journal_raw, observations
 
 
 def _backup(
@@ -1255,7 +1279,9 @@ def plan_install_shadow_hooks(
     """Preflight every selected host and return the complete no-write plan."""
     conflicts: list[dict[str, str]] = []
     pending = _pending_transaction_path(home)
-    pending_conflicts, pending_recovery, pending_raw = _pending_recovery_preview(home)
+    pending_conflicts, pending_recovery, pending_raw, _pending_observations = (
+        _pending_recovery_preview(home)
+    )
     conflicts.extend(pending_conflicts)
     if not runtime_python.is_file():
         conflicts.append({"code": "runtime_missing", "path": str(runtime_python)})
@@ -1293,6 +1319,7 @@ def plan_install_shadow_hooks(
         }
     files: list[dict[str, object]] = []
     operations: list[_FileOperation] = []
+    observations: list[_ReadObservation] = []
     packaged_hook: str | None = None
     if hook_script is None:
         try:
@@ -1333,6 +1360,16 @@ def plan_install_shadow_hooks(
                 installed_hook,
                 home=home if hook_script is None else None,
             )
+            if hook_script is not None and not any(
+                item["path"] == installed_hook for item in observations
+            ):
+                observations.append(
+                    {
+                        "path": installed_hook,
+                        "root": installed_hook.parent,
+                        "content": wrapper_before,
+                    }
+                )
             command = _command(host, runtime_python, installed_hook)
             owned = _ownership_from_manifest(
                 ownership_path,
@@ -1428,6 +1465,7 @@ def plan_install_shadow_hooks(
         else [],
         "recovery": pending_recovery,
         "_operations": operations,
+        "_observations": observations,
     }
     if backup_tag is not None:
         conflicts.extend(_backup_conflicts(plan, backup_tag))
@@ -1467,6 +1505,7 @@ def install_shadow_hooks(
         return plan
     if plan["changed"] is False:
         plan.pop("_operations", None)
+        plan.pop("_observations", None)
         plan["dry_run"] = False
         plan["states"] = host_status(
             home=home, project_root=project_root, hosts=hosts, dry_run=False
@@ -1474,6 +1513,7 @@ def install_shadow_hooks(
         return plan
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
+    plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
     try:
@@ -1525,7 +1565,9 @@ def plan_remove_shadow_hooks(
     """Plan project-level removal while retaining every unrelated registration."""
     conflicts: list[dict[str, str]] = []
     pending = _pending_transaction_path(home)
-    pending_conflicts, pending_recovery, pending_raw = _pending_recovery_preview(home)
+    pending_conflicts, pending_recovery, pending_raw, _pending_observations = (
+        _pending_recovery_preview(home)
+    )
     conflicts.extend(pending_conflicts)
     if pending_raw is not None or pending_conflicts:
         recovery = pending_recovery if not conflicts else {"pending": True, "files": []}
@@ -1745,7 +1787,7 @@ def remove_shadow_hooks(
 
 
 def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
-    conflicts, recovery, journal_raw = _pending_recovery_preview(home)
+    conflicts, recovery, journal_raw, observations = _pending_recovery_preview(home)
     files = cast(list[dict[str, object]], recovery.get("files", []))
     return {
         "schema_version": 1,
@@ -1763,16 +1805,20 @@ def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
         ),
         "recovery": recovery,
         "_journal_raw": journal_raw,
+        "_recovery_observations": observations,
     }
 
 
 def recover_shadow_hooks(*, home: Path) -> dict[str, object]:
     plan = plan_recover_shadow_hooks(home=home)
     journal_raw = cast(bytes | None, plan.pop("_journal_raw"))
+    observations = cast(list[_RecoveryObservation], plan.pop("_recovery_observations"))
     if plan["conflicts"]:
         plan["dry_run"] = False
         return plan
-    conflicts = _recover_pending_transaction(home, journal_raw=journal_raw)
+    conflicts = _recover_pending_transaction(
+        home, journal_raw=journal_raw, observations=observations
+    )
     if conflicts:
         cast(list[dict[str, str]], plan["conflicts"]).extend(conflicts)
     plan["dry_run"] = False
