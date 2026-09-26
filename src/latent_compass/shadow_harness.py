@@ -176,17 +176,37 @@ def _refresh_source_cache(
             detail={"reason": "source_observed_at_absent"},
         )
     cache = {
+        "owner": "latent-compass-shadow",
         "source_declaration_digest": source_digest,
         "source_observed_at": observed_at,
     }
     destination = _source_cache_path(store_root, project)
-    replace_file(
-        store_root,
-        destination,
-        (canonical_text(cache) + "\n").encode("utf-8"),
-        what="shadow source cache",
-    )
-    return cache
+    content = (canonical_text(cache) + "\n").encode("utf-8")
+    try:
+        before = read_confined_file(
+            store_root, destination, max_bytes=MAX_HOOK_BYTES, what="shadow source cache"
+        )
+    except (FileNotFoundError, ContractViolation) as exc:
+        if isinstance(exc, ContractViolation) and "does not exist" not in str(exc):
+            raise
+        write_new_file(store_root, destination, content, what="shadow source cache")
+    else:
+        previous = json.loads(before.decode("utf-8"))
+        if not isinstance(previous, dict) or previous.get("owner") != "latent-compass-shadow":
+            raise ShadowHarnessViolation(
+                "source cache ownership is not established",
+                detail={"reason": "source_cache_unowned"},
+            )
+        current = read_confined_file(
+            store_root, destination, max_bytes=MAX_HOOK_BYTES, what="shadow source cache"
+        )
+        if current != before:
+            raise ShadowHarnessViolation(
+                "source cache changed during refresh",
+                detail={"reason": "source_cache_changed"},
+            )
+        replace_file(store_root, destination, content, what="shadow source cache")
+    return {key: value for key, value in cache.items() if key != "owner"}
 
 
 def _read_source_cache(store_root: Path, project: ShadowProject) -> dict[str, str] | None:
@@ -201,7 +221,7 @@ def _read_source_cache(store_root: Path, project: ShadowProject) -> dict[str, st
     except FileNotFoundError:
         return None
     payload = json.loads(raw.decode("utf-8"))
-    if not isinstance(payload, dict):
+    if not isinstance(payload, dict) or payload.get("owner") != "latent-compass-shadow":
         return None
     digest = payload.get("source_declaration_digest")
     observed_at = payload.get("source_observed_at")

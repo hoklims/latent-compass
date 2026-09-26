@@ -1809,6 +1809,7 @@ def test_installed_relative_custom_command_uses_selected_home_from_other_cwd(
     source_cache.write_text(
         json.dumps(
             {
+                "owner": "latent-compass-shadow",
                 "source_declaration_digest": "sha256:" + "1" * 64,
                 "source_observed_at": "2026-09-20T00:00:00Z",
             }

@@ -601,6 +601,16 @@ def _decode_pending_transaction(
                 raise ValueError("invalid pending transaction content digest")
         if before_digest == after_digest:
             raise ValueError("pending transaction entry does not change content")
+        publication_state = raw.get("publication_state")
+        if publication_state is not None:
+            if before_digest is None and publication_state not in {
+                "planned",
+                "attempted",
+                "confirmed",
+            }:
+                raise ValueError("create entry has inconsistent publication state")
+            if before_digest is not None and publication_state != "not_applicable":
+                raise ValueError("non-create entry has inconsistent publication state")
         backup_raw = raw.get("backup_path")
         if before_digest is not None and not isinstance(backup_raw, str):
             raise ValueError("pending transaction backup path must be a string")
@@ -1595,7 +1605,23 @@ def plan_install_shadow_hooks(
                 parsed_owned = _parse_owned_command(owned_command, host)
                 if parsed_owned is None:
                     raise ValueError("invalid Latent Compass hook ownership command")
-                _assert_safe_path_under(config_path.parent, parsed_owned[1])
+                previous_wrapper = _assert_safe_path_under(config_path.parent, parsed_owned[1])
+                previous_wrapper_bytes = _regular_file_bytes_or_none(
+                    previous_wrapper, home=config_path.parent
+                )
+                if _bytes_digest(previous_wrapper_bytes) != owned_digest:
+                    conflicts.append(
+                        {"code": "wrapper_integrity_collision", "path": str(previous_wrapper)}
+                    )
+                    continue
+                if _path_identity(previous_wrapper) != _path_identity(installed_hook):
+                    observations.append(
+                        {
+                            "path": previous_wrapper,
+                            "root": config_path.parent,
+                            "content": previous_wrapper_bytes,
+                        }
+                    )
             if packaged_hook is not None and wrapper_before is not None:
                 if not _owned_command(owned_command, host=host, wrapper=installed_hook):
                     conflicts.append({"code": "wrapper_collision", "path": str(installed_hook)})
