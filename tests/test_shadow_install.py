@@ -18,7 +18,6 @@ import latent_compass.shadow_install as shadow_install
 from latent_compass.confined_io import read_confined_file as confined_read
 from latent_compass.confined_io import replace_file as confined_replace
 from latent_compass.confined_io import write_new_file as confined_write
-from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _EXPECTED_UNSET,
@@ -640,11 +639,58 @@ def test_backup_source_swap_to_symlink_is_refused_before_read(
 
     monkeypatch.setattr(shadow_install, "read_confined_file", swap_then_read)
 
-    with pytest.raises(ContractViolation):
+    with pytest.raises(ValueError, match="refusing"):
         _backup(source, "race", home=tmp_path)
 
     assert source.is_symlink()
     assert outside.read_bytes() == b"outside"
+
+
+def test_install_structures_backup_source_link_refusal_and_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    outside = tmp_path / "outside-hooks.json"
+    outside.write_bytes(b"outside")
+    real_backup = _backup
+    swapped = False
+
+    def link_before_backup(
+        path: Path,
+        tag: str,
+        *,
+        home: Path | None = None,
+        expected: bytes | _ExpectedUnset = _EXPECTED_UNSET,
+    ) -> Path:
+        nonlocal swapped
+        if path == hooks and not swapped:
+            swapped = True
+            path.unlink()
+            path.symlink_to(outside)
+        return real_backup(path, tag, home=home, expected=expected)
+
+    monkeypatch.setattr(shadow_install, "_backup", link_before_backup)
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="linked-source",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert "refusing" in str(conflicts[0]["detail"])
+    assert swapped is True
+    assert outside.read_bytes() == b"outside"
+    assert not (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    ).exists()
+    assert (home / ".latent-compass-shadow.pending.json").is_file()
 
 
 def test_install_rejects_backup_bytes_that_do_not_match_transaction_snapshot(
@@ -1686,6 +1732,46 @@ def test_custom_hook_inside_selected_store_has_complete_lifecycle(tmp_path: Path
     assert not (store / "ownership.json").exists()
 
 
+def test_reinstall_refuses_edited_owned_custom_hook(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    store = home / ".codex" / "latent-compass-shadow"
+    custom_hook = store / "runtime" / "custom-hook.py"
+    custom_hook.parent.mkdir(parents=True)
+    custom_hook.write_bytes(b"custom-a")
+    first = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        hook_script=custom_hook,
+        project_root=project,
+        backup_tag="custom-first",
+        hosts=("codex",),
+    )
+    ownership = store / "ownership.json"
+    ownership_before = ownership.read_bytes()
+    hooks_before = hooks.read_bytes()
+    custom_hook.write_bytes(b"custom-b")
+
+    second = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        hook_script=custom_hook,
+        project_root=project,
+        backup_tag="custom-second",
+        hosts=("codex",),
+    )
+
+    assert first["conflicts"] == []
+    conflicts = cast(list[dict[str, object]], second["conflicts"])
+    assert conflicts[0]["code"] == "wrapper_integrity_collision"
+    assert ownership.read_bytes() == ownership_before
+    assert hooks.read_bytes() == hooks_before
+    assert custom_hook.read_bytes() == b"custom-b"
+
+
 def test_installed_relative_custom_command_uses_selected_home_from_other_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1752,6 +1838,35 @@ def test_installed_relative_custom_command_uses_selected_home_from_other_cwd(
     assert completed.returncode == 0
     assert list((store / "events" / "selected-home").rglob("*.json"))
     assert not (process_home / ".claude" / "latent-compass-shadow").exists()
+
+
+def test_relative_home_freezes_absolute_wrapper_and_transaction_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    home_argument = Path("relative-home")
+    selected_home = tmp_path / home_argument
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = selected_home / ".claude" / "settings.json"
+    _write(settings, {"hooks": {"PreToolUse": []}})
+
+    installed = install_shadow_hooks(
+        home=home_argument,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="relative-home",
+        backup_tag="relative-home",
+        hosts=("claude",),
+    )
+    store = selected_home / ".claude" / "latent-compass-shadow"
+    ownership = json.loads((store / "ownership.json").read_text(encoding="utf-8"))
+    arguments = shlex.split(str(ownership["command"]))
+    assert Path(arguments[1]).is_absolute()
+    assert Path(arguments[5]) == selected_home
+    files = cast(list[dict[str, object]], installed["files"])
+    assert all(Path(str(item["path"])).is_absolute() for item in files)
+    assert not (tmp_path / ".latent-compass-shadow.pending.json").exists()
 
 
 def test_remove_revalidates_custom_hook_dependency_before_journal(
@@ -1891,6 +2006,8 @@ def test_install_collision_after_journal_preserves_peer_and_clears_stale_recover
     project.mkdir()
     hooks = home / ".codex" / "hooks.json"
     _write(hooks, {"hooks": {"PreToolUse": []}})
+    hooks_before = hooks.read_bytes()
+    foreign_hooks = b'{"hooks":{"PreToolUse":[{"matcher":"foreign","hooks":[]}]}}'
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     real_atomic = _atomic_bytes
     peer_bytes: bytes | None = None
@@ -1907,6 +2024,7 @@ def test_install_collision_after_journal_preserves_peer_and_clears_stale_recover
             peer_bytes = content
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+            hooks.write_bytes(foreign_hooks)
         real_atomic(path, content, home=home, expected=expected)
 
     monkeypatch.setattr(shadow_install, "_atomic_bytes", peer_create_during_apply)
@@ -1917,16 +2035,19 @@ def test_install_collision_after_journal_preserves_peer_and_clears_stale_recover
         backup_tag="peer-after-journal",
         hosts=("codex",),
     )
-    recovery = recover_shadow_hooks(home=home)
-
     conflicts = cast(list[dict[str, object]], result["conflicts"])
-    assert conflicts[0]["code"] == "apply_failed"
+    assert [item["code"] for item in conflicts] == ["apply_failed", "rollback_conflict"]
     assert peer_bytes is not None
     assert config.read_bytes() == peer_bytes
-    assert not (home / ".latent-compass-shadow.pending.json").exists()
+    journal = home / ".latent-compass-shadow.pending.json"
+    assert journal.is_file()
+    journal_payload = json.loads(journal.read_text(encoding="utf-8"))
+    assert str(config) not in {entry["path"] for entry in journal_payload["entries"]}
+    hooks.write_bytes(hooks_before)
+    recovery = recover_shadow_hooks(home=home)
     assert recovery["conflicts"] == []
-    assert recovery["changed"] is False
     assert config.read_bytes() == peer_bytes
+    assert not journal.exists()
 
 
 def test_install_rollback_preserves_concurrent_change_to_unwritten_file(

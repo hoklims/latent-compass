@@ -76,7 +76,11 @@ _RECORD_FIELDS: Final = frozenset(
 )
 
 
-def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(path))  # noqa: PTH100 - must not follow links
+
+
+def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path, Path | None] | None:
     if host == "codex":
         match = re.fullmatch(
             r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
@@ -86,7 +90,10 @@ def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
         if match is not None:
             runtime = Path(match.group(1).replace("''", "'"))
             wrapper = Path(match.group(2).replace("''", "'"))
-            return runtime, wrapper
+            selected_home = (
+                Path(match.group(3).replace("''", "'")) if match.group(3) is not None else None
+            )
+            return runtime, wrapper, selected_home
     try:
         arguments = shlex.split(command)
     except ValueError:
@@ -96,7 +103,8 @@ def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
     if len(arguments) == 6 and arguments[4] != "--home":
         return None
     runtime, wrapper = Path(arguments[0]), Path(arguments[1])
-    return runtime, wrapper
+    selected_home = Path(arguments[5]) if len(arguments) == 6 else None
+    return runtime, wrapper, selected_home
 
 
 def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, bool]:
@@ -119,7 +127,10 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
         and isinstance(payload.get("command"), str)
         and isinstance(payload.get("wrapper_digest"), str)
         and re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is not None
-        and _parse_hook_command(str(payload.get("command")), host) is not None
+        and (parsed := _parse_hook_command(str(payload.get("command")), host)) is not None
+        and (
+            parsed[2] is None or _lexical_absolute(parsed[2]) == _lexical_absolute(store.parents[1])
+        )
     )
     return (
         (str(payload["command"]), str(payload["wrapper_digest"]), True)
@@ -261,7 +272,7 @@ def _hook_state(
                 }
             parsed = _parse_hook_command(owned_command, host)
             assert parsed is not None
-            runtime, wrapper = parsed
+            runtime, wrapper, _selected_home = parsed
             events.add(event)
             try:
                 runtime_states.append(runtime.is_file())
@@ -432,8 +443,15 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
         if parsed is None:
             paths_safe = False
         else:
-            _, wrapper = parsed
-            paths_safe = _lexically_within(store, wrapper) and _regular_file_safe_or_absent(wrapper)
+            _, wrapper, selected_home = parsed
+            if selected_home is not None and _lexical_absolute(selected_home) != _lexical_absolute(
+                home
+            ):
+                paths_safe = False
+            else:
+                paths_safe = _lexically_within(store, wrapper) and _regular_file_safe_or_absent(
+                    wrapper
+                )
         if not paths_safe:
             ownership_valid = False
     settings = (

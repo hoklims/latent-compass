@@ -378,6 +378,30 @@ def test_status_rejects_non_integer_ownership_schema(
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
 
 
+def test_status_rejects_owned_command_bound_to_another_home(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    other_home = tmp_path / "other-home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    ownership_path = store / "ownership.json"
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+    original_command = str(ownership["command"])
+    wrong_command = original_command + f" --home '{other_home}'"
+    ownership["command"] = wrong_command
+    _write_json(ownership_path, ownership)
+    settings = home / ".codex" / "hooks.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    for groups in payload["hooks"].values():
+        groups[0]["hooks"][0]["command"] = wrong_command
+    _write_json(settings, payload)
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["hooks_present"] == 0
+
+
 @pytest.mark.parametrize("host", ["codex", "claude"])
 def test_status_rejects_owned_custom_wrapper_outside_profile(tmp_path: Path, host: str) -> None:
     home = tmp_path / "home"

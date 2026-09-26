@@ -264,6 +264,39 @@ def _complete_transaction_journal(home: Path, path: Path, expected: bytes) -> li
     return []
 
 
+def _prune_unconfirmed_creates(
+    home: Path,
+    journal_path: Path,
+    journal_content: bytes,
+    written: dict[Path, bytes | None],
+) -> list[dict[str, str]]:
+    try:
+        payload = json.loads(journal_content.decode("utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
+            raise ValueError("invalid transaction journal during collision cleanup")
+        retained = [
+            entry
+            for entry in cast(list[dict[str, object]], payload["entries"])
+            if not (
+                entry.get("before_sha256") is None
+                and _lexical_absolute(Path(str(entry.get("path", "")))) not in written
+            )
+        ]
+        if not retained:
+            return _complete_transaction_journal(home, journal_path, journal_content)
+        replacement = _json_bytes({**payload, "entries": retained})
+        _atomic_bytes(journal_path, replacement, home=home, expected=journal_content)
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        return [
+            {
+                "code": "pending_transaction_conflict",
+                "path": str(journal_path),
+                "detail": f"could not exclude unconfirmed creates from recovery: {exc}",
+            }
+        ]
+    return []
+
+
 def _transaction_snapshot(home: Path, plan: dict[str, object]) -> dict[Path, bytes | None]:
     snapshots: dict[Path, bytes | None] = {}
     for operation in cast(list[_FileOperation], plan["_operations"]):
@@ -781,15 +814,15 @@ def _backup(
     if _path_entry_exists(destination):
         raise FileExistsError(f"refusing to overwrite backup {destination.name}")
     root = home if home is not None else path.parent
-    content = read_confined_file(
-        root,
-        path,
-        max_bytes=_MAX_TRANSACTION_FILE_BYTES,
-        what="host transaction backup source",
-    )
-    if not isinstance(expected, _ExpectedUnset) and content != expected:
-        raise ValueError(f"concurrent change detected for backup source {path}")
     try:
+        content = read_confined_file(
+            root,
+            path,
+            max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+            what="host transaction backup source",
+        )
+        if not isinstance(expected, _ExpectedUnset) and content != expected:
+            raise ValueError(f"concurrent change detected for backup source {path}")
         write_new_file(root, destination, content, what="host transaction backup")
     except ContractViolation as exc:
         raise ValueError(str(exc)) from exc
@@ -1304,6 +1337,7 @@ def plan_install_shadow_hooks(
     backup_tag: str | None = None,
 ) -> dict[str, object]:
     """Preflight every selected host and return the complete no-write plan."""
+    home = _lexical_absolute(home)
     if hook_script is not None:
         hook_script = _lexical_absolute(hook_script)
     conflicts: list[dict[str, str]] = []
@@ -1434,6 +1468,15 @@ def plan_install_shadow_hooks(
                         {"code": "wrapper_integrity_collision", "path": str(installed_hook)}
                     )
                     continue
+            if packaged_hook is None and owned_command is not None:
+                if not _owned_command(owned_command, host=host, wrapper=installed_hook):
+                    conflicts.append({"code": "wrapper_collision", "path": str(installed_hook)})
+                    continue
+                if _bytes_digest(wrapper_before) != owned_digest:
+                    conflicts.append(
+                        {"code": "wrapper_integrity_collision", "path": str(installed_hook)}
+                    )
+                    continue
             if packaged_hook is not None:
                 wrapper_digest = _text_digest(packaged_hook)
             else:
@@ -1529,6 +1572,7 @@ def install_shadow_hooks(
     hook_script: Path | None = None,
 ) -> dict[str, object]:
     """Install only after every selected host passes a shared preflight."""
+    home = _lexical_absolute(home)
     plan = plan_install_shadow_hooks(
         home=home,
         runtime_python=runtime_python,
@@ -1588,13 +1632,15 @@ def install_shadow_hooks(
             )
         if (
             isinstance(exc, _DefiniteWriteRefusalError)
-            and not unresolved
             and journal_path is not None
             and journal_content is not None
         ):
-            cast(list[dict[str, str]], plan["conflicts"]).extend(
+            collision_cleanup = (
                 _complete_transaction_journal(home, journal_path, journal_content)
+                if not unresolved
+                else _prune_unconfirmed_creates(home, journal_path, journal_content, written)
             )
+            cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
@@ -1618,6 +1664,7 @@ def plan_remove_shadow_hooks(
     backup_tag: str | None = None,
 ) -> dict[str, object]:
     """Plan project-level removal while retaining every unrelated registration."""
+    home = _lexical_absolute(home)
     conflicts: list[dict[str, str]] = []
     pending = _pending_transaction_path(home)
     pending_conflicts, pending_recovery, pending_raw, _pending_observations = (
@@ -1790,6 +1837,7 @@ def remove_shadow_hooks(
     project_root: Path | None = None,
     project_alias: str | None = None,
 ) -> dict[str, object]:
+    home = _lexical_absolute(home)
     plan = plan_remove_shadow_hooks(
         home=home,
         hosts=hosts,
@@ -1844,13 +1892,15 @@ def remove_shadow_hooks(
             )
         if (
             isinstance(exc, _DefiniteWriteRefusalError)
-            and not unresolved
             and journal_path is not None
             and journal_content is not None
         ):
-            cast(list[dict[str, str]], plan["conflicts"]).extend(
+            collision_cleanup = (
                 _complete_transaction_journal(home, journal_path, journal_content)
+                if not unresolved
+                else _prune_unconfirmed_creates(home, journal_path, journal_content, written)
             )
+            cast(list[dict[str, str]], plan["conflicts"]).extend(collision_cleanup)
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
@@ -1863,6 +1913,7 @@ def remove_shadow_hooks(
 
 
 def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
+    home = _lexical_absolute(home)
     conflicts, recovery, journal_raw, observations = _pending_recovery_preview(home)
     files = cast(list[dict[str, object]], recovery.get("files", []))
     return {
@@ -1886,6 +1937,7 @@ def plan_recover_shadow_hooks(*, home: Path) -> dict[str, object]:
 
 
 def recover_shadow_hooks(*, home: Path) -> dict[str, object]:
+    home = _lexical_absolute(home)
     plan = plan_recover_shadow_hooks(home=home)
     journal_raw = cast(bytes | None, plan.pop("_journal_raw"))
     observations = cast(list[_RecoveryObservation], plan.pop("_recovery_observations"))
@@ -1910,6 +1962,7 @@ def host_status(
     hosts: tuple[Host, ...],
     dry_run: bool = False,
 ) -> dict[str, object]:
+    home = _lexical_absolute(home)
     report = inspect_hosts(home=home, project_root=project_root, hosts=hosts)
     snapshots = cast(list[dict[str, object]], report["hosts"])
     report["operation"] = "status"
