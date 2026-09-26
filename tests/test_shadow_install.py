@@ -2024,6 +2024,56 @@ def test_deep_host_json_returns_structured_install_and_status_refusal(tmp_path: 
     assert hooks.read_text(encoding="utf-8") == deep_json
 
 
+def test_serialization_depth_refusal_closes_planning_leases_with_valid_control(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    depth = 65
+    nested = "[" * depth + "0" + "]" * depth
+    raw = '{"hooks":{"PreToolUse":[]},"deep":' + nested + "}"
+    assert isinstance(json.loads(raw), dict)
+    hooks.write_text(raw, encoding="utf-8")
+
+    refused = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="serialize-depth",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], refused["conflicts"])
+    assert conflicts[0]["code"] == "configuration_collision"
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+    peer = tmp_path / "peer-hooks.json"
+    peer.write_text(raw, encoding="utf-8")
+    peer.replace(hooks)
+    status = host_status(home=home, project_root=project, hosts=("codex",), dry_run=False)
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    assert isinstance(snapshots[0]["status"], str)
+
+    control_home = tmp_path / "control-home"
+    control_hooks = control_home / ".codex" / "hooks.json"
+    control_hooks.parent.mkdir(parents=True)
+    control_nested = "[" * 32 + "0" + "]" * 32
+    control_hooks.write_text(
+        '{"hooks":{"PreToolUse":[]},"deep":' + control_nested + "}",
+        encoding="utf-8",
+    )
+    accepted = install_shadow_hooks(
+        home=control_home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="serialize-control",
+        hosts=("codex",),
+    )
+    assert accepted["conflicts"] == []
+
+
 def test_install_revalidates_custom_hook_script_dependency_before_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3386,6 +3436,59 @@ def test_recovery_description_uses_preflight_target_observation(
     assert applied["conflicts"] == []
     assert not hooks.exists()
     assert not journal.exists()
+
+
+def test_legacy_confirmed_revocation_is_canonical_before_failed_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    after = b"transaction-after"
+    hooks.write_bytes(after)
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_bytes(
+        _json_bytes(
+            {
+                "schema_version": 1,
+                "operation": "install",
+                "backup_tag": "legacy-revoke",
+                "entries": [
+                    {
+                        "path": str(hooks),
+                        "before_sha256": None,
+                        "after_sha256": _bytes_digest(after),
+                        "backup_path": None,
+                        "publication_confirmed": True,
+                    }
+                ],
+            }
+        )
+    )
+    real_remove = confined_io.ConfinedFileLease.remove
+
+    def fail_owned_delete(lease: confined_io.ConfinedFileLease) -> None:
+        if lease.path == hooks:
+            raise OSError("injected delete failure after revocation")
+        real_remove(lease)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(confined_io.ConfinedFileLease, "remove", fail_owned_delete)
+        failed = recover_shadow_hooks(home=home)
+
+    failed_conflicts = cast(list[dict[str, object]], failed["conflicts"])
+    assert failed_conflicts[0]["code"] == "pending_transaction_invalid"
+    payload = json.loads(journal.read_text(encoding="utf-8"))
+    entry = payload["entries"][0]
+    assert entry["publication_state"] == "revoked"
+    assert "publication_confirmed" not in entry
+    assert hooks.read_bytes() == after
+
+    preview = plan_recover_shadow_hooks(home=home)
+    preview_conflicts = cast(list[dict[str, object]], preview["conflicts"])
+    assert preview_conflicts[0]["code"] == "pending_transaction_conflict"
+    assert hooks.read_bytes() == after
+    assert journal.is_file()
 
 
 def test_recovery_preview_preflights_replacement_journal_bytes(

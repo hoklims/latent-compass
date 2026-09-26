@@ -483,15 +483,17 @@ def test_posix_lease_revalidates_after_staging_before_publish(
     peer_identity = peer.stat().st_ino
     real_fsync = os.fsync
     substituted = False
+    fsync_calls = 0
 
-    def substitute_during_staging(descriptor: int) -> None:
-        nonlocal substituted
-        if not substituted:
+    def substitute_during_parent_fsync(descriptor: int) -> None:
+        nonlocal fsync_calls, substituted
+        fsync_calls += 1
+        if fsync_calls == 2:
             peer.replace(target)
             substituted = True
         real_fsync(descriptor)
 
-    monkeypatch.setattr(os, "fsync", substitute_during_staging)
+    monkeypatch.setattr(os, "fsync", substitute_during_parent_fsync)
     lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
     try:
         with pytest.raises(ContractViolation, match="identity changed after observation"):
@@ -500,6 +502,7 @@ def test_posix_lease_revalidates_after_staging_before_publish(
         lease.close()
 
     assert substituted is True
+    assert fsync_calls == 2
     assert target.read_bytes() == b"before"
     assert target.stat().st_ino == peer_identity
 

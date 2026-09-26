@@ -700,18 +700,16 @@ def _lease_assert_posix(lease: ConfinedFileLease) -> None:
 
 def _lease_replace_posix(lease: ConfinedFileLease, data: bytes) -> None:
     temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
-    descriptor = os.open(
+    descriptor: int | None = os.open(
         temporary_name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
         0o600,
         dir_fd=lease._parent_handle,
     )
     try:
+        assert descriptor is not None
         _write_all(descriptor, data)
         os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    try:
         _lease_assert_posix(lease)
         if lease.exists:
             assert lease._file_handle is not None
@@ -730,25 +728,30 @@ def _lease_replace_posix(lease: ConfinedFileLease, data: bytes) -> None:
                 follow_symlinks=False,
             )
             os.unlink(temporary_name, dir_fd=lease._parent_handle)
+        published_content, published_identity = _read_posix_lease_descriptor(
+            descriptor,
+            max_bytes=lease.max_bytes,
+            path=lease.path,
+            what=lease.what,
+        )
+        if published_content != data:
+            raise ContractViolation(
+                f"{lease.what} changed during publication",
+                detail={"what": lease.what, "path": str(lease.path)},
+            )
+        if lease._file_handle is not None:
+            os.close(lease._file_handle)
+        lease._file_handle = descriptor
+        lease.content = published_content
+        lease.identity = published_identity
+        descriptor = None
         os.fsync(lease._parent_handle)
+        _lease_assert_posix(lease)
     finally:
+        if descriptor is not None:
+            os.close(descriptor)
         with suppress(FileNotFoundError):
             os.unlink(temporary_name, dir_fd=lease._parent_handle)
-    if lease._file_handle is not None:
-        os.close(lease._file_handle)
-    lease._file_handle = os.open(
-        lease.path.name,
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-        dir_fd=lease._parent_handle,
-    )
-    lease.content, lease.identity = _read_posix_lease_descriptor(
-        lease._file_handle, max_bytes=lease.max_bytes, path=lease.path, what=lease.what
-    )
-    if lease.content != data:
-        raise ContractViolation(
-            f"{lease.what} changed during publication",
-            detail={"what": lease.what, "path": str(lease.path)},
-        )
 
 
 def _lease_remove_posix(lease: ConfinedFileLease) -> None:

@@ -47,11 +47,13 @@ __all__ = [
     "load_shadow_config",
     "main",
     "process_hook_event",
+    "validate_host_json_depth",
 ]
 
 SHADOW_HARNESS_CONTRACT_VERSION: Final = "1.0.0"
 DEFAULT_CONFIG_NAME: Final = "config.json"
 MAX_HOOK_BYTES: Final = 1_048_576
+MAX_HOST_JSON_DEPTH: Final = 64
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SEAL = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PLATFORM: Final = os.name
@@ -120,12 +122,26 @@ class ShadowHarnessConfig(StrictModel):
 
 def load_shadow_config(payload: object) -> ShadowHarnessConfig:
     """Validate one host-local shadow configuration."""
+    validate_host_json_depth(payload)
     return validate_contract(
         ShadowHarnessConfig,
         payload,
         error=ShadowHarnessViolation,
         context="shadow harness config",
     )
+
+
+def validate_host_json_depth(payload: object) -> None:
+    """Refuse host JSON whose nesting is unsafe to transform or serialize."""
+    pending: list[tuple[object, int]] = [(payload, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > MAX_HOST_JSON_DEPTH:
+            raise ValueError(f"host JSON nesting exceeds the supported depth {MAX_HOST_JSON_DEPTH}")
+        if isinstance(value, dict):
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
 
 
 def default_store_root(host: Literal["codex", "claude"], home: Path | None = None) -> Path:

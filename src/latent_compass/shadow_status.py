@@ -23,7 +23,12 @@ from latent_compass.confined_io import (
     read_confined_file,
 )
 from latent_compass.errors import ContractViolation
-from latent_compass.shadow_harness import DEFAULT_CONFIG_NAME, ShadowProject, load_shadow_config
+from latent_compass.shadow_harness import (
+    DEFAULT_CONFIG_NAME,
+    ShadowProject,
+    load_shadow_config,
+    validate_host_json_depth,
+)
 
 Host = Literal["codex", "claude"]
 HOSTS: Final[tuple[Host, ...]] = ("codex", "claude")
@@ -116,7 +121,15 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
             store, path, max_bytes=MAX_EVENT_BYTES, what="shadow ownership manifest"
         )
         payload = json.loads(raw.decode("utf-8"))
-    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        validate_host_json_depth(payload)
+    except (
+        OSError,
+        ContractViolation,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
         return None, None, False
     valid = (
         isinstance(payload, dict)
@@ -244,7 +257,15 @@ def _hook_state(
     try:
         raw = read_confined_file(home, path, max_bytes=MAX_EVENT_BYTES, what="host hook settings")
         payload = json.loads(raw.decode("utf-8"))
-    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+        validate_host_json_depth(payload)
+    except (
+        OSError,
+        ContractViolation,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        ValueError,
+        RecursionError,
+    ):
         return {
             "configuration_present": True,
             "configuration_valid": False,
