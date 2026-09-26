@@ -35,6 +35,7 @@ from latent_compass.shadow_harness import (
     host_command_home_is_eligible,
     load_shadow_config,
     validate_host_json_depth,
+    validate_host_settings,
 )
 from latent_compass.shadow_status import MAX_EVENT_BYTES, Host, inspect_hosts, render_text
 
@@ -181,13 +182,10 @@ def _read_json(
         content = raw
     if content is None:
         raise FileNotFoundError(path)
-    payload = decode_host_json(content.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"{path.name} must contain a JSON object")
-    hooks = payload.get("hooks")
-    if not isinstance(hooks, dict):
-        raise ValueError(f"{path.name} must contain a hooks object")
-    return payload
+    try:
+        return validate_host_settings(decode_host_json(content.decode("utf-8")))
+    except ValueError as exc:
+        raise ValueError(f"invalid {path.name}: {exc}") from exc
 
 
 def _atomic_json(
@@ -2462,6 +2460,8 @@ def plan_remove_shadow_hooks(
             settings_before = _observe_confined_file(
                 settings_path, root=home, leases=leases, what="host hook settings"
             )
+            if settings_before is not None:
+                validate_host_settings(decode_host_json(settings_before.decode("utf-8")))
             ownership_before = _observe_confined_file(
                 ownership_path,
                 root=home,

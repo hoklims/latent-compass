@@ -2517,6 +2517,128 @@ def test_legacy_implicit_home_is_consistent_for_default_home_only(
     assert host_command_home_is_eligible(tmp_path / "other-home", default_home) is False
 
 
+@pytest.mark.parametrize("host", ["codex", "claude"])
+@pytest.mark.parametrize(
+    "malformed",
+    ["invalid_json", "duplicate", "string", "object", "number", "boolean", "null"],
+)
+def test_partial_and_final_remove_refuse_malformed_settings_before_registration_mutation(
+    tmp_path: Path, host: str, malformed: str
+) -> None:
+    selected_host = cast(Host, host)
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    settings = home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
+    _write(settings, {"hooks": {"PreToolUse": []}})
+    for project, alias in ((first, "first"), (second, "second")):
+        installed = install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            project_alias=alias,
+            backup_tag=f"install-{alias}",
+            hosts=(selected_host,),
+        )
+        assert installed["conflicts"] == []
+    store = home / f".{host}" / "latent-compass-shadow"
+    config = store / "config.json"
+    config_before = config.read_bytes()
+    if malformed == "invalid_json":
+        poisoned = "not-json"
+    elif malformed == "duplicate":
+        poisoned = '{"hooks":{},"hidden":NaN,"hidden":0}'
+    elif malformed in {"string", "object", "number", "boolean", "null"}:
+        payload = json.loads(settings.read_text(encoding="utf-8"))
+        invalid_event_values: dict[str, object] = {
+            "string": "invalid",
+            "object": {},
+            "number": 1,
+            "boolean": False,
+            "null": None,
+        }
+        payload["hooks"]["Unrelated"] = invalid_event_values[malformed]
+        poisoned = json.dumps(payload)
+    else:
+        raise AssertionError(f"unsupported malformed case: {malformed}")
+    settings.write_text(poisoned, encoding="utf-8")
+    settings_before = settings.read_bytes()
+
+    partial = remove_shadow_hooks(
+        home=home,
+        project_root=first,
+        project_alias="first",
+        backup_tag="remove-partial",
+        hosts=(selected_host,),
+    )
+    final = remove_shadow_hooks(
+        home=home,
+        backup_tag="remove-final",
+        hosts=(selected_host,),
+    )
+    status = host_status(home=home, project_root=first, hosts=(selected_host,))
+
+    for report in (partial, final):
+        conflicts = cast(list[dict[str, object]], report["conflicts"])
+        assert conflicts[0]["code"] == "configuration_collision"
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    states = cast(dict[str, dict[str, object]], status["states"])
+    assert snapshots[0]["status"] == "HOST_CONFIGURATION_INVALID"
+    assert states[host]["installed"] is False
+    assert states[host]["configured"] is False
+    assert config.read_bytes() == config_before
+    assert settings.read_bytes() == settings_before
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+@pytest.mark.parametrize("host", ["codex", "claude"])
+def test_two_project_remove_valid_settings_preserves_then_removes_registration(
+    tmp_path: Path, host: str
+) -> None:
+    selected_host = cast(Host, host)
+    home = tmp_path / "home"
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    settings = home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
+    _write(settings, {"hooks": {"PreToolUse": []}})
+    for project, alias in ((first, "first"), (second, "second")):
+        installed = install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            project_alias=alias,
+            backup_tag=f"install-{alias}",
+            hosts=(selected_host,),
+        )
+        assert installed["conflicts"] == []
+
+    partial = remove_shadow_hooks(
+        home=home,
+        project_root=first,
+        project_alias="first",
+        backup_tag="remove-first",
+        hosts=(selected_host,),
+    )
+    remaining = host_status(home=home, project_root=second, hosts=(selected_host,))
+    final = remove_shadow_hooks(
+        home=home,
+        project_root=second,
+        project_alias="second",
+        backup_tag="remove-second",
+        hosts=(selected_host,),
+    )
+
+    assert partial["conflicts"] == []
+    states = cast(dict[str, dict[str, object]], remaining["states"])
+    assert states[host]["installed"] is True
+    assert states[host]["configured"] is True
+    assert final["conflicts"] == []
+
+
 def test_installed_relative_custom_command_uses_selected_home_from_other_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

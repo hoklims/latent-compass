@@ -29,6 +29,7 @@ from latent_compass.shadow_harness import (
     decode_host_json,
     host_command_home_is_eligible,
     load_shadow_config,
+    validate_host_settings,
 )
 
 Host = Literal["codex", "claude"]
@@ -245,7 +246,7 @@ def _hook_state(
         return {"configuration_present": False, "events": [], "runtime_present": None}
     try:
         raw = read_confined_file(home, path, max_bytes=MAX_EVENT_BYTES, what="host hook settings")
-        payload = decode_host_json(raw.decode("utf-8"))
+        payload = validate_host_settings(decode_host_json(raw.decode("utf-8")))
     except (
         OSError,
         ContractViolation,
@@ -260,20 +261,14 @@ def _hook_state(
             "events": [],
             "runtime_present": None,
         }
-    hooks = payload.get("hooks") if isinstance(payload, dict) else None
-    if not isinstance(hooks, dict):
-        return {
-            "configuration_present": True,
-            "configuration_valid": False,
-            "events": [],
-            "runtime_present": None,
-        }
+    hooks = payload["hooks"]
+    assert isinstance(hooks, dict)
     events: set[str] = set()
     runtime_states: list[bool] = []
     wrapper_states: list[bool] = []
     for event, groups in hooks.items():
-        if not isinstance(event, str) or not isinstance(groups, list):
-            continue
+        assert isinstance(event, str)
+        assert isinstance(groups, list)
         for group in groups:
             if owned_command is None or event not in _HOOK_EVENTS[host]:
                 continue

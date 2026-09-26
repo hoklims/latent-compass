@@ -51,6 +51,7 @@ __all__ = [
     "main",
     "process_hook_event",
     "validate_host_json_depth",
+    "validate_host_settings",
 ]
 
 SHADOW_HARNESS_CONTRACT_VERSION: Final = "1.0.0"
@@ -169,6 +170,19 @@ def decode_host_json(raw: str) -> object:
         object_pairs_hook=unique_object,
     )
     validate_host_json_depth(payload)
+    return payload
+
+
+def validate_host_settings(payload: object) -> dict[str, object]:
+    """Admit host settings only when every hook event maps to an array."""
+    if not isinstance(payload, dict):
+        raise ValueError("host settings must contain a JSON object")
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        raise ValueError("host settings must contain a hooks object")
+    for event, groups in hooks.items():
+        if not isinstance(event, str) or not isinstance(groups, list):
+            raise ValueError("hook event entries must be arrays")
     return payload
 
 
