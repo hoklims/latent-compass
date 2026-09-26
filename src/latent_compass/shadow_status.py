@@ -379,8 +379,9 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             or not _valid_timestamp(observed_at)
             or not isinstance(session_seal, str)
             or _SEAL.fullmatch(session_seal) is None
-            or verdict not in _VERDICTS
             or not isinstance(decision, dict)
+            or not isinstance(verdict, str)
+            or verdict not in _VERDICTS
             or decision.get("execution_authority") is not False
             or decision.get("empirical_claim") is not False
         ):

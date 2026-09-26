@@ -275,6 +275,33 @@ def test_impossible_timestamp_is_rejected(tmp_path: Path) -> None:
     assert report["event_count"] == 0
 
 
+def test_sealed_unhashable_verdict_is_counted_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+    event = next((store / "events").rglob("*.json"))
+    record = json.loads(event.read_text(encoding="utf-8"))
+    record["route_decision"]["verdict"] = []
+    unsigned = {key: value for key, value in record.items() if key != "record_seal"}
+    record["record_seal"] = seal("shadow.harness.record.v1", unsigned)
+    _write_json(event, record)
+    monkeypatch.setattr(
+        shadow_status,
+        "list_confined_json_files",
+        lambda *_args, **_kwargs: ([event], False),
+    )
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "DEGRADED"
+    assert report["event_count"] == 0
+    assert report["invalid_event_count"] == 1
+
+
 def test_inert_marker_commands_do_not_count_as_hooks(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

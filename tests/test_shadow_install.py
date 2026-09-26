@@ -20,8 +20,7 @@ from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _EXPECTED_UNSET,
-    _assert_snapshot,
-    _atomic_json,
+    _atomic_bytes,
     _atomic_text,
     _backup,
     _begin_transaction,
@@ -33,6 +32,7 @@ from latent_compass.shadow_install import (
     _merged_host_config,
     _packaged_hook_text,
     _path_entry_exists,
+    _pending_recovery_preview,
     _recover_pending_transaction,
     _regular_file_bytes_or_none,
     _remove_confined,
@@ -1009,14 +1009,14 @@ def test_install_rolls_back_all_files_when_late_atomic_write_fails(
         },
     )
     before = hooks.read_bytes()
-    real_atomic_json = _atomic_json
+    real_atomic_bytes = _atomic_bytes
 
-    def fail_on_config(path: Path, payload: object, **kwargs: Any) -> None:
+    def fail_on_config(path: Path, content: bytes, **kwargs: Any) -> None:
         if path.name == "config.json":
             raise OSError("injected config write failure")
-        real_atomic_json(path, payload, **kwargs)
+        real_atomic_bytes(path, content, **kwargs)
 
-    monkeypatch.setattr(shadow_install, "_atomic_json", fail_on_config)
+    monkeypatch.setattr(shadow_install, "_atomic_bytes", fail_on_config)
 
     result = install_shadow_hooks(
         home=home,
@@ -1134,15 +1134,15 @@ def test_install_preserves_journal_when_published_bytes_change_before_rollback(
     _write(hooks, {"hooks": {"PreToolUse": []}})
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     third_party = b'{"third_party":true}\n'
-    real_atomic_json = _atomic_json
+    real_atomic_bytes = _atomic_bytes
 
-    def publish_substitute_then_fail(path: Path, payload: object, **kwargs: Any) -> None:
-        real_atomic_json(path, payload, **kwargs)
+    def publish_substitute_then_fail(path: Path, content: bytes, **kwargs: Any) -> None:
+        real_atomic_bytes(path, content, **kwargs)
         if path == config:
             path.write_bytes(third_party)
             raise OSError("injected post-publication observation failure")
 
-    monkeypatch.setattr(shadow_install, "_atomic_json", publish_substitute_then_fail)
+    monkeypatch.setattr(shadow_install, "_atomic_bytes", publish_substitute_then_fail)
     result = install_shadow_hooks(
         home=home,
         runtime_python=Path(sys.executable),
@@ -1564,6 +1564,124 @@ def test_install_refuses_concurrent_foreign_hook_before_first_write(
     assert not list(home.rglob("*.bak-latent-compass-concurrent"))
 
 
+def test_install_binds_payload_and_digest_to_one_planning_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    original = hooks.read_bytes()
+    foreign = {"hooks": {"PreToolUse": [{"matcher": "foreign", "hooks": []}]}}
+    foreign_bytes = json.dumps(foreign).encode("utf-8")
+    real_reader = _regular_file_bytes_or_none
+    injected = False
+
+    def mutate_after_planning_read(path: Path, *, home: Path | None = None) -> bytes | None:
+        nonlocal injected
+        content = real_reader(path, home=home)
+        if path == hooks and not injected:
+            injected = True
+            hooks.write_bytes(foreign_bytes)
+        return content
+
+    monkeypatch.setattr(
+        "latent_compass.shadow_install._regular_file_bytes_or_none", mutate_after_planning_read
+    )
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="single-read",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "concurrent_change"
+    assert original != foreign_bytes
+    assert hooks.read_bytes() == foreign_bytes
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+def test_install_validates_unchanged_dependencies_before_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="first",
+        hosts=("codex",),
+    )
+    foreign = b'{"hooks":{"PreToolUse":[{"matcher":"foreign","hooks":[]}]}}\n'
+    real_snapshot = _transaction_snapshot
+
+    def mutate_before_validation(
+        selected_home: Path, plan: dict[str, object]
+    ) -> dict[Path, bytes | None]:
+        hooks.write_bytes(foreign)
+        return real_snapshot(selected_home, plan)
+
+    monkeypatch.setattr(shadow_install, "_transaction_snapshot", mutate_before_validation)
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="second",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "concurrent_change"
+    assert hooks.read_bytes() == foreign
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+def test_install_exclusive_create_refuses_peer_same_bytes_before_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    config = home / ".codex" / "latent-compass-shadow" / "config.json"
+    real_snapshot = _transaction_snapshot
+    peer_bytes: bytes | None = None
+
+    def peer_create_before_validation(
+        selected_home: Path, plan: dict[str, object]
+    ) -> dict[Path, bytes | None]:
+        nonlocal peer_bytes
+        operations = cast(list[dict[str, Any]], plan["_operations"])
+        peer_bytes = next(item["after"] for item in operations if item["path"] == config)
+        assert isinstance(peer_bytes, bytes)
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(peer_bytes)
+        return real_snapshot(selected_home, plan)
+
+    monkeypatch.setattr(shadow_install, "_transaction_snapshot", peer_create_before_validation)
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="peer",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "concurrent_change"
+    assert peer_bytes is not None
+    assert config.read_bytes() == peer_bytes
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
 def test_install_rollback_preserves_concurrent_change_to_unwritten_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1575,15 +1693,15 @@ def test_install_rollback_preserves_concurrent_change_to_unwritten_file(
     hooks_before = hooks.read_bytes()
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     third_party = b'{"third_party":true}\n'
-    real_assert = _assert_snapshot
+    real_atomic_bytes = _atomic_bytes
 
-    def inject_on_config(selected_home: Path, path: Path, expected: bytes | None) -> None:
-        if path == config:
+    def inject_on_config(path: Path, content: bytes, **kwargs: Any) -> None:
+        if path == config and not config.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(third_party)
-        real_assert(selected_home, path, expected)
+        real_atomic_bytes(path, content, **kwargs)
 
-    monkeypatch.setattr(shadow_install, "_assert_snapshot", inject_on_config)
+    monkeypatch.setattr(shadow_install, "_atomic_bytes", inject_on_config)
 
     result = install_shadow_hooks(
         home=home,
@@ -1758,8 +1876,10 @@ def test_recovery_preflights_all_backups_before_first_mutation(tmp_path: Path) -
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
     _atomic_text(wrapper, _packaged_hook_text())
-    payloads = cast(dict[str, dict[str, object]], plan["_payloads"])
-    _atomic_json(hooks, payloads["codex"]["settings"])
+    operations = cast(list[dict[str, Any]], plan["_operations"])
+    settings_after = next(item["after"] for item in operations if item["path"] == hooks)
+    assert isinstance(settings_after, bytes)
+    _atomic_bytes(hooks, settings_after)
 
     result = recover_shadow_hooks(home=home)
 
@@ -1843,8 +1963,10 @@ def test_recovery_reports_backup_vanishing_after_preflight(
         backup_tag="crash",
         plan=plan,
     )
-    payloads = cast(dict[str, dict[str, object]], plan["_payloads"])
-    _atomic_json(hooks, payloads["codex"]["settings"])
+    operations = cast(list[dict[str, Any]], plan["_operations"])
+    settings_after = next(item["after"] for item in operations if item["path"] == hooks)
+    assert isinstance(settings_after, bytes)
+    _atomic_bytes(hooks, settings_after)
     backup = hooks.with_name("hooks.json.bak-latent-compass-crash")
     backup.write_bytes(original)
     real_reader = _regular_file_bytes_or_none
@@ -1926,8 +2048,10 @@ def test_recovery_refuses_dangling_backup_symlink(tmp_path: Path) -> None:
         backup_tag="crash",
         plan=plan,
     )
-    payloads = cast(dict[str, dict[str, object]], plan["_payloads"])
-    _atomic_json(hooks, payloads["codex"]["settings"])
+    operations = cast(list[dict[str, Any]], plan["_operations"])
+    settings_after = next(item["after"] for item in operations if item["path"] == hooks)
+    assert isinstance(settings_after, bytes)
+    _atomic_bytes(hooks, settings_after)
     backup = hooks.with_name("hooks.json.bak-latent-compass-crash")
     try:
         backup.symlink_to(tmp_path / "missing-backup.json")
@@ -2143,6 +2267,69 @@ def test_recovery_preview_preflights_replacement_journal_bytes(
     assert journal.is_file()
 
 
+def test_recovery_refuses_journal_replacement_before_any_target_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        hosts=("codex",),
+        backup_tag="preview-a",
+    )
+    snapshots = _transaction_snapshot(home, plan)
+    journal, _journal_a = _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="preview-a",
+        plan=plan,
+    )
+    wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
+    wrapper_after = next(
+        item["after"]
+        for item in cast(list[dict[str, Any]], plan["_operations"])
+        if item["path"] == wrapper
+    )
+    assert isinstance(wrapper_after, bytes)
+    _atomic_bytes(wrapper, wrapper_after)
+    replacement = {
+        "schema_version": 1,
+        "operation": "install",
+        "backup_tag": "preview-b",
+        "entries": [
+            {
+                "path": str(home / ".codex" / "latent-compass-shadow" / "ownership.json"),
+                "before_sha256": None,
+                "after_sha256": "sha256:" + "2" * 64,
+                "backup_path": None,
+            }
+        ],
+    }
+    replacement_bytes = (json.dumps(replacement, indent=2) + "\n").encode("utf-8")
+    real_preview = _pending_recovery_preview
+
+    def preview_then_replace(
+        selected_home: Path,
+    ) -> tuple[list[dict[str, str]], dict[str, object], bytes | None]:
+        result = real_preview(selected_home)
+        journal.write_bytes(replacement_bytes)
+        return result
+
+    monkeypatch.setattr(shadow_install, "_pending_recovery_preview", preview_then_replace)
+    result = recover_shadow_hooks(home=home)
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "changed after preview" in str(conflicts[0]["detail"])
+    assert wrapper.read_bytes() == wrapper_after
+    assert journal.read_bytes() == replacement_bytes
+
+
 @pytest.mark.parametrize("defect", ["empty", "operation", "duplicate", "unknown-path"])
 def test_recover_rejects_semantically_invalid_journal_entries(tmp_path: Path, defect: str) -> None:
     home = tmp_path / "home"
@@ -2258,15 +2445,15 @@ def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     hooks = home / ".codex" / "hooks.json"
     _write(hooks, {"hooks": {"PreToolUse": []}})
     third_party = b'{"hooks":{"PreToolUse":[{"foreign":true}]}}\n'
-    real_atomic_json = _atomic_json
+    real_atomic_bytes = _atomic_bytes
 
-    def fail_after_foreign_change(path: Path, payload: object, **kwargs: Any) -> None:
+    def fail_after_foreign_change(path: Path, content: bytes, **kwargs: Any) -> None:
         if path.name == "config.json":
             hooks.write_bytes(third_party)
             raise OSError("injected failure after concurrent hook change")
-        real_atomic_json(path, payload, **kwargs)
+        real_atomic_bytes(path, content, **kwargs)
 
-    monkeypatch.setattr(shadow_install, "_atomic_json", fail_after_foreign_change)
+    monkeypatch.setattr(shadow_install, "_atomic_bytes", fail_after_foreign_change)
 
     result = install_shadow_hooks(
         home=home,
@@ -2311,18 +2498,18 @@ def test_rollback_preserves_symlink_substitution_after_write(
     hooks = home / ".codex" / "hooks.json"
     outside = tmp_path / "outside-hooks.json"
     _write(hooks, {"hooks": {"PreToolUse": []}})
-    real_atomic_json = _atomic_json
+    real_atomic_bytes = _atomic_bytes
 
-    def fail_after_symlink_substitution(path: Path, payload: object, **kwargs: Any) -> None:
+    def fail_after_symlink_substitution(path: Path, content: bytes, **kwargs: Any) -> None:
         if path.name == "config.json":
             written = hooks.read_bytes()
             hooks.unlink()
             outside.write_bytes(written)
             hooks.symlink_to(outside)
             raise OSError("injected failure after symlink substitution")
-        real_atomic_json(path, payload, **kwargs)
+        real_atomic_bytes(path, content, **kwargs)
 
-    monkeypatch.setattr(shadow_install, "_atomic_json", fail_after_symlink_substitution)
+    monkeypatch.setattr(shadow_install, "_atomic_bytes", fail_after_symlink_substitution)
 
     result = install_shadow_hooks(
         home=home,
