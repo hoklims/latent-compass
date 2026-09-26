@@ -10,6 +10,7 @@ import pytest
 
 import latent_compass.shadow_status as shadow_status
 from latent_compass.canonical import seal
+from latent_compass.confined_io import read_confined_file as confined_read
 from latent_compass.shadow_status import Host, inspect_host, main, render_text
 
 
@@ -26,8 +27,9 @@ def _install_fixture(
     wrapper_path: Path | None = None,
 ) -> Path:
     settings = home / f".{host}" / ("hooks.json" if host == "codex" else "settings.json")
+    store = home / f".{host}" / "latent-compass-shadow"
     runtime = home / "runtime" / "python.exe"
-    wrapper = wrapper_path or home / "runtime" / "latent-compass-shadow-hook.py"
+    wrapper = wrapper_path or store / "runtime" / "latent-compass-shadow-hook.py"
     command = (
         f"& '{runtime}' '{wrapper}' --host {host}"
         if host == "codex"
@@ -73,7 +75,6 @@ def _install_fixture(
     runtime.write_bytes(b"fixture")
     wrapper.parent.mkdir(parents=True, exist_ok=True)
     wrapper.write_text("# fixture\n", encoding="utf-8")
-    store = home / f".{host}" / "latent-compass-shadow"
     _write_json(
         store / "ownership.json",
         {
@@ -258,7 +259,9 @@ def test_inert_marker_commands_do_not_count_as_hooks(tmp_path: Path) -> None:
     settings = home / ".codex" / "hooks.json"
     payload = json.loads(settings.read_text(encoding="utf-8"))
     runtime = home / "runtime" / "python.exe"
-    wrapper = home / "runtime" / "latent-compass-shadow-hook.py"
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
     for groups in payload["hooks"].values():
         groups[0]["hooks"][0]["command"] = f"echo '{runtime}' '{wrapper}' --host codex"
     _write_json(settings, payload)
@@ -274,7 +277,9 @@ def test_missing_wrapper_or_host_suffix_cannot_look_active(tmp_path: Path) -> No
     project = tmp_path / "project"
     project.mkdir()
     _install_fixture(home, project)
-    wrapper = home / "runtime" / "latent-compass-shadow-hook.py"
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
     wrapper.unlink()
 
     missing = inspect_host(home=home, host="codex", project_root=project)
@@ -330,7 +335,9 @@ def test_status_reports_changed_owned_wrapper_as_missing(tmp_path: Path) -> None
     project = tmp_path / "project"
     project.mkdir()
     _install_fixture(home, project)
-    wrapper = home / "runtime" / "latent-compass-shadow-hook.py"
+    wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
     wrapper.write_text("# replaced content\n", encoding="utf-8")
 
     report = inspect_host(home=home, host="codex", project_root=project)
@@ -356,6 +363,38 @@ def test_status_does_not_follow_external_runtime_symlink(tmp_path: Path) -> None
 
     assert report["status"] == "NO_OBSERVATIONS"
     assert report["runtime_present"] is True
+
+
+def test_status_rejects_wrapper_in_another_host_profile(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    ownership_path = store / "ownership.json"
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+    managed_wrapper = (
+        home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+    )
+    foreign_wrapper = home / ".claude" / "foreign-wrapper.py"
+    foreign_wrapper.parent.mkdir(parents=True)
+    foreign_wrapper.write_text("# foreign profile\n", encoding="utf-8")
+    ownership["command"] = str(ownership["command"]).replace(
+        str(managed_wrapper), str(foreign_wrapper)
+    )
+    ownership["wrapper_digest"] = (
+        f"sha256:{hashlib.sha256(foreign_wrapper.read_bytes()).hexdigest()}"
+    )
+    _write_json(ownership_path, ownership)
+    settings = home / ".codex" / "hooks.json"
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    for groups in payload["hooks"].values():
+        groups[0]["hooks"][0]["command"] = ownership["command"]
+    _write_json(settings, payload)
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["wrapper_present"] is None
 
 
 def test_configuration_and_records_are_bound_to_the_reported_host(tmp_path: Path) -> None:
@@ -521,7 +560,9 @@ def test_status_refuses_linked_profile_children(
         "settings": home / ".codex" / "hooks.json",
         "ownership": store / "ownership.json",
         "config": store / "config.json",
-        "wrapper": home / "runtime" / "latent-compass-shadow-hook.py",
+        "wrapper": (
+            home / ".codex" / "latent-compass-shadow" / "runtime" / "latent-compass-shadow-hook.py"
+        ),
     }
     target = targets[surface]
     outside = tmp_path / f"outside-{surface}"
@@ -560,3 +601,35 @@ def test_status_refuses_linked_event_tree_entries(tmp_path: Path, surface: str) 
 
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["event_count"] == 0
+
+
+def test_status_refuses_event_file_swapped_to_symlink_before_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+    event = next((store / "events").rglob("*.json"))
+    outside = tmp_path / "outside-event.json"
+    outside.write_bytes(event.read_bytes())
+    before = outside.read_bytes()
+    real_reader = confined_read
+    injected = False
+
+    def swap_then_read(root: Path, target: Path, *, max_bytes: int, what: str) -> bytes:
+        nonlocal injected
+        if what == "shadow event record" and not injected:
+            injected = True
+            event.unlink()
+            event.symlink_to(outside)
+        return real_reader(root, target, max_bytes=max_bytes, what=what)
+
+    monkeypatch.setattr(shadow_status, "read_confined_file", swap_then_read)
+
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["event_count"] == 0
+    assert outside.read_bytes() == before

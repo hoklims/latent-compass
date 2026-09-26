@@ -17,6 +17,8 @@ from typing import Final, Literal, TextIO
 
 from latent_compass import __version__
 from latent_compass.canonical import seal
+from latent_compass.confined_io import read_confined_file
+from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import DEFAULT_CONFIG_NAME, ShadowProject, load_shadow_config
 
 Host = Literal["codex", "claude"]
@@ -92,8 +94,11 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
     if not path.is_file():
         return None, None, True
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raw = read_confined_file(
+            store, path, max_bytes=MAX_EVENT_BYTES, what="shadow ownership manifest"
+        )
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError):
         return None, None, False
     valid = (
         isinstance(payload, dict)
@@ -122,12 +127,16 @@ def _expected_group(event: str, host: Host, command: str) -> dict[str, object]:
     return group
 
 
-def _wrapper_matches(path: Path, expected_digest: str | None) -> bool:
+def _wrapper_matches(root: Path, path: Path, expected_digest: str | None) -> bool:
     try:
-        return path.is_file() and expected_digest == (
-            f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}"
+        content = read_confined_file(
+            root,
+            path,
+            max_bytes=MAX_EVENT_BYTES,
+            what="owned shadow wrapper",
         )
-    except OSError:
+        return expected_digest == f"sha256:{hashlib.sha256(content).hexdigest()}"
+    except (OSError, ContractViolation):
         return False
 
 
@@ -193,13 +202,19 @@ def _host_paths_safe(home: Path, host: Host) -> bool:
 
 
 def _hook_state(
-    path: Path, host: Host, owned_command: str | None, wrapper_digest: str | None
+    path: Path,
+    host: Host,
+    owned_command: str | None,
+    wrapper_digest: str | None,
+    home: Path,
+    store: Path,
 ) -> dict[str, object]:
     if not path.is_file():
         return {"configuration_present": False, "events": [], "runtime_present": None}
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raw = read_confined_file(home, path, max_bytes=MAX_EVENT_BYTES, what="host hook settings")
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError):
         return {
             "configuration_present": True,
             "configuration_valid": False,
@@ -238,7 +253,7 @@ def _hook_state(
             _, wrapper = parsed
             events.add(event)
             runtime_states.append(True)
-            wrapper_states.append(_wrapper_matches(wrapper, wrapper_digest))
+            wrapper_states.append(_wrapper_matches(store, wrapper, wrapper_digest))
     runtime_present = all(runtime_states) if runtime_states else None
     wrapper_present = all(wrapper_states) if wrapper_states else None
     return {
@@ -287,8 +302,12 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
         try:
             if not _entry_kind_safe(path, directory=False):
                 return {"unsafe_event_store": True}
-            with path.open("rb") as handle:
-                raw = handle.read(MAX_EVENT_BYTES + 1)
+            raw = read_confined_file(
+                store,
+                path,
+                max_bytes=MAX_EVENT_BYTES + 1,
+                what="shadow event record",
+            )
             if len(raw) > MAX_EVENT_BYTES:
                 invalid += 1
                 continue
@@ -298,6 +317,8 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
                     ValueError(f"non-finite JSON constant {value}")
                 ),
             )
+        except ContractViolation:
+            return {"unsafe_event_store": True}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             invalid += 1
             continue
@@ -406,11 +427,11 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
             paths_safe = False
         else:
             _, wrapper = parsed
-            paths_safe = _lexically_within(home, wrapper) and _regular_file_safe_or_absent(wrapper)
+            paths_safe = _lexically_within(store, wrapper) and _regular_file_safe_or_absent(wrapper)
         if not paths_safe:
             ownership_valid = False
     settings = (
-        _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest)
+        _hook_state(_host_settings(home, host), host, owned_command, wrapper_digest, home, store)
         if paths_safe
         else {
             "configuration_present": False,
@@ -446,8 +467,14 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
     if not config_path.is_file():
         return base
     try:
-        config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raw_config = read_confined_file(
+            store,
+            config_path,
+            max_bytes=MAX_EVENT_BYTES,
+            what="shadow host configuration",
+        )
+        config = load_shadow_config(json.loads(raw_config.decode("utf-8")))
+    except (OSError, ContractViolation, UnicodeDecodeError, json.JSONDecodeError, ValueError):
         base["status"] = "SHADOW_CONFIGURATION_INVALID"
         return base
     if not config.enabled:

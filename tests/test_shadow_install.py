@@ -12,6 +12,8 @@ import pytest
 
 import latent_compass.shadow_harness as shadow_harness
 import latent_compass.shadow_install as shadow_install
+from latent_compass.confined_io import read_confined_file as confined_read
+from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _assert_plan_inputs,
@@ -23,6 +25,7 @@ from latent_compass.shadow_install import (
     _command,
     _command_references_wrapper,
     _default_project_alias,
+    _exclusive_json,
     _merged_host_config,
     _packaged_hook_text,
     _path_entry_exists,
@@ -506,6 +509,29 @@ def test_backup_failure_retains_exclusively_created_orphan(
     assert destination.read_bytes() == b"source"
 
 
+def test_backup_source_swap_to_symlink_is_refused_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "hooks.json"
+    source.write_bytes(b"source")
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"outside")
+    real_reader = confined_read
+
+    def swap_then_read(root: Path, target: Path, *, max_bytes: int, what: str) -> bytes:
+        source.unlink()
+        source.symlink_to(outside)
+        return real_reader(root, target, max_bytes=max_bytes, what=what)
+
+    monkeypatch.setattr(shadow_install, "read_confined_file", swap_then_read)
+
+    with pytest.raises(ContractViolation):
+        _backup(source, "race", home=tmp_path)
+
+    assert source.is_symlink()
+    assert outside.read_bytes() == b"outside"
+
+
 def test_atomic_write_ignores_predictable_symlink_trap(tmp_path: Path) -> None:
     target = tmp_path / "ownership.json"
     outside = tmp_path / "outside.txt"
@@ -855,6 +881,74 @@ def test_install_rolls_back_all_files_when_late_atomic_write_fails(
     assert backup.read_bytes() == before
 
 
+def test_concurrent_pending_journal_is_never_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    real_exclusive = _exclusive_json
+    rival = {
+        "schema_version": 1,
+        "operation": "install",
+        "backup_tag": "rival",
+        "entries": [
+            {
+                "path": str(home / ".codex" / "hooks.json"),
+                "before_sha256": "sha256:" + "1" * 64,
+                "after_sha256": "sha256:" + "2" * 64,
+                "backup_path": str(home / ".codex" / "hooks.json.bak-latent-compass-rival"),
+            }
+        ],
+    }
+    injected = False
+
+    def race_journal(path: Path, payload: object) -> None:
+        nonlocal injected
+        if not injected:
+            injected = True
+            real_exclusive(path, rival)
+        real_exclusive(path, payload)
+
+    monkeypatch.setattr(shadow_install, "_exclusive_json", race_journal)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="ours",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    journal = home / ".latent-compass-shadow.pending.json"
+    assert conflicts[0]["code"] == "apply_failed"
+    assert json.loads(journal.read_text(encoding="utf-8")) == rival
+
+
+def test_pending_journal_is_complete_before_exclusive_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / ".latent-compass-shadow.pending.json"
+    original_link = os.link
+
+    def interrupt_before_link(source: Path, destination: Path) -> None:
+        assert json.loads(source.read_text(encoding="utf-8")) == {"operation": "install"}
+        assert not destination.exists()
+        raise OSError("interrupted before journal publication")
+
+    monkeypatch.setattr(os, "link", interrupt_before_link)
+    with pytest.raises(OSError, match="interrupted before journal publication"):
+        _exclusive_json(path, {"operation": "install"})
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+    monkeypatch.setattr(os, "link", original_link)
+    _exclusive_json(path, {"operation": "install"})
+    assert json.loads(path.read_text(encoding="utf-8")) == {"operation": "install"}
+
+
 def test_remove_rolls_back_all_files_when_late_backup_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -876,10 +970,10 @@ def test_remove_rolls_back_all_files_when_late_backup_fails(
     before = {path: path.read_bytes() for path in paths}
     real_backup = _backup
 
-    def fail_on_config(path: Path, tag: str) -> Path:
+    def fail_on_config(path: Path, tag: str, *, home: Path | None = None) -> Path:
         if path.name == "config.json":
             raise OSError("injected config backup failure")
-        return real_backup(path, tag)
+        return real_backup(path, tag, home=home)
 
     monkeypatch.setattr(shadow_install, "_backup", fail_on_config)
 

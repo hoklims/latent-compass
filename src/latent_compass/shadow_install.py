@@ -19,6 +19,7 @@ from typing import Final, TextIO, cast
 
 from latent_compass import __version__
 from latent_compass.canonical import canonical_text, seal
+from latent_compass.confined_io import read_confined_file
 from latent_compass.shadow_harness import ShadowHarnessConfig, load_shadow_config
 from latent_compass.shadow_status import Host, inspect_hosts, render_text
 
@@ -76,6 +77,7 @@ _HOOK_EVENTS: Final = {
 }
 _OWNERSHIP_NAME: Final = "ownership.json"
 _PENDING_TRANSACTION_NAME: Final = ".latent-compass-shadow.pending.json"
+_MAX_TRANSACTION_FILE_BYTES: Final = 8 * 1_048_576
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -94,6 +96,30 @@ def _read_json(path: Path) -> dict[str, object]:
 def _atomic_json(path: Path, payload: object) -> None:
     content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     _atomic_bytes(path, content)
+
+
+def _exclusive_json(path: Path, payload: object) -> None:
+    content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Hard-link publication is atomic and exclusive on supported local filesystems.
+        # A crash before this point leaves no partial recovery journal at its final path.
+        os.link(temporary, path)
+    finally:
+        if temporary is not None and _path_entry_exists(temporary):
+            temporary.unlink()
 
 
 def _atomic_text(path: Path, content: str) -> None:
@@ -261,7 +287,7 @@ def _begin_transaction(
     }
     path = _pending_transaction_path(home)
     _assert_safe_path_under(home, path)
-    _atomic_json(path, journal)
+    _exclusive_json(path, journal)
     return path
 
 
@@ -493,14 +519,17 @@ def _pending_recovery_description(home: Path) -> dict[str, object]:
     }
 
 
-def _backup(path: Path, tag: str) -> Path:
+def _backup(path: Path, tag: str, *, home: Path | None = None) -> Path:
     destination = _backup_destination(path, tag)
     if _path_entry_exists(destination):
         raise FileExistsError(f"refusing to overwrite backup {destination.name}")
-    source_stat = path.lstat()
-    if not stat.S_ISREG(source_stat.st_mode) or _is_reparse_point(source_stat):
-        raise OSError(f"refusing to back up non-regular file {path}")
-    content = path.read_bytes()
+    root = home if home is not None else path.parent
+    content = read_confined_file(
+        root,
+        path,
+        max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+        what="host transaction backup source",
+    )
     descriptor: int | None = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -1229,7 +1258,7 @@ def install_shadow_hooks(
                     _assert_safe_path_under(home, _backup_destination(wrapper_path, backup_tag))
                     _assert_snapshot(wrapper_path, snapshots[wrapper_path])
                     if wrapper_path.is_file():
-                        _backup(wrapper_path, backup_tag)
+                        _backup(wrapper_path, backup_tag, home=home)
                     _atomic_text(wrapper_path, wrapper_text)
                     written[wrapper_path] = wrapper_path.read_bytes()
             ownership_path = config_path.with_name(_OWNERSHIP_NAME)
@@ -1245,7 +1274,7 @@ def install_shadow_hooks(
                 _assert_safe_path_under(home, _backup_destination(path, backup_tag))
                 _assert_snapshot(path, snapshots[path])
                 if path.is_file():
-                    _backup(path, backup_tag)
+                    _backup(path, backup_tag, home=home)
                 _atomic_json(path, proposed)
                 written[path] = path.read_bytes()
     except (OSError, ValueError) as exc:
@@ -1469,7 +1498,7 @@ def remove_shadow_hooks(
             _assert_safe_path_under(home, _backup_destination(path, backup_tag))
             _assert_snapshot(path, snapshots[path])
             if path.is_file():
-                _backup(path, backup_tag)
+                _backup(path, backup_tag, home=home)
             if payload is None:
                 if _path_entry_exists(path):
                     _regular_file_bytes_or_none(path)
