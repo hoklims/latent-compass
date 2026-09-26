@@ -212,22 +212,15 @@ def _transaction_snapshot(home: Path, plan: dict[str, object]) -> dict[Path, byt
         if item["action"] == "unchanged":
             continue
         path = Path(str(item["path"]))
-        snapshots[path] = _regular_file_bytes_or_none(path, home=home)
+        current = _regular_file_bytes_or_none(path, home=home)
+        if _bytes_digest(current) != item.get("before_sha256"):
+            raise ValueError(f"concurrent change detected for {path}")
+        snapshots[path] = current
     return snapshots
 
 
 def _bytes_digest(content: bytes | None) -> str | None:
     return None if content is None else f"sha256:{hashlib.sha256(content).hexdigest()}"
-
-
-def _assert_plan_inputs(home: Path, plan: dict[str, object]) -> None:
-    for item in cast(list[dict[str, object]], plan["files"]):
-        if item["action"] == "unchanged":
-            continue
-        path = Path(str(item["path"]))
-        current = _regular_file_bytes_or_none(path, home=home)
-        if _bytes_digest(current) != item.get("before_sha256"):
-            raise ValueError(f"concurrent change detected for {path}")
 
 
 def _assert_snapshot(home: Path, path: Path, expected: bytes | None) -> None:
@@ -535,7 +528,7 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                         ]
                     _atomic_bytes(path, backup_content, home=home, expected=current)
         return _complete_transaction_journal(home, journal_path, journal_raw)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RecursionError) as exc:
         return [
             {
                 "code": "pending_transaction_invalid",
@@ -603,6 +596,7 @@ def _pending_recovery_description(home: Path) -> dict[str, object]:
         ValueError,
         KeyError,
         TypeError,
+        RecursionError,
     ) as exc:
         return {
             "pending": True,
@@ -1350,7 +1344,7 @@ def install_shadow_hooks(
         plan["dry_run"] = False
         return plan
     try:
-        _assert_plan_inputs(home, plan)
+        snapshots = _transaction_snapshot(home, plan)
     except (OSError, ValueError) as exc:
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "concurrent_change", "path": "", "detail": str(exc)}
@@ -1364,7 +1358,6 @@ def install_shadow_hooks(
             home=home, project_root=project_root, hosts=hosts, dry_run=False
         )["states"]
         return plan
-    snapshots = _transaction_snapshot(home, plan)
     written: dict[Path, bytes | None] = {}
     payloads = cast(dict[str, dict[str, object]], plan.pop("_payloads"))
     journal_path: Path | None = None
@@ -1610,7 +1603,7 @@ def remove_shadow_hooks(
         plan["dry_run"] = False
         return plan
     try:
-        _assert_plan_inputs(home, plan)
+        snapshots = _transaction_snapshot(home, plan)
     except (OSError, ValueError) as exc:
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "concurrent_change", "path": "", "detail": str(exc)}
@@ -1621,7 +1614,6 @@ def remove_shadow_hooks(
         plan.pop("_payloads", None)
         plan["dry_run"] = False
         return plan
-    snapshots = _transaction_snapshot(home, plan)
     written: dict[Path, bytes | None] = {}
     payloads = cast(dict[str, dict[str, object] | None], plan.pop("_payloads"))
     journal_path: Path | None = None
@@ -1750,7 +1742,11 @@ def host_status(
             "configured": bool(snapshot["project_registered"]),
             "loaded": "UNKNOWN",
             "approved": snapshot["hook_trust"],
-            "observed": bool(snapshot["event_count"]),
+            "observed": (
+                "UNKNOWN"
+                if snapshot["status"] == "OBSERVATION_UNKNOWN"
+                else bool(snapshot["event_count"])
+            ),
         }
         for snapshot in snapshots
     }

@@ -326,7 +326,9 @@ Pour chaque hôte Codex ou Claude, elle indique si les trois hooks sont présent
 si le projet courant est enregistré, combien d’événements et de sessions
 minimisés ont été observés, la dernière observation et les comptes `ADVICE` et
 `ABSTAIN`. `OBSERVING` signifie que des traces existent, pas que l’hôte a suivi
-l’avis. La confiance du hook reste `UNKNOWN` jusqu’à sa revue dans l’hôte. Le
+l’avis. Sous Windows, un répertoire d’événements existant produit
+`OBSERVATION_UNKNOWN` et des métriques dérivées à `null`, car cette version ne
+l’énumère pas sans API liée à un handle. La confiance du hook reste `UNKNOWN` jusqu’à sa revue dans l’hôte. Le
 pied de sortie rappelle toujours que Latent Compass n’a aucune autorité
 d’exécution, n’a pas influencé le routage et n’a enregistré aucun contenu.
 

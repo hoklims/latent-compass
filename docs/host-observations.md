@@ -245,8 +245,11 @@ without being displayed. It never launches Git, a model, a network request or
 an operational recommendation. Its
 states are `NOT_CONFIGURED`, `HOST_CONFIGURATION_INVALID`,
 `SHADOW_CONFIGURATION_INVALID`, `DISABLED`, `PROJECT_NOT_REGISTERED`,
-`HOOKS_MISSING`, `RUNTIME_MISSING`, `NO_OBSERVATIONS`, `OBSERVING` and
-`DEGRADED`. A truncated scan is explicitly `DEGRADED`; its counts are partial.
+`HOOKS_MISSING`, `RUNTIME_MISSING`, `NO_OBSERVATIONS`, `OBSERVATION_UNKNOWN`,
+`OBSERVING` and `DEGRADED`. Windows reports `OBSERVATION_UNKNOWN` when an event
+directory exists because this release has no handle-bound Windows directory
+enumerator; all derived observation metrics are `null`, never zero or false.
+A truncated scan is explicitly `DEGRADED`; its counts are partial.
 Trust is reported
 as `UNKNOWN` because filesystem inspection cannot replace the host's own trust
 review.

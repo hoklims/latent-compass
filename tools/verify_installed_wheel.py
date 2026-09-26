@@ -119,7 +119,20 @@ def main() -> int:
         assert all(
             state["installed"] and state["configured"] for state in status["states"].values()
         )
-        assert all(state["observed"] for state in status["states"].values())
+        if sys.platform == "win32":
+            assert all(state["observed"] == "UNKNOWN" for state in status["states"].values())
+            assert all(snapshot["status"] == "OBSERVATION_UNKNOWN" for snapshot in status["hosts"])
+            for snapshot in status["hosts"]:
+                assert snapshot["event_count"] is None
+                assert snapshot["session_count"] is None
+                assert snapshot["verdicts"] is None
+                assert snapshot["last_observed_at"] is None
+                assert snapshot["invalid_event_count"] is None
+                assert snapshot["truncated"] is None
+        else:
+            assert all(state["observed"] is True for state in status["states"].values())
+            assert all(snapshot["status"] == "OBSERVING" for snapshot in status["hosts"])
+            assert all(snapshot["event_count"] == 1 for snapshot in status["hosts"])
         removed = json.loads(
             _run(
                 [

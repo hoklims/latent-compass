@@ -297,7 +297,14 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
             max_entries=MAX_EVENT_FILES,
             what="shadow event directory",
         )
-    except (OSError, ContractViolation):
+    except ContractViolation as exc:
+        if (
+            isinstance(exc.detail, dict)
+            and exc.detail.get("reason") == "windows_handle_bound_enumeration_unavailable"
+        ):
+            return {"observation_unknown": True}
+        return {"unsafe_event_store": True}
+    except OSError:
         return {"unsafe_event_store": True}
     verdicts: Counter[str] = Counter()
     sessions: set[str] = set()
@@ -478,6 +485,19 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
     if summary.get("unsafe_event_store") is True:
         base["status"] = "HOST_CONFIGURATION_INVALID"
         return base
+    if summary.get("observation_unknown") is True:
+        base.update(
+            {
+                "event_count": None,
+                "session_count": None,
+                "verdicts": None,
+                "last_observed_at": None,
+                "invalid_event_count": None,
+                "truncated": None,
+            }
+        )
+        base["status"] = "OBSERVATION_UNKNOWN"
+        return base
     base.update(summary)
     base["status"] = "OBSERVING" if base["event_count"] else "NO_OBSERVATIONS"
     if base["invalid_event_count"]:
@@ -509,13 +529,25 @@ def render_text(report: dict[str, object]) -> str:
     for snapshot in hosts:
         assert isinstance(snapshot, dict)
         verdicts = snapshot["verdicts"]
-        assert isinstance(verdicts, dict)
-        counts = ", ".join(f"{name} {count}" for name, count in verdicts.items()) or "none"
+        counts = (
+            "unknown"
+            if verdicts is None
+            else ", ".join(f"{name} {count}" for name, count in verdicts.items()) or "none"
+            if isinstance(verdicts, dict)
+            else "unknown"
+        )
+        events = "unknown" if snapshot["event_count"] is None else snapshot["event_count"]
+        sessions = "unknown" if snapshot["session_count"] is None else snapshot["session_count"]
+        last = (
+            "unknown"
+            if snapshot["status"] == "OBSERVATION_UNKNOWN"
+            else snapshot["last_observed_at"] or "never"
+        )
         lines.append(
             f"{str(snapshot['host']).title()}: {snapshot['status']} · "
-            f"hooks {snapshot['hooks_present']}/3 · events {snapshot['event_count']} · "
-            f"sessions {snapshot['session_count']} · "
-            f"last {snapshot['last_observed_at'] or 'never'} · "
+            f"hooks {snapshot['hooks_present']}/3 · events {events} · "
+            f"sessions {sessions} · "
+            f"last {last} · "
             f"verdicts {counts}"
         )
         if snapshot["hook_trust"] == "UNKNOWN":

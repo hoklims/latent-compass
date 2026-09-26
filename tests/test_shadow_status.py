@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from io import StringIO
 from pathlib import Path
 from typing import cast
 
 import pytest
 
+import latent_compass.confined_io as confined_io
 import latent_compass.shadow_status as shadow_status
 from latent_compass.canonical import seal
 from latent_compass.confined_io import list_confined_json_files as confined_list
@@ -18,6 +20,19 @@ from latent_compass.shadow_status import Host, inspect_host, main, render_text
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8", newline="\n")
+
+
+def _windows_observation_is_unknown(report: dict[str, object]) -> bool:
+    if sys.platform != "win32":
+        return False
+    assert report["status"] == "OBSERVATION_UNKNOWN"
+    assert report["event_count"] is None
+    assert report["session_count"] is None
+    assert report["verdicts"] is None
+    assert report["last_observed_at"] is None
+    assert report["invalid_event_count"] is None
+    assert report["truncated"] is None
+    return True
 
 
 def _install_fixture(
@@ -144,6 +159,8 @@ def test_status_reports_registered_project_and_sanitised_counts(tmp_path: Path) 
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "OBSERVING"
     assert report["hooks_present"] == 3
     assert report["runtime_present"] is True
@@ -220,6 +237,8 @@ def test_invalid_event_degrades_without_exposing_its_content(tmp_path: Path) -> 
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "DEGRADED"
     assert report["invalid_event_count"] == 1
     assert "SECRET" not in json.dumps(report)
@@ -234,6 +253,8 @@ def test_sensitive_value_in_consumed_field_is_rejected_not_displayed(tmp_path: P
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "DEGRADED"
     assert report["event_count"] == 0
     assert "SECRET" not in render_text({"project_root": str(project), "hosts": [report]})
@@ -248,6 +269,8 @@ def test_impossible_timestamp_is_rejected(tmp_path: Path) -> None:
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "DEGRADED"
     assert report["event_count"] == 0
 
@@ -421,6 +444,8 @@ def test_configuration_and_records_are_bound_to_the_reported_host(tmp_path: Path
     record["record_seal"] = seal("shadow.harness.record.v1", unsigned)
     _write_json(event, record)
     report = inspect_host(home=home, host="codex", project_root=project)
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "DEGRADED"
     assert report["event_count"] == 0
 
@@ -436,6 +461,8 @@ def test_oversized_event_is_bounded_and_degrades(tmp_path: Path) -> None:
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "DEGRADED"
     assert report["invalid_event_count"] == 1
 
@@ -455,6 +482,8 @@ def test_total_discovery_is_bounded_and_marked_partial(
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "DEGRADED"
     assert report["truncated"] is True
 
@@ -600,6 +629,8 @@ def test_status_refuses_linked_event_tree_entries(tmp_path: Path, surface: str) 
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if surface == "event-file" and _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["event_count"] == 0
 
@@ -631,6 +662,10 @@ def test_status_refuses_event_file_swapped_to_symlink_before_open(
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        assert injected is False
+        assert outside.read_bytes() == before
+        return
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["event_count"] == 0
     assert outside.read_bytes() == before
@@ -671,6 +706,10 @@ def test_status_refuses_alias_swapped_to_symlink_before_enumeration(
     monkeypatch.setattr(shadow_status, "list_confined_json_files", swap_then_list)
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        assert marker.read_bytes() == marker_before
+        assert injected is True
+        return
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["event_count"] == 0
     assert marker.read_bytes() == marker_before
@@ -688,5 +727,32 @@ def test_status_reports_excessive_event_directory_depth_as_invalid(tmp_path: Pat
 
     report = inspect_host(home=home, host="codex", project_root=project)
 
+    if _windows_observation_is_unknown(report):
+        return
     assert report["status"] == "HOST_CONFIGURATION_INVALID"
     assert report["event_count"] == 0
+
+
+def test_windows_status_reports_unknown_without_enumerating_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+
+    def unexpected_enumeration(*_args: object, **_kwargs: object) -> tuple[list[Path], bool]:
+        raise AssertionError("Windows status must not use path-based event enumeration")
+
+    monkeypatch.setattr("latent_compass.confined_io._is_windows_runtime", lambda: True)
+    monkeypatch.setattr(confined_io, "_list_posix_json", unexpected_enumeration)
+    report = inspect_host(home=home, host="codex", project_root=project)
+
+    assert report["status"] == "OBSERVATION_UNKNOWN"
+    assert report["event_count"] is None
+    assert report["session_count"] is None
+    assert report["verdicts"] is None
+    assert report["last_observed_at"] is None
+    assert report["invalid_event_count"] is None
+    assert report["truncated"] is None

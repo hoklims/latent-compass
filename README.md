@@ -292,7 +292,9 @@ whether the current project is registered, how many privacy-minimised events
 and sessions were observed, the latest observation time, and the counts of
 `ADVICE` and `ABSTAIN` records. `OBSERVING` means records exist; it does not mean
 the host followed the advice. Hook trust remains `UNKNOWN` until reviewed in the
-host itself. The footer always restates that Latent Compass has no execution
+host itself. On Windows, an existing event directory is reported as
+`OBSERVATION_UNKNOWN` with `null` derived metrics because this release does not
+enumerate it without a handle-bound directory API. The footer always restates that Latent Compass has no execution
 authority, did not influence host routing and recorded no content.
 
 ## Independent proof status

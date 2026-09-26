@@ -20,7 +20,6 @@ from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
     _EXPECTED_UNSET,
-    _assert_plan_inputs,
     _assert_snapshot,
     _atomic_json,
     _atomic_text,
@@ -34,6 +33,7 @@ from latent_compass.shadow_install import (
     _merged_host_config,
     _packaged_hook_text,
     _path_entry_exists,
+    _recover_pending_transaction,
     _regular_file_bytes_or_none,
     _remove_confined,
     _transaction_snapshot,
@@ -1539,13 +1539,15 @@ def test_install_refuses_concurrent_foreign_hook_before_first_write(
             ]
         }
     }
-    real_assert = _assert_plan_inputs
+    real_snapshot = _transaction_snapshot
 
-    def inject_then_validate(selected_home: Path, plan: dict[str, object]) -> None:
+    def inject_then_validate(
+        selected_home: Path, plan: dict[str, object]
+    ) -> dict[Path, bytes | None]:
         _write(hooks, concurrent)
-        real_assert(selected_home, plan)
+        return real_snapshot(selected_home, plan)
 
-    monkeypatch.setattr(shadow_install, "_assert_plan_inputs", inject_then_validate)
+    monkeypatch.setattr(shadow_install, "_transaction_snapshot", inject_then_validate)
 
     result = install_shadow_hooks(
         home=home,
@@ -2064,6 +2066,23 @@ def test_malformed_journal_returns_json_conflict_for_every_operation(
         assert code == 3
         assert report["conflicts"][0]["code"] == "pending_transaction_invalid"
         assert journal.read_text(encoding="utf-8") == raw
+
+
+def test_deeply_nested_journal_returns_structured_invalid_conflict(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    journal = home / ".latent-compass-shadow.pending.json"
+    raw = "[" * 10_000 + "]" * 10_000
+    journal.write_text(raw, encoding="utf-8")
+    before = journal.read_bytes()
+
+    preview = plan_recover_shadow_hooks(home=home)
+    apply_conflicts = _recover_pending_transaction(home)
+
+    preview_conflicts = cast(list[dict[str, object]], preview["conflicts"])
+    assert preview_conflicts[0]["code"] == "pending_transaction_invalid"
+    assert apply_conflicts[0]["code"] == "pending_transaction_invalid"
+    assert journal.read_bytes() == before
 
 
 def test_recovery_preview_revalidates_journal_second_read(
@@ -2614,6 +2633,38 @@ def test_status_keeps_loading_and_approval_unknown(tmp_path: Path) -> None:
         "loaded": "UNKNOWN",
         "approved": "UNKNOWN",
         "observed": False,
+    }
+
+
+def test_windows_status_keeps_installation_but_reports_observation_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="project-alpha",
+        backup_tag="status",
+        hosts=("codex",),
+    )
+    events = home / ".codex" / "latent-compass-shadow" / "events" / "project-alpha"
+    events.mkdir(parents=True)
+    monkeypatch.setattr("latent_compass.confined_io._is_windows_runtime", lambda: True)
+
+    report = host_status(home=home, project_root=project, hosts=("codex",))
+    states = cast(dict[str, dict[str, Any]], report["states"])
+
+    assert states["codex"] == {
+        "installed": True,
+        "configured": True,
+        "loaded": "UNKNOWN",
+        "approved": "UNKNOWN",
+        "observed": "UNKNOWN",
     }
 
 
