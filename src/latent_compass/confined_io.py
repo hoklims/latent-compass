@@ -3,6 +3,14 @@
 The containment decision and every filesystem mutation share directory handles.
 Path components are never followed through symlinks or Windows reparse points,
 New-file publication is exclusive and replacement is atomic.
+
+The boundary rejects links/reparse points and parent substitutions encountered
+while opening the path. On POSIX, an already-open directory descriptor remains
+valid if a local peer relocates that directory afterward; mutations through
+that descriptor then follow the relocated directory. Preventing that kernel
+semantic requires OS-specific namespace isolation and is outside this module's
+portable threat model. Do not describe these primitives as defending against a
+peer that can concurrently rename already-open profile directories.
 """
 
 from __future__ import annotations

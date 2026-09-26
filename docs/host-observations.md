@@ -211,6 +211,17 @@ state, recovery returns `pending_transaction_conflict`, preserves the file and
 its backup, and requires operator inspection. Run the original setup again
 after recovery succeeds.
 
+The installer's portable filesystem boundary rejects paths that are already
+redirected through symbolic links or Windows reparse points, and it refuses a
+parent substitution encountered while opening a path. It does not claim to
+contain a local peer that can rename an already-open profile directory during
+the operation: POSIX directory descriptors continue to address a directory
+after it has been moved. Run host installation and recovery only while other
+processes with permission to rename the selected profile directories are
+quiescent. File creation remains exclusive; updates are revalidated immediately
+before atomic replacement, with backups and the pending journal retained for
+recovery when completion is uncertain.
+
 Codex binds trust to the current hook definition. A newly installed or changed
 hook therefore remains skipped until an operator reviews it through Codex's
 hook-management interface. Direct smoke execution can verify the adapter, but
