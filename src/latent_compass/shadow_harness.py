@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -143,6 +144,8 @@ def validate_host_json_depth(payload: object) -> None:
             pending.extend((item, depth + 1) for item in value.values())
         elif isinstance(value, list):
             pending.extend((item, depth + 1) for item in value)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("host JSON numbers must be finite")
 
 
 def host_command_home_is_eligible(selected_home: Path | None, configured_home: Path) -> bool:

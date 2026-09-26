@@ -131,7 +131,10 @@ class _RecoveryObservation(TypedDict):
 
 
 def _json_bytes(payload: object) -> bytes:
-    return (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+    validate_host_json_depth(payload)
+    return (json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode(
+        "utf-8"
+    )
 
 
 def _file_operation(path: Path, before: bytes | None, after: bytes | None) -> _FileOperation:

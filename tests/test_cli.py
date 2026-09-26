@@ -583,6 +583,42 @@ def test_windows_lease_keeps_original_until_publish_boundary(
 
 
 @pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_replace_revalidates_after_staging_before_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    target.write_bytes(b"before")
+    lease = lease_confined_file(root, target, max_bytes=1024, what="test journal")
+    real_assert = confined_io.ConfinedFileLease.assert_current
+    checks = 0
+
+    def refuse_final_check(held: confined_io.ConfinedFileLease) -> None:
+        nonlocal checks
+        checks += 1
+        real_assert(held)
+        if checks == 2:
+            raise ContractViolation("injected final revalidation refusal")
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(confined_io.ConfinedFileLease, "assert_current", refuse_final_check)
+            with pytest.raises(ContractViolation, match="final revalidation"):
+                lease.replace(b"after")
+        assert checks == 2
+        lease.assert_current()
+        assert lease.content == b"before"
+        lease.replace(b"after")
+        assert lease.content == b"after"
+    finally:
+        lease.close()
+    assert target.read_bytes() == b"after"
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
 def test_windows_lease_marks_post_publication_failure_uncertain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

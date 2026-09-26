@@ -1781,6 +1781,7 @@ if sys.platform == "win32":
 
         def release_original() -> None:
             nonlocal original_released
+            lease.assert_current()
             if lease._file_handle is not None:
                 _kernel32.CloseHandle(lease._file_handle)
                 lease._file_handle = None

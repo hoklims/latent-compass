@@ -2079,6 +2079,64 @@ def test_serialization_depth_refusal_closes_planning_leases_with_valid_control(
     assert accepted["conflicts"] == []
 
 
+@pytest.mark.parametrize(
+    ("literal", "value"),
+    [("NaN", float("nan")), ("Infinity", float("inf")), ("-Infinity", float("-inf"))],
+)
+def test_nonfinite_host_json_is_refused_in_parse_serialize_and_status(
+    tmp_path: Path, literal: str, value: float
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    raw = '{"hooks":{"PreToolUse":[]},"foreign_number":' + literal + "}"
+    hooks.write_text(raw, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="numbers must be finite"):
+        _json_bytes({"foreign_number": value})
+    refused = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="nonfinite",
+        hosts=("codex",),
+    )
+    conflicts = cast(list[dict[str, object]], refused["conflicts"])
+    assert conflicts[0]["code"] == "configuration_collision"
+    assert "numbers must be finite" in str(conflicts[0]["detail"])
+    assert not (home / ".latent-compass-shadow.pending.json").exists()
+    status = host_status(home=home, project_root=project, hosts=("codex",))
+    snapshots = cast(list[dict[str, object]], status["hosts"])
+    assert snapshots[0]["status"] == "HOST_CONFIGURATION_INVALID"
+    peer = tmp_path / "peer-hooks.json"
+    peer.write_text(raw, encoding="utf-8")
+    peer.replace(hooks)
+    assert hooks.read_text(encoding="utf-8") == raw
+
+
+def test_finite_host_json_number_remains_supported(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    finite = 1.7976931348623157e308
+    raw = _json_bytes({"hooks": {"PreToolUse": []}, "foreign_number": finite})
+    hooks.write_bytes(raw)
+
+    accepted = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="finite",
+        hosts=("codex",),
+    )
+
+    assert accepted["conflicts"] == []
+
+
 def test_install_revalidates_custom_hook_script_dependency_before_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
