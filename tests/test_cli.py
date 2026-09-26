@@ -561,9 +561,10 @@ def test_windows_lease_keeps_original_until_publish_boundary(
         *,
         replace: bool,
         before_publish: object = None,
-    ) -> None:
+        retain_published_handle: bool = False,
+    ) -> int | None:
         nonlocal reached
-        del lease, data, replace, before_publish
+        del lease, data, replace, before_publish, retain_published_handle
         reached = True
         with pytest.raises(PermissionError):
             peer.replace(target)
@@ -600,13 +601,15 @@ def test_windows_lease_marks_post_publication_failure_uncertain(
         *,
         replace: bool,
         before_publish: Callable[[], None] | None = None,
-    ) -> None:
+        retain_published_handle: bool = False,
+    ) -> int | None:
         nonlocal published
         real_writer(
             lease,
             data,
             replace=replace,
             before_publish=before_publish,
+            retain_published_handle=False,
         )
         published = True
         raise OSError("injected failure after publication")
@@ -627,6 +630,54 @@ def test_windows_lease_marks_post_publication_failure_uncertain(
         }
     finally:
         lease.close()
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="native Windows handle semantics")
+def test_windows_lease_retains_created_handle_until_safe_delete(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "journal.json"
+    lease = lease_confined_file(
+        root,
+        target,
+        max_bytes=1024,
+        what="test journal",
+        allow_absent=True,
+    )
+    try:
+        lease.replace(b"owned")
+        assert lease.identity is not None
+        peer = root / "peer.json"
+        peer.write_bytes(b"owned")
+        replacement_blocked = False
+        try:
+            peer.replace(target)
+        except PermissionError:
+            replacement_blocked = True
+        if replacement_blocked:
+            lease.assert_current()
+            lease.remove()
+            assert not target.exists()
+            assert peer.read_bytes() == b"owned"
+        else:
+            with pytest.raises(ContractViolation, match="identity changed"):
+                lease.remove()
+            assert target.read_bytes() == b"owned"
+    finally:
+        lease.close()
+
+    owned = root / "owned.json"
+    with lease_confined_file(
+        root,
+        owned,
+        max_bytes=1024,
+        what="owned target",
+        allow_absent=True,
+    ) as owned_lease:
+        owned_lease.replace(b"owned")
+        owned_lease.assert_current()
+        owned_lease.remove()
+    assert not owned.exists()
 
 
 def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:

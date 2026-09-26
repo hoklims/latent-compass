@@ -31,6 +31,7 @@ from latent_compass.confined_io import (
 from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import (
     ShadowHarnessConfig,
+    host_command_home_is_eligible,
     load_shadow_config,
     validate_host_json_depth,
 )
@@ -1475,12 +1476,7 @@ def _owned_command_bound_to_home(command: str, host: Host, home: Path | None) ->
     parsed = _parse_owned_command(command, host)
     if parsed is None:
         return False
-    selected_home = parsed[2]
-    return (
-        selected_home is not None
-        and selected_home.is_absolute()
-        and _lexical_absolute(selected_home) == _lexical_absolute(home)
-    )
+    return host_command_home_is_eligible(parsed[2], home)
 
 
 def _without_shadow_groups(

@@ -44,6 +44,7 @@ __all__ = [
     "SHADOW_HARNESS_CONTRACT_VERSION",
     "ShadowHarnessConfig",
     "default_store_root",
+    "host_command_home_is_eligible",
     "load_shadow_config",
     "main",
     "process_hook_event",
@@ -142,6 +143,19 @@ def validate_host_json_depth(payload: object) -> None:
             pending.extend((item, depth + 1) for item in value.values())
         elif isinstance(value, list):
             pending.extend((item, depth + 1) for item in value)
+
+
+def host_command_home_is_eligible(selected_home: Path | None, configured_home: Path) -> bool:
+    """Accept implicit home only for the process default; bind explicit homes exactly."""
+    expected = Path(os.path.abspath(configured_home))  # noqa: PTH100 - do not follow links
+    if selected_home is None:
+        default = Path(os.path.abspath(Path.home()))  # noqa: PTH100 - do not follow links
+        return expected == default
+    return (
+        selected_home.is_absolute()
+        and Path(os.path.abspath(selected_home))  # noqa: PTH100 - do not follow links
+        == expected
+    )
 
 
 def default_store_root(host: Literal["codex", "claude"], home: Path | None = None) -> Path:

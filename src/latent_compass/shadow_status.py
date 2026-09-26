@@ -26,6 +26,7 @@ from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import (
     DEFAULT_CONFIG_NAME,
     ShadowProject,
+    host_command_home_is_eligible,
     load_shadow_config,
     validate_host_json_depth,
 )
@@ -141,17 +142,7 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
         and isinstance(payload.get("wrapper_digest"), str)
         and re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is not None
         and (parsed := _parse_hook_command(str(payload.get("command")), host)) is not None
-        and (
-            (
-                parsed[2] is None
-                and _lexical_absolute(store.parents[1]) == _lexical_absolute(Path.home())
-            )
-            or (
-                parsed[2] is not None
-                and parsed[2].is_absolute()
-                and _lexical_absolute(parsed[2]) == _lexical_absolute(store.parents[1])
-            )
-        )
+        and host_command_home_is_eligible(parsed[2], store.parents[1])
     )
     return (
         (str(payload["command"]), str(payload["wrapper_digest"]), True)
@@ -473,15 +464,7 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
             paths_safe = False
         else:
             _, wrapper, selected_home = parsed
-            if (
-                selected_home is None and _lexical_absolute(home) != _lexical_absolute(Path.home())
-            ) or (
-                selected_home is not None
-                and (
-                    not selected_home.is_absolute()
-                    or _lexical_absolute(selected_home) != _lexical_absolute(home)
-                )
-            ):
+            if not host_command_home_is_eligible(selected_home, home):
                 paths_safe = False
             else:
                 paths_safe = _lexically_within(store, wrapper) and _regular_file_safe_or_absent(

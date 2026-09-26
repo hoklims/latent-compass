@@ -21,7 +21,7 @@ from latent_compass.confined_io import read_confined_file as confined_read
 from latent_compass.confined_io import replace_file as confined_replace
 from latent_compass.confined_io import write_new_file as confined_write
 from latent_compass.errors import ContractViolation
-from latent_compass.shadow_harness import load_shadow_config
+from latent_compass.shadow_harness import host_command_home_is_eligible, load_shadow_config
 from latent_compass.shadow_install import (
     _atomic_bytes,
     _atomic_text,
@@ -1963,18 +1963,23 @@ def test_windows_uncertain_journal_publication_returns_structured_rollback_confl
         *,
         replace: bool,
         before_publish: Callable[[], None] | None = None,
-    ) -> None:
+        retain_published_handle: bool = False,
+    ) -> int | None:
         nonlocal journal_publications
-        real_writer(
+        fail_after_publish = False
+        if lease.path == journal:
+            journal_publications += 1
+            fail_after_publish = journal_publications == 4
+        published_handle = real_writer(
             lease,
             data,
             replace=replace,
             before_publish=before_publish,
+            retain_published_handle=(False if fail_after_publish else retain_published_handle),
         )
-        if lease.path == journal:
-            journal_publications += 1
-            if journal_publications == 4:
-                raise OSError("injected journal failure after publication")
+        if fail_after_publish:
+            raise OSError("injected journal failure after publication")
+        return published_handle
 
     monkeypatch.setattr(confined_io, "_write_windows_at", fail_later_journal_publication)
     result = install_shadow_hooks(
@@ -2200,6 +2205,67 @@ def test_reinstall_refuses_edited_owned_custom_hook(tmp_path: Path) -> None:
     assert ownership.read_bytes() == ownership_before
     assert hooks.read_bytes() == hooks_before
     assert custom_hook.read_bytes() == b"custom-b"
+
+
+def test_legacy_implicit_home_is_consistent_for_default_home_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default_home = tmp_path / "default-home"
+    monkeypatch.setattr(Path, "home", lambda: default_home)
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = default_home / ".codex" / "hooks.json"
+    _write(settings, {"hooks": {"PreToolUse": []}})
+    installed = install_shadow_hooks(
+        home=default_home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="legacy-default",
+        backup_tag="legacy-default",
+        hosts=("codex",),
+    )
+    assert installed["conflicts"] == []
+    store = default_home / ".codex" / "latent-compass-shadow"
+    wrapper = store / "runtime" / "latent-compass-shadow-hook.py"
+    ownership_path = store / "ownership.json"
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+    previous_command = str(ownership["command"])
+    legacy_command = _command("codex", Path(sys.executable), wrapper, home=None)
+    ownership["command"] = legacy_command
+    _write(ownership_path, ownership)
+    settings_payload = json.loads(settings.read_text(encoding="utf-8"))
+    for groups in settings_payload["hooks"].values():
+        for group in groups:
+            for handler in group.get("hooks", []):
+                if handler.get("command") == previous_command:
+                    handler["command"] = legacy_command
+    _write(settings, settings_payload)
+
+    status = host_status(home=default_home, project_root=project, hosts=("codex",))
+    states = cast(dict[str, dict[str, object]], status["states"])
+    install_plan = plan_install_shadow_hooks(
+        home=default_home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        project_alias="legacy-default",
+        hosts=("codex",),
+    )
+    remove_plan = plan_remove_shadow_hooks(
+        home=default_home,
+        project_root=project,
+        project_alias="legacy-default",
+        hosts=("codex",),
+    )
+
+    assert states["codex"]["installed"] is True
+    assert states["codex"]["configured"] is True
+    assert install_plan["conflicts"] == []
+    assert remove_plan["conflicts"] == []
+    assert host_command_home_is_eligible(None, default_home) is True
+    assert host_command_home_is_eligible(None, tmp_path / "other-home") is False
+    assert host_command_home_is_eligible(Path("relative-home"), default_home) is False
+    assert host_command_home_is_eligible(default_home, default_home) is True
+    assert host_command_home_is_eligible(tmp_path / "other-home", default_home) is False
 
 
 def test_installed_relative_custom_command_uses_selected_home_from_other_cwd(

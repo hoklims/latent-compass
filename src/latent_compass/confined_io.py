@@ -990,8 +990,9 @@ if sys.platform != "win32":
         *,
         replace: bool,
         before_publish: Callable[[], None] | None = None,
-    ) -> None:
-        del lease, data, replace, before_publish
+        retain_published_handle: bool = False,
+    ) -> int | None:
+        del lease, data, replace, before_publish, retain_published_handle
         raise RuntimeError("Windows confined writes are unavailable on this platform")
 
 
@@ -1033,6 +1034,7 @@ if sys.platform == "win32":
     _FILE_ADD_SUBDIRECTORY = 0x0004
     _FILE_TRAVERSE = 0x0020
     _FILE_READ_ATTRIBUTES = 0x0080
+    _FILE_READ_DATA = 0x0001
     _FILE_WRITE_DATA = 0x0002
     _DELETE = 0x00010000
     _SYNCHRONIZE = 0x00100000
@@ -1047,14 +1049,17 @@ if sys.platform == "win32":
     _DIRECTORY_TRAVERSE_ACCESS = (
         _FILE_LIST_DIRECTORY | _FILE_TRAVERSE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
     )
-    _FILE_ACCESS = _FILE_WRITE_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE
-    _FILE_READ_DATA = 0x0001
+    _FILE_ACCESS = (
+        _FILE_READ_DATA | _FILE_WRITE_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE
+    )
     _FILE_READ_ACCESS = _FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE
     _SHARE_READ = 0x00000001
+    _SHARE_DELETE = 0x00000004
     # Denying FILE_SHARE_DELETE pins every opened directory in the namespace
     # until publication completes. An attacker cannot rename a parent out of
     # the confined root after we have validated and opened it.
     _SHARE_READ_WRITE = 0x00000001 | 0x00000002
+    _SHARE_ALL = _SHARE_READ_WRITE | _SHARE_DELETE
     _FILE_OPEN = 1
     _FILE_CREATE = 2
     _FILE_DIRECTORY_FILE = 0x00000001
@@ -1675,6 +1680,30 @@ if sys.platform == "win32":
             )
         assert lease._file_handle is not None
         assert lease.identity is not None
+        try:
+            path_handle = _nt_create_relative(
+                lease._parent_handle,
+                lease.path.name,
+                access=_FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
+                disposition=_FILE_OPEN,
+                options=_FILE_NON_DIRECTORY_FILE,
+                path=lease.path,
+                share_access=_SHARE_ALL,
+            )
+        except FileNotFoundError:
+            raise ContractViolation(
+                f"{lease.what} changed after observation",
+                detail={"what": lease.what, "path": str(lease.path), "reason": "missing"},
+            ) from None
+        try:
+            path_identity = _file_identity_windows(path_handle, lease.path)
+        finally:
+            _kernel32.CloseHandle(path_handle)
+        if path_identity != lease.identity:
+            raise ContractViolation(
+                f"{lease.what} identity changed after observation",
+                detail={"what": lease.what, "path": str(lease.path), "reason": "identity"},
+            )
         content, identity = _read_windows_lease_handle(
             lease._file_handle,
             max_bytes=lease.max_bytes,
@@ -1693,8 +1722,10 @@ if sys.platform == "win32":
         *,
         replace: bool,
         before_publish: Callable[[], None] | None = None,
-    ) -> None:
+        retain_published_handle: bool = False,
+    ) -> int | None:
         temporary: int | None = None
+        retained: int | None = None
         published = False
         temporary_name = f"{_TEMP_PREFIX}{secrets.token_hex(16)}.tmp"
         try:
@@ -1705,6 +1736,7 @@ if sys.platform == "win32":
                 disposition=_FILE_CREATE,
                 options=(_FILE_NON_DIRECTORY_FILE | (0 if replace else _FILE_DELETE_ON_CLOSE)),
                 path=lease.path.parent / temporary_name,
+                share_access=_SHARE_ALL,
             )
             if data:
                 buffer = ctypes.create_string_buffer(data)
@@ -1729,6 +1761,9 @@ if sys.platform == "win32":
             if not _kernel32.FlushFileBuffers(temporary):
                 error = ctypes.get_last_error()
                 raise OSError(error, ctypes.FormatError(error), str(lease.path))
+            if retain_published_handle:
+                retained = temporary
+                temporary = None
         except BaseException as primary:
             if temporary is not None and not published:
                 with suppress(BaseException):
@@ -1737,10 +1772,12 @@ if sys.platform == "win32":
         finally:
             if temporary is not None:
                 _kernel32.CloseHandle(temporary)
+        return retained
 
     def _lease_replace_windows(lease: ConfinedFileLease, data: bytes) -> None:
         replace = lease.exists
         original_released = False
+        published_handle: int | None = None
 
         def release_original() -> None:
             nonlocal original_released
@@ -1750,31 +1787,96 @@ if sys.platform == "win32":
             original_released = True
 
         try:
-            _write_windows_at(
+            published_handle = _write_windows_at(
                 lease,
                 data,
                 replace=replace,
                 before_publish=release_original if replace else None,
+                retain_published_handle=True,
             )
-            lease._file_handle = _nt_create_relative(
-                lease._parent_handle,
-                lease.path.name,
-                access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
-                disposition=_FILE_OPEN,
-                options=_FILE_NON_DIRECTORY_FILE,
-                path=lease.path,
-                share_access=_SHARE_READ,
-            )
-            lease.content, lease.identity = _read_windows_lease_handle(
-                lease._file_handle,
+            if published_handle is None:
+                raise ContractViolation(
+                    f"{lease.what} publication did not retain its created identity",
+                    detail={"what": lease.what, "path": str(lease.path)},
+                )
+            created_content, created_identity = _read_windows_lease_handle(
+                published_handle,
                 max_bytes=lease.max_bytes,
                 path=lease.path,
                 what=lease.what,
             )
+            if created_content != data:
+                raise ContractViolation(
+                    f"{lease.what} changed during publication",
+                    detail={"what": lease.what, "path": str(lease.path)},
+                )
+            verification_handle = _nt_create_relative(
+                lease._parent_handle,
+                lease.path.name,
+                access=_FILE_READ_ACCESS,
+                disposition=_FILE_OPEN,
+                options=_FILE_NON_DIRECTORY_FILE,
+                path=lease.path,
+                share_access=_SHARE_ALL,
+            )
+            try:
+                verification_content, verification_identity = _read_windows_lease_handle(
+                    verification_handle,
+                    max_bytes=lease.max_bytes,
+                    path=lease.path,
+                    what=lease.what,
+                )
+                if (
+                    verification_identity != created_identity
+                    or verification_content != created_content
+                ):
+                    raise ContractViolation(
+                        f"{lease.what} changed during publication",
+                        detail={"what": lease.what, "path": str(lease.path)},
+                    )
+                _kernel32.CloseHandle(published_handle)
+                published_handle = None
+                restrictive_handle: int | None = _nt_create_relative(
+                    lease._parent_handle,
+                    lease.path.name,
+                    access=_FILE_READ_DATA | _FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
+                    disposition=_FILE_OPEN,
+                    options=_FILE_NON_DIRECTORY_FILE,
+                    path=lease.path,
+                    share_access=_SHARE_READ,
+                )
+                try:
+                    assert restrictive_handle is not None
+                    restrictive_content, restrictive_identity = _read_windows_lease_handle(
+                        restrictive_handle,
+                        max_bytes=lease.max_bytes,
+                        path=lease.path,
+                        what=lease.what,
+                    )
+                    if (
+                        restrictive_identity != created_identity
+                        or restrictive_content != created_content
+                    ):
+                        raise ContractViolation(
+                            f"{lease.what} changed during publication",
+                            detail={"what": lease.what, "path": str(lease.path)},
+                        )
+                    lease._file_handle = restrictive_handle
+                    lease.content = restrictive_content
+                    lease.identity = restrictive_identity
+                    restrictive_handle = None
+                finally:
+                    if restrictive_handle is not None:
+                        _kernel32.CloseHandle(restrictive_handle)
+            finally:
+                _kernel32.CloseHandle(verification_handle)
         except BaseException:
             if not replace or original_released:
                 lease._publication_uncertain = True
             raise
+        finally:
+            if published_handle is not None:
+                _kernel32.CloseHandle(published_handle)
         lease._publication_uncertain = False
         if lease.content != data:
             raise ContractViolation(
