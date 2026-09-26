@@ -89,6 +89,10 @@ class _ExpectedUnset:
     pass
 
 
+class _DefiniteWriteRefusalError(ValueError):
+    pass
+
+
 _EXPECTED_UNSET: Final = _ExpectedUnset()
 
 
@@ -219,6 +223,8 @@ def _atomic_bytes(
                 raise ValueError(f"concurrent change detected for {path}")
             replace_file(root, path, content, what="managed host file")
     except ContractViolation as exc:
+        if expected is None:
+            raise _DefiniteWriteRefusalError(str(exc)) from exc
         raise ValueError(str(exc)) from exc
 
 
@@ -334,12 +340,12 @@ def _apply_frozen_operations(
         _assert_safe_path_under(home, _backup_destination(path, backup_tag))
         if before is not None:
             _backup(path, backup_tag, home=home, expected=before)
-        written[path] = after
         if after is None:
             assert before is not None
             _remove_confined(home, path, what="managed host file", expected=before)
         else:
             _atomic_bytes(path, after, home=home, expected=before)
+        written[path] = after
 
 
 def _pending_transaction_path(home: Path) -> Path:
@@ -807,17 +813,25 @@ def _backup_conflicts(plan: dict[str, object], tag: str) -> list[dict[str, str]]
 
 
 def _command(
-    host: Host, runtime_python: Path, hook_script: Path, *, platform: str = os.name
+    host: Host,
+    runtime_python: Path,
+    hook_script: Path,
+    *,
+    home: Path | None = None,
+    platform: str = os.name,
 ) -> str:
+    home_arguments = "" if home is None else f" --home '{str(home).replace("'", "''")}'"
     if platform == "nt" and host == "codex":
         runtime = str(runtime_python).replace("'", "''")
         wrapper = str(hook_script).replace("'", "''")
-        return f"& '{runtime}' '{wrapper}' --host codex"
+        return f"& '{runtime}' '{wrapper}' --host codex{home_arguments}"
     if platform == "nt":
-        return f'"{runtime_python.as_posix()}" "{hook_script.as_posix()}" --host {host}'
+        suffix = "" if home is None else f' --home "{home.as_posix()}"'
+        return f'"{runtime_python.as_posix()}" "{hook_script.as_posix()}" --host {host}{suffix}'
+    suffix = "" if home is None else f" --home {shlex.quote(home.as_posix())}"
     return (
         f"{shlex.quote(runtime_python.as_posix())} "
-        f"{shlex.quote(hook_script.as_posix())} --host {host}"
+        f"{shlex.quote(hook_script.as_posix())} --host {host}{suffix}"
     )
 
 
@@ -884,14 +898,20 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
 
 def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:
     if host == "codex":
-        match = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex$", command)
+        match = re.fullmatch(
+            r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
+            r"(?: --home '((?:[^']|'')+)')?$",
+            command,
+        )
         if match is not None:
             return Path(match.group(1).replace("''", "'")), Path(match.group(2).replace("''", "'"))
     try:
         arguments = shlex.split(command)
     except ValueError:
         return None
-    if len(arguments) != 4 or arguments[2:] != ["--host", host]:
+    if len(arguments) not in {4, 6} or arguments[2:4] != ["--host", host]:
+        return None
+    if len(arguments) == 6 and arguments[4] != "--home":
         return None
     return Path(arguments[0]), Path(arguments[1])
 
@@ -1284,6 +1304,8 @@ def plan_install_shadow_hooks(
     backup_tag: str | None = None,
 ) -> dict[str, object]:
     """Preflight every selected host and return the complete no-write plan."""
+    if hook_script is not None:
+        hook_script = _lexical_absolute(hook_script)
     conflicts: list[dict[str, str]] = []
     pending = _pending_transaction_path(home)
     pending_conflicts, pending_recovery, pending_raw, _pending_observations = (
@@ -1389,7 +1411,12 @@ def plan_install_shadow_hooks(
                         "content": wrapper_before,
                     }
                 )
-            command = _command(host, runtime_python, installed_hook)
+            command = _command(
+                host,
+                runtime_python,
+                installed_hook,
+                home=_lexical_absolute(home),
+            )
             owned = _ownership_from_manifest(
                 ownership_path,
                 host=host,
@@ -1559,6 +1586,15 @@ def install_shadow_hooks(
                     "detail": "current bytes changed after this transaction wrote the path",
                 }
             )
+        if (
+            isinstance(exc, _DefiniteWriteRefusalError)
+            and not unresolved
+            and journal_path is not None
+            and journal_content is not None
+        ):
+            cast(list[dict[str, str]], plan["conflicts"]).extend(
+                _complete_transaction_journal(home, journal_path, journal_content)
+            )
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
@@ -1612,6 +1648,7 @@ def plan_remove_shadow_hooks(
         }
     files: list[dict[str, object]] = []
     operations: list[_FileOperation] = []
+    observations: list[_ReadObservation] = []
     for host, (settings_path, config_path) in _target_paths(home, hosts).items():
         try:
             _validate_host_paths(
@@ -1660,6 +1697,14 @@ def plan_remove_shadow_hooks(
                     and _bytes_digest(owned_wrapper_before) != owned_digest
                 ):
                     raise ValueError("owned hook wrapper content does not match its manifest")
+                if _path_identity(owned_wrapper) != _path_identity(managed_wrapper):
+                    observations.append(
+                        {
+                            "path": owned_wrapper,
+                            "root": config_path.parent,
+                            "content": owned_wrapper_before,
+                        }
+                    )
             if config_before is not None:
                 config = load_shadow_config(json.loads(config_before.decode("utf-8")))
                 next_config = _without_project(
@@ -1730,6 +1775,7 @@ def plan_remove_shadow_hooks(
         "next_steps": [],
         "recovery": pending_recovery,
         "_operations": operations,
+        "_observations": observations,
     }
     if backup_tag is not None:
         conflicts.extend(_backup_conflicts(plan, backup_tag))
@@ -1764,10 +1810,12 @@ def remove_shadow_hooks(
         return plan
     if plan["changed"] is False:
         plan.pop("_operations", None)
+        plan.pop("_observations", None)
         plan["dry_run"] = False
         return plan
     written: dict[Path, bytes | None] = {}
     operations = cast(list[_FileOperation], plan.pop("_operations"))
+    plan.pop("_observations", None)
     journal_path: Path | None = None
     journal_content: bytes | None = None
     try:
@@ -1793,6 +1841,15 @@ def remove_shadow_hooks(
                     "path": str(path),
                     "detail": "current bytes changed after this transaction wrote the path",
                 }
+            )
+        if (
+            isinstance(exc, _DefiniteWriteRefusalError)
+            and not unresolved
+            and journal_path is not None
+            and journal_content is not None
+        ):
+            cast(list[dict[str, str]], plan["conflicts"]).extend(
+                _complete_transaction_journal(home, journal_path, journal_content)
             )
         plan["dry_run"] = False
         return plan

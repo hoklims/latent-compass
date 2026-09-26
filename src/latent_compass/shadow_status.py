@@ -78,7 +78,11 @@ _RECORD_FIELDS: Final = frozenset(
 
 def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
     if host == "codex":
-        match = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex$", command)
+        match = re.fullmatch(
+            r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
+            r"(?: --home '((?:[^']|'')+)')?$",
+            command,
+        )
         if match is not None:
             runtime = Path(match.group(1).replace("''", "'"))
             wrapper = Path(match.group(2).replace("''", "'"))
@@ -87,7 +91,9 @@ def _parse_hook_command(command: str, host: Host) -> tuple[Path, Path] | None:
         arguments = shlex.split(command)
     except ValueError:
         return None
-    if len(arguments) != 4 or arguments[2:] != ["--host", host]:
+    if len(arguments) not in {4, 6} or arguments[2:4] != ["--host", host]:
+        return None
+    if len(arguments) == 6 and arguments[4] != "--home":
         return None
     runtime, wrapper = Path(arguments[0]), Path(arguments[1])
     return runtime, wrapper
