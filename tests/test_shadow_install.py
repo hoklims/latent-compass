@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -13,6 +14,7 @@ import pytest
 import latent_compass.shadow_harness as shadow_harness
 import latent_compass.shadow_install as shadow_install
 from latent_compass.confined_io import read_confined_file as confined_read
+from latent_compass.confined_io import write_new_file as confined_write
 from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import load_shadow_config
 from latent_compass.shadow_install import (
@@ -471,50 +473,44 @@ def test_backup_race_preserves_third_party_destination(
     source.write_bytes(b"source")
     destination = source.with_name("hooks.json.bak-latent-compass-race")
     third_party = b"third-party"
-    real_open = os.open
+    real_writer = confined_write
     injected = False
 
-    def race_open(
-        path: str | os.PathLike[str],
-        flags: int,
-        mode: int = 0o777,
-        *,
-        dir_fd: int | None = None,
-    ) -> int:
+    def race_writer(root: Path, target: Path, data: bytes, *, what: str) -> Path:
         nonlocal injected
-        if Path(path) == destination and not injected:
+        if target == destination and not injected:
             injected = True
-            descriptor = real_open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-            os.write(descriptor, third_party)
-            os.close(descriptor)
-        if dir_fd is not None:
-            return real_open(path, flags, mode, dir_fd=dir_fd)
-        return real_open(path, flags, mode)
+            destination.write_bytes(third_party)
+        return real_writer(root, target, data, what=what)
 
-    monkeypatch.setattr(os, "open", race_open)
+    monkeypatch.setattr("latent_compass.shadow_install.write_new_file", race_writer)
 
-    with pytest.raises(FileExistsError):
+    with pytest.raises(ValueError, match="already exists"):
         _backup(source, "race")
 
     assert destination.read_bytes() == third_party
 
 
-def test_backup_failure_retains_exclusively_created_orphan(
+def test_backup_publication_failure_leaves_no_partial_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "hooks.json"
     source.write_bytes(b"source")
     destination = source.with_name("hooks.json.bak-latent-compass-race")
 
-    def fail_after_open(descriptor: int) -> None:
-        raise OSError(f"injected fsync failure for descriptor {descriptor}")
+    def fail_before_publication(root: Path, target: Path, data: bytes, *, what: str) -> Path:
+        assert root == tmp_path
+        assert target == destination
+        assert data == b"source"
+        assert what == "host transaction backup"
+        raise OSError("injected publication failure")
 
-    monkeypatch.setattr(os, "fsync", fail_after_open)
+    monkeypatch.setattr("latent_compass.shadow_install.write_new_file", fail_before_publication)
 
-    with pytest.raises(OSError, match="injected fsync failure"):
+    with pytest.raises(OSError, match="injected publication failure"):
         _backup(source, "race")
 
-    assert destination.read_bytes() == b"source"
+    assert not destination.exists()
 
 
 def test_backup_source_swap_to_symlink_is_refused_before_read(
@@ -863,10 +859,10 @@ def test_install_rolls_back_all_files_when_late_atomic_write_fails(
     before = hooks.read_bytes()
     real_atomic_json = _atomic_json
 
-    def fail_on_config(path: Path, payload: object) -> None:
+    def fail_on_config(path: Path, payload: object, **kwargs: Any) -> None:
         if path.name == "config.json":
             raise OSError("injected config write failure")
-        real_atomic_json(path, payload)
+        real_atomic_json(path, payload, **kwargs)
 
     monkeypatch.setattr(shadow_install, "_atomic_json", fail_on_config)
 
@@ -912,12 +908,12 @@ def test_concurrent_pending_journal_is_never_replaced(
     }
     injected = False
 
-    def race_journal(path: Path, payload: object) -> None:
+    def race_journal(path: Path, payload: object, *, home: Path | None = None) -> None:
         nonlocal injected
         if not injected:
             injected = True
-            real_exclusive(path, rival)
-        real_exclusive(path, payload)
+            real_exclusive(path, rival, home=home)
+        real_exclusive(path, payload, home=home)
 
     monkeypatch.setattr(shadow_install, "_exclusive_json", race_journal)
 
@@ -939,20 +935,27 @@ def test_pending_journal_is_complete_before_exclusive_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / ".latent-compass-shadow.pending.json"
-    original_link = os.link
+    original_writer = confined_write
 
-    def interrupt_before_link(source: Path, destination: Path) -> None:
-        assert json.loads(source.read_text(encoding="utf-8")) == {"operation": "install"}
-        assert not destination.exists()
+    def interrupt_before_publication(
+        root: Path, destination: Path, data: bytes, *, what: str
+    ) -> Path:
+        assert json.loads(data.decode("utf-8")) == {"operation": "install"}
+        assert root == tmp_path
+        assert destination == path
+        assert what == "host transaction journal"
+        assert not path.exists()
         raise OSError("interrupted before journal publication")
 
-    monkeypatch.setattr(os, "link", interrupt_before_link)
+    monkeypatch.setattr(
+        "latent_compass.shadow_install.write_new_file", interrupt_before_publication
+    )
     with pytest.raises(OSError, match="interrupted before journal publication"):
         _exclusive_json(path, {"operation": "install"})
     assert not path.exists()
     assert list(tmp_path.iterdir()) == []
 
-    monkeypatch.setattr(os, "link", original_link)
+    monkeypatch.setattr("latent_compass.shadow_install.write_new_file", original_writer)
     _exclusive_json(path, {"operation": "install"})
     assert json.loads(path.read_text(encoding="utf-8")) == {"operation": "install"}
 
@@ -1066,6 +1069,72 @@ def test_install_rollback_preserves_concurrent_change_to_unwritten_file(
     assert hooks.read_bytes() == hooks_before
     assert config.read_bytes() == third_party
     assert not (home / ".latent-compass-shadow.pending.json").exists()
+
+
+def test_install_preserves_leaf_created_after_snapshot_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    config = home / ".codex" / "latent-compass-shadow" / "config.json"
+    third_party = b'{"third_party":true}\n'
+    original_writer = confined_write
+
+    def inject_leaf_then_publish(root: Path, target: Path, data: bytes, *, what: str) -> Path:
+        if target == config and not config.exists():
+            config.write_bytes(third_party)
+        return original_writer(root, target, data, what=what)
+
+    monkeypatch.setattr("latent_compass.shadow_install.write_new_file", inject_leaf_then_publish)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="leaf-create-race",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert config.read_bytes() == third_party
+
+
+def test_install_preserves_leaf_changed_before_final_revalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    third_party = b'{"hooks":{"PreToolUse":[{"foreign":true}]}}\n'
+    original_reader = confined_read
+    injected = False
+
+    def inject_leaf_then_read(root: Path, target: Path, *, max_bytes: int, what: str) -> bytes:
+        nonlocal injected
+        if target == hooks and what == "managed host file before replacement" and not injected:
+            injected = True
+            hooks.write_bytes(third_party)
+        return original_reader(root, target, max_bytes=max_bytes, what=what)
+
+    monkeypatch.setattr("latent_compass.shadow_install.read_confined_file", inject_leaf_then_read)
+
+    result = install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="leaf-update-race",
+        hosts=("codex",),
+    )
+
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts[0]["code"] == "apply_failed"
+    assert hooks.read_bytes() == third_party
 
 
 def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path) -> None:
@@ -1462,6 +1531,40 @@ def test_recover_validates_digest_syntax_before_current_state(tmp_path: Path) ->
     assert journal.read_bytes() == before
 
 
+def test_recover_requires_string_backup_path_before_current_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    target = home / ".codex" / "hooks.json"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"before")
+    before_digest = f"sha256:{hashlib.sha256(target.read_bytes()).hexdigest()}"
+    payload = {
+        "schema_version": 1,
+        "operation": "remove",
+        "backup_tag": "test",
+        "entries": [
+            {
+                "path": str(target),
+                "before_sha256": before_digest,
+                "after_sha256": None,
+                "backup_path": 42,
+            }
+        ],
+    }
+    journal = home / ".latent-compass-shadow.pending.json"
+    journal.write_text(json.dumps(payload), encoding="utf-8")
+    journal_before = journal.read_bytes()
+
+    preview = plan_recover_shadow_hooks(home=home)
+    applied = recover_shadow_hooks(home=home)
+
+    for report in (preview, applied):
+        conflicts = cast(list[dict[str, object]], report["conflicts"])
+        assert conflicts[0]["code"] == "pending_transaction_invalid"
+        assert "must be a string" in str(conflicts[0]["detail"])
+    assert target.read_bytes() == b"before"
+    assert journal.read_bytes() == journal_before
+
+
 def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1473,11 +1576,11 @@ def test_rollback_does_not_overwrite_concurrent_change_to_written_file(
     third_party = b'{"hooks":{"PreToolUse":[{"foreign":true}]}}\n'
     real_atomic_json = _atomic_json
 
-    def fail_after_foreign_change(path: Path, payload: object) -> None:
+    def fail_after_foreign_change(path: Path, payload: object, **kwargs: Any) -> None:
         if path.name == "config.json":
             hooks.write_bytes(third_party)
             raise OSError("injected failure after concurrent hook change")
-        real_atomic_json(path, payload)
+        real_atomic_json(path, payload, **kwargs)
 
     monkeypatch.setattr(shadow_install, "_atomic_json", fail_after_foreign_change)
 
@@ -1526,14 +1629,14 @@ def test_rollback_preserves_symlink_substitution_after_write(
     _write(hooks, {"hooks": {"PreToolUse": []}})
     real_atomic_json = _atomic_json
 
-    def fail_after_symlink_substitution(path: Path, payload: object) -> None:
+    def fail_after_symlink_substitution(path: Path, payload: object, **kwargs: Any) -> None:
         if path.name == "config.json":
             written = hooks.read_bytes()
             hooks.unlink()
             outside.write_bytes(written)
             hooks.symlink_to(outside)
             raise OSError("injected failure after symlink substitution")
-        real_atomic_json(path, payload)
+        real_atomic_json(path, payload, **kwargs)
 
     monkeypatch.setattr(shadow_install, "_atomic_json", fail_after_symlink_substitution)
 

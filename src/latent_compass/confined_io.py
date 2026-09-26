@@ -1,8 +1,8 @@
-"""Race-safe publication of a new file beneath an explicitly opened root.
+"""Race-safe file mutation beneath an explicitly opened root.
 
 The containment decision and every filesystem mutation share directory handles.
 Path components are never followed through symlinks or Windows reparse points,
-and publication is exclusive: a concurrent winner is never replaced.
+New-file publication is exclusive and replacement is atomic.
 """
 
 from __future__ import annotations
@@ -101,9 +101,41 @@ def write_new_file(root: Path, target: Path, data: bytes, *, what: str) -> Path:
     absolute_target = plan_confined_target(absolute_root, target, what=what)
     relative = Path(os.path.relpath(absolute_target, absolute_root))
     if sys.platform == "win32":
-        _write_windows(absolute_root, relative, data, what=what)
+        _write_windows(absolute_root, relative, data, what=what, replace=False)
     else:
-        _write_posix(absolute_root, relative, data, what=what)
+        _write_posix(absolute_root, relative, data, what=what, replace=False)
+    return absolute_target
+
+
+def replace_file(root: Path, target: Path, data: bytes, *, what: str) -> Path:
+    """Atomically publish ``data`` at a confined target and return its path.
+
+    Parent containment is handle-bound, but this is an unconditional leaf
+    replacement. Portable POSIX and Windows APIs do not expose a shared
+    compare-bytes-and-swap operation: a caller that protects third-party leaf
+    content must validate immediately before this call and retain a durable
+    backup/recovery journal. A non-cooperating process can still replace the
+    leaf in the final interval between that validation and the rename syscall.
+    """
+    absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
+    absolute_target = plan_confined_target(absolute_root, target, what=what)
+    relative = Path(os.path.relpath(absolute_target, absolute_root))
+    if sys.platform == "win32":
+        _write_windows(absolute_root, relative, data, what=what, replace=True)
+    else:
+        _write_posix(absolute_root, relative, data, what=what, replace=True)
+    return absolute_target
+
+
+def remove_file(root: Path, target: Path, *, what: str) -> Path:
+    """Remove one confined regular file without following redirected parents."""
+    absolute_root = Path(os.path.abspath(root))  # noqa: PTH100 - must not follow links
+    absolute_target = plan_confined_target(absolute_root, target, what=what)
+    relative = Path(os.path.relpath(absolute_target, absolute_root))
+    if sys.platform == "win32":
+        _remove_windows(absolute_root, relative, what=what)
+    else:
+        _remove_posix(absolute_root, relative, what=what)
     return absolute_target
 
 
@@ -312,7 +344,7 @@ def _read_posix(root: Path, relative: Path, *, max_bytes: int, what: str) -> byt
             os.close(descriptor)
 
 
-def _write_posix(root: Path, relative: Path, data: bytes, *, what: str) -> None:
+def _write_posix(root: Path, relative: Path, data: bytes, *, what: str, replace: bool) -> None:
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptors: list[int] = []
     temporary_name: str | None = None
@@ -347,21 +379,25 @@ def _write_posix(root: Path, relative: Path, data: bytes, *, what: str) -> None:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        try:
-            os.link(
-                temporary_name,
-                final_name,
-                src_dir_fd=current,
-                dst_dir_fd=current,
-                follow_symlinks=False,
-            )
-        except FileExistsError as exc:
-            raise ContractViolation(
-                f"{what} already exists; refusing to overwrite it",
-                detail={"what": what, "path": str(root / relative)},
-            ) from exc
-        os.unlink(temporary_name, dir_fd=current)
-        temporary_name = None
+        if replace:
+            os.replace(temporary_name, final_name, src_dir_fd=current, dst_dir_fd=current)
+            temporary_name = None
+        else:
+            try:
+                os.link(
+                    temporary_name,
+                    final_name,
+                    src_dir_fd=current,
+                    dst_dir_fd=current,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise ContractViolation(
+                    f"{what} already exists; refusing to overwrite it",
+                    detail={"what": what, "path": str(root / relative)},
+                ) from exc
+            os.unlink(temporary_name, dir_fd=current)
+            temporary_name = None
         os.fsync(current)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
@@ -374,6 +410,46 @@ def _write_posix(root: Path, relative: Path, data: bytes, *, what: str) -> None:
         if temporary_name is not None and descriptors:
             with suppress(OSError):
                 os.unlink(temporary_name, dir_fd=descriptors[-1])
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def _remove_posix(root: Path, relative: Path, *, what: str) -> None:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        anchor = Path(root.anchor)
+        current = os.open(anchor, directory_flags)
+        descriptors.append(current)
+        traversed = anchor
+        directory_components = (*root.parts[1:], *relative.parts[:-1])
+        for component in directory_components:
+            traversed /= component
+            child = _open_directory_posix_readonly(
+                current,
+                component,
+                traversed,
+                what=what,
+                directory_flags=directory_flags,
+            )
+            descriptors.append(child)
+            current = child
+        status = os.stat(relative.name, dir_fd=current, follow_symlinks=False)
+        if not stat.S_ISREG(status.st_mode):
+            raise ContractViolation(
+                f"{what} is not a regular file; refusing the removal",
+                detail={"what": what, "path": str(root / relative)},
+            )
+        os.unlink(relative.name, dir_fd=current)
+        os.fsync(current)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise ContractViolation(
+                f"{what} traverses a symbolic link; refusing the removal",
+                detail={"what": what, "path": str(root / relative)},
+            ) from exc
+        raise
+    finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
 
@@ -711,6 +787,31 @@ if sys.platform == "win32":
         if status < 0:
             _raise_windows_error(status, path)
 
+    def _rename_windows_file(handle: int, parent: int, final_name: str, path: Path) -> None:
+        class _FileRenameInformation(ctypes.Structure):
+            _fields_ = [
+                ("ReplaceIfExists", wintypes.BOOLEAN),
+                ("RootDirectory", wintypes.HANDLE),
+                ("FileNameLength", wintypes.ULONG),
+                ("FileName", wintypes.WCHAR * len(final_name)),
+            ]
+
+        rename = _FileRenameInformation(
+            True, parent, len(final_name.encode("utf-16-le")), final_name
+        )
+        io_status = _IoStatusBlock()
+        status = int(
+            _ntdll.NtSetInformationFile(
+                handle,
+                ctypes.byref(io_status),
+                ctypes.byref(rename),
+                ctypes.sizeof(rename),
+                10,
+            )
+        )
+        if status < 0:
+            _raise_windows_error(status, path)
+
     def _open_directory_windows_readonly(parent: int, name: str, path: Path, *, what: str) -> int:
         try:
             handle = _nt_create_relative(
@@ -856,7 +957,9 @@ if sys.platform == "win32":
             for handle in reversed(handles):
                 _kernel32.CloseHandle(handle)
 
-    def _write_windows(root: Path, relative: Path, data: bytes, *, what: str) -> None:
+    def _write_windows(
+        root: Path, relative: Path, data: bytes, *, what: str, replace: bool
+    ) -> None:
         handles: list[int] = []
         temporary: int | None = None
         final_path = root / relative
@@ -878,7 +981,7 @@ if sys.platform == "win32":
                 temporary_name,
                 access=_FILE_ACCESS,
                 disposition=_FILE_CREATE,
-                options=_FILE_NON_DIRECTORY_FILE | _FILE_DELETE_ON_CLOSE,
+                options=(_FILE_NON_DIRECTORY_FILE | (0 if replace else _FILE_DELETE_ON_CLOSE)),
                 path=final_path.parent / temporary_name,
             )
             if data:
@@ -894,13 +997,16 @@ if sys.platform == "win32":
             if not _kernel32.FlushFileBuffers(temporary):
                 error = ctypes.get_last_error()
                 raise OSError(error, ctypes.FormatError(error), str(final_path))
-            try:
-                _link_windows_file(temporary, current, relative.name, final_path)
-            except FileExistsError as exc:
-                raise ContractViolation(
-                    f"{what} already exists; refusing to overwrite it",
-                    detail={"what": what, "path": str(final_path)},
-                ) from exc
+            if replace:
+                _rename_windows_file(temporary, current, relative.name, final_path)
+            else:
+                try:
+                    _link_windows_file(temporary, current, relative.name, final_path)
+                except FileExistsError as exc:
+                    raise ContractViolation(
+                        f"{what} already exists; refusing to overwrite it",
+                        detail={"what": what, "path": str(final_path)},
+                    ) from exc
             if not _kernel32.FlushFileBuffers(temporary):
                 error = ctypes.get_last_error()
                 raise OSError(error, ctypes.FormatError(error), str(final_path))
@@ -919,5 +1025,35 @@ if sys.platform == "win32":
         finally:
             if temporary is not None:
                 _kernel32.CloseHandle(temporary)
+            for handle in reversed(handles):
+                _kernel32.CloseHandle(handle)
+
+    def _remove_windows(root: Path, relative: Path, *, what: str) -> None:
+        handles: list[int] = []
+        file_handle: int | None = None
+        final_path = root / relative
+        try:
+            anchor = Path(root.anchor)
+            current = _open_windows_anchor(anchor, what=what)
+            handles.append(current)
+            traversed = anchor
+            directory_components = (*root.parts[1:], *relative.parts[:-1])
+            for component in directory_components:
+                traversed /= component
+                current = _open_directory_windows_readonly(current, component, traversed, what=what)
+                handles.append(current)
+            file_handle = _nt_create_relative(
+                current,
+                relative.name,
+                access=_FILE_READ_ATTRIBUTES | _DELETE | _SYNCHRONIZE,
+                disposition=_FILE_OPEN,
+                options=_FILE_NON_DIRECTORY_FILE,
+                path=final_path,
+            )
+            _reject_reparse(file_handle, final_path, what=what)
+            _set_windows_disposition(file_handle, delete=True)
+        finally:
+            if file_handle is not None:
+                _kernel32.CloseHandle(file_handle)
             for handle in reversed(handles):
                 _kernel32.CloseHandle(handle)

@@ -25,7 +25,7 @@ from conftest import (
     write_json,
 )
 from latent_compass.cli import EXIT_INTEGRITY, EXIT_OK, EXIT_REFUSED, EXIT_STORE, main
-from latent_compass.confined_io import write_new_file
+from latent_compass.confined_io import replace_file, write_new_file
 from latent_compass.errors import ContractViolation
 from latent_compass.pairwise_capture import load_judgeable_projection
 from latent_compass.protocol import Verdict
@@ -326,17 +326,92 @@ def test_confined_writer_refuses_root_ancestor_swap(
     original_backend = getattr(confined_io, backend_name)
 
     def swap_ancestor_before_open(
-        backend_root: Path, relative: Path, data: bytes, *, what: str
+        backend_root: Path,
+        relative: Path,
+        data: bytes,
+        *,
+        what: str,
+        replace: bool,
     ) -> None:
         authority_parent.rename(moved_authority)
         authority_parent.symlink_to(outside, target_is_directory=True)
-        original_backend(backend_root, relative, data, what=what)
+        original_backend(backend_root, relative, data, what=what, replace=replace)
 
     monkeypatch.setattr(confined_io, backend_name, swap_ancestor_before_open)
     with pytest.raises(ContractViolation):
         write_new_file(root, destination, b"must stay confined", what="test destination")
 
     assert not (outside / "root" / destination.name).exists()
+
+
+def test_confined_replacer_refuses_parent_swap_without_outside_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import latent_compass.confined_io as confined_io
+
+    authority_parent = tmp_path / "authority"
+    root = authority_parent / "root"
+    parent = root / "host"
+    parent.mkdir(parents=True)
+    target = parent / "settings.json"
+    target.write_bytes(b"before")
+    moved_authority = tmp_path / "moved-authority"
+    outside = tmp_path / "outside"
+    outside_target = outside / "root" / "host" / target.name
+    outside_target.parent.mkdir(parents=True)
+    outside_target.write_bytes(b"outside")
+    backend_name = "_write_windows" if os.name == "nt" else "_write_posix"
+    original_backend = getattr(confined_io, backend_name)
+
+    def swap_ancestor_before_open(
+        backend_root: Path,
+        relative: Path,
+        data: bytes,
+        *,
+        what: str,
+        replace: bool,
+    ) -> None:
+        authority_parent.rename(moved_authority)
+        authority_parent.symlink_to(outside, target_is_directory=True)
+        original_backend(backend_root, relative, data, what=what, replace=replace)
+
+    monkeypatch.setattr(confined_io, backend_name, swap_ancestor_before_open)
+    with pytest.raises(ContractViolation):
+        replace_file(root, target, b"after", what="managed host file")
+
+    assert outside_target.read_bytes() == b"outside"
+    assert (moved_authority / "root" / "host" / target.name).read_bytes() == b"before"
+
+
+def test_confined_replacer_refuses_static_linked_parent(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_target = outside / "settings.json"
+    outside_target.write_bytes(b"outside")
+    linked_parent = root / "host"
+    try:
+        linked_parent.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.fail(f"directory link support is required for this security witness: {exc}")
+
+    with pytest.raises(ContractViolation):
+        replace_file(root, linked_parent / "settings.json", b"after", what="managed host file")
+
+    assert outside_target.read_bytes() == b"outside"
+
+
+def test_confined_replacer_replaces_regular_file_without_temp_residue(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    target = root / "settings.json"
+    target.write_bytes(b"before")
+
+    replace_file(root, target, b"after", what="managed host file")
+
+    assert target.read_bytes() == b"after"
+    assert not list(root.glob(".lc-*.tmp"))
 
 
 def test_confined_writer_refuses_a_preexisting_dangling_link(tmp_path: Path) -> None:

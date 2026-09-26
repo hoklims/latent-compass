@@ -10,7 +10,6 @@ import re
 import shlex
 import stat
 import sys
-import tempfile
 import uuid
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -19,7 +18,13 @@ from typing import Final, TextIO, cast
 
 from latent_compass import __version__
 from latent_compass.canonical import canonical_text, seal
-from latent_compass.confined_io import read_confined_file
+from latent_compass.confined_io import (
+    read_confined_file,
+    remove_file,
+    replace_file,
+    write_new_file,
+)
+from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import ShadowHarnessConfig, load_shadow_config
 from latent_compass.shadow_status import Host, inspect_hosts, render_text
 
@@ -80,6 +85,13 @@ _PENDING_TRANSACTION_NAME: Final = ".latent-compass-shadow.pending.json"
 _MAX_TRANSACTION_FILE_BYTES: Final = 8 * 1_048_576
 
 
+class _ExpectedUnset:
+    pass
+
+
+_EXPECTED_UNSET: Final = _ExpectedUnset()
+
+
 def _read_json(path: Path) -> dict[str, object]:
     raw = _regular_file_bytes_or_none(path)
     if raw is None:
@@ -93,58 +105,72 @@ def _read_json(path: Path) -> dict[str, object]:
     return payload
 
 
-def _atomic_json(path: Path, payload: object) -> None:
+def _atomic_json(
+    path: Path,
+    payload: object,
+    *,
+    home: Path | None = None,
+    expected: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
+) -> None:
     content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    _atomic_bytes(path, content)
+    _atomic_bytes(path, content, home=home, expected=expected)
 
 
-def _exclusive_json(path: Path, payload: object) -> None:
+def _exclusive_json(path: Path, payload: object, *, home: Path | None = None) -> None:
     content = (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Hard-link publication is atomic and exclusive on supported local filesystems.
-        # A crash before this point leaves no partial recovery journal at its final path.
-        os.link(temporary, path)
-    finally:
-        if temporary is not None and _path_entry_exists(temporary):
-            temporary.unlink()
+        write_new_file(
+            home if home is not None else path.parent,
+            path,
+            content,
+            what="host transaction journal",
+        )
+    except ContractViolation as exc:
+        raise ValueError(str(exc)) from exc
 
 
-def _atomic_text(path: Path, content: str) -> None:
-    _atomic_bytes(path, content.encode("utf-8"))
+def _atomic_text(
+    path: Path,
+    content: str,
+    *,
+    home: Path | None = None,
+    expected: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
+) -> None:
+    _atomic_bytes(path, content.encode("utf-8"), home=home, expected=expected)
 
 
-def _atomic_bytes(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
+def _atomic_bytes(
+    path: Path,
+    content: bytes,
+    *,
+    home: Path | None = None,
+    expected: bytes | _ExpectedUnset | None = _EXPECTED_UNSET,
+) -> None:
+    root = home if home is not None else path.parent
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temporary.replace(path)
-    finally:
-        if temporary is not None and _path_entry_exists(temporary):
-            temporary.unlink()
+        if isinstance(expected, _ExpectedUnset):
+            replace_file(root, path, content, what="managed host file")
+        elif expected is None:
+            write_new_file(root, path, content, what="managed host file")
+        else:
+            current = read_confined_file(
+                root,
+                path,
+                max_bytes=_MAX_TRANSACTION_FILE_BYTES,
+                what="managed host file before replacement",
+            )
+            if current != expected:
+                raise ValueError(f"concurrent change detected for {path}")
+            replace_file(root, path, content, what="managed host file")
+    except ContractViolation as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _remove_confined(home: Path, path: Path, *, what: str) -> None:
+    try:
+        remove_file(home, path, what=what)
+    except ContractViolation as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _transaction_snapshot(plan: dict[str, object]) -> dict[Path, bytes | None]:
@@ -178,6 +204,7 @@ def _assert_snapshot(path: Path, expected: bytes | None) -> None:
 
 
 def _rollback_transaction(
+    home: Path,
     snapshots: dict[Path, bytes | None],
     written: dict[Path, bytes | None],
 ) -> list[Path]:
@@ -194,9 +221,12 @@ def _rollback_transaction(
         before_content = snapshots[path]
         if before_content is None:
             if path.is_file():
-                path.unlink()
+                try:
+                    _remove_confined(home, path, what="managed host rollback target")
+                except ValueError:
+                    unresolved.append(path)
         else:
-            _atomic_bytes(path, before_content)
+            _atomic_bytes(path, before_content, home=home, expected=after_content)
     return unresolved
 
 
@@ -287,7 +317,7 @@ def _begin_transaction(
     }
     path = _pending_transaction_path(home)
     _assert_safe_path_under(home, path)
-    _exclusive_json(path, journal)
+    _exclusive_json(path, journal, home=home)
     return path
 
 
@@ -362,7 +392,9 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
             if before_digest == after_digest:
                 raise ValueError("pending transaction entry does not change content")
             backup_raw = raw.get("backup_path")
-            if (before_digest is None) != (backup_raw is None):
+            if before_digest is not None and not isinstance(backup_raw, str):
+                raise ValueError("pending transaction backup path must be a string")
+            if before_digest is None and backup_raw is not None:
                 raise ValueError("pending transaction backup binding is inconsistent")
             backup = (
                 _assert_safe_path_under(root, Path(str(backup_raw)))
@@ -424,7 +456,7 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                 if before_digest is None:
                     if _path_entry_exists(path):
                         _regular_file_bytes_or_none(path)
-                        path.unlink()
+                        _remove_confined(home, path, what="managed host recovery target")
                 else:
                     if backup is None:
                         return [
@@ -451,8 +483,8 @@ def _recover_pending_transaction(home: Path, *, apply: bool = True) -> list[dict
                                 "detail": "recovery backup digest mismatch",
                             }
                         ]
-                    _atomic_bytes(path, backup_content)
-        journal_path.unlink()
+                    _atomic_bytes(path, backup_content, home=home, expected=current)
+        _remove_confined(home, journal_path, what="host transaction journal")
         return []
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return [
@@ -530,19 +562,10 @@ def _backup(path: Path, tag: str, *, home: Path | None = None) -> Path:
         max_bytes=_MAX_TRANSACTION_FILE_BYTES,
         what="host transaction backup source",
     )
-    descriptor: int | None = None
     try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(destination, flags, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = None
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except Exception:
-        if descriptor is not None:
-            os.close(descriptor)
-        raise
+        write_new_file(root, destination, content, what="host transaction backup")
+    except ContractViolation as exc:
+        raise ValueError(str(exc)) from exc
     return destination
 
 
@@ -1259,7 +1282,12 @@ def install_shadow_hooks(
                     _assert_snapshot(wrapper_path, snapshots[wrapper_path])
                     if wrapper_path.is_file():
                         _backup(wrapper_path, backup_tag, home=home)
-                    _atomic_text(wrapper_path, wrapper_text)
+                    _atomic_text(
+                        wrapper_path,
+                        wrapper_text,
+                        home=home,
+                        expected=snapshots[wrapper_path],
+                    )
                     written[wrapper_path] = wrapper_path.read_bytes()
             ownership_path = config_path.with_name(_OWNERSHIP_NAME)
             for path, key in (
@@ -1275,10 +1303,10 @@ def install_shadow_hooks(
                 _assert_snapshot(path, snapshots[path])
                 if path.is_file():
                     _backup(path, backup_tag, home=home)
-                _atomic_json(path, proposed)
+                _atomic_json(path, proposed, home=home, expected=snapshots[path])
                 written[path] = path.read_bytes()
     except (OSError, ValueError) as exc:
-        unresolved = _rollback_transaction(snapshots, written)
+        unresolved = _rollback_transaction(home, snapshots, written)
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
         )
@@ -1291,11 +1319,11 @@ def install_shadow_hooks(
                 }
             )
         if not unresolved and journal_path is not None and journal_path.is_file():
-            journal_path.unlink()
+            _remove_confined(home, journal_path, what="host transaction journal")
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
-        journal_path.unlink()
+        _remove_confined(home, journal_path, what="host transaction journal")
     plan["dry_run"] = False
     plan["states"] = host_status(home=home, project_root=project_root, hosts=hosts, dry_run=False)[
         "states"
@@ -1502,13 +1530,13 @@ def remove_shadow_hooks(
             if payload is None:
                 if _path_entry_exists(path):
                     _regular_file_bytes_or_none(path)
-                    path.unlink()
+                    _remove_confined(home, path, what="managed host file")
                 written[path] = None
             else:
-                _atomic_json(path, payload)
+                _atomic_json(path, payload, home=home, expected=snapshots[path])
                 written[path] = path.read_bytes()
     except (OSError, ValueError) as exc:
-        unresolved = _rollback_transaction(snapshots, written)
+        unresolved = _rollback_transaction(home, snapshots, written)
         cast(list[dict[str, str]], plan["conflicts"]).append(
             {"code": "apply_failed", "path": "", "detail": str(exc)}
         )
@@ -1521,11 +1549,11 @@ def remove_shadow_hooks(
                 }
             )
         if not unresolved and journal_path is not None and journal_path.is_file():
-            journal_path.unlink()
+            _remove_confined(home, journal_path, what="host transaction journal")
         plan["dry_run"] = False
         return plan
     if journal_path.is_file():
-        journal_path.unlink()
+        _remove_confined(home, journal_path, what="host transaction journal")
     plan["dry_run"] = False
     return plan
 
