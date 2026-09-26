@@ -250,7 +250,13 @@ def test_github_release_uses_an_explicit_repository_without_checkout() -> None:
 
 def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
     verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
-    condition = "${{ github.event_name != 'workflow_call' || inputs.build-packages }}"
+    condition = "${{ toJSON(inputs.build-packages) != 'false' }}"
+    for name in (
+        "Build distributions",
+        "Test extracted source distribution",
+        "Verify installed wheel outside checkout",
+    ):
+        assert step(verify, name)["if"] == condition
     assert_conditional_run(
         verify,
         "Verify installed wheel outside checkout",
@@ -271,6 +277,26 @@ def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() 
         "Test complete source tree",
         "uv run --frozen pytest -o addopts='' -q",
     )
+
+
+@pytest.mark.parametrize(
+    ("event_name", "build_packages", "expected"),
+    [
+        ("push", "", True),
+        ("pull_request", "", True),
+        ("workflow_call", True, True),
+        ("workflow_call", False, False),
+        ("push-tag-caller", False, False),
+    ],
+)
+def test_verify_artifact_guard_skips_only_explicit_false(
+    event_name: str, build_packages: bool | str, expected: bool
+) -> None:
+    del event_name
+    verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
+    condition = "${{ toJSON(inputs.build-packages) != 'false' }}"
+    rendered = json.dumps(build_packages, separators=(",", ":"))
+    assert (rendered != "false") is expected
     assert_conditional_run(
         verify,
         "Test extracted source distribution",

@@ -3298,7 +3298,7 @@ def test_codex_removal_refuses_manifest_wrapper_in_claude_store_without_reading_
         {
             "schema_version": 2,
             "host": "codex",
-            "command": _command("codex", Path(sys.executable), private),
+            "command": _command("codex", Path(sys.executable), private, home=home),
             "wrapper_digest": f"sha256:{hashlib.sha256(private.read_bytes()).hexdigest()}",
         },
     )

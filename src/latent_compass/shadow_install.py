@@ -993,7 +993,7 @@ def _owned_command(command: object, *, host: Host, wrapper: Path) -> bool:
     parsed = _parse_owned_command(command, host)
     if parsed is None:
         return False
-    _, candidate_wrapper = parsed
+    _, candidate_wrapper, _selected_home = parsed
     return candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False)
 
 
@@ -1021,7 +1021,7 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
     return False
 
 
-def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:
+def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path, Path | None] | None:
     if host == "codex":
         match = re.fullmatch(
             r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
@@ -1029,7 +1029,14 @@ def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:
             command,
         )
         if match is not None:
-            return Path(match.group(1).replace("''", "'")), Path(match.group(2).replace("''", "'"))
+            selected_home = (
+                Path(match.group(3).replace("''", "'")) if match.group(3) is not None else None
+            )
+            return (
+                Path(match.group(1).replace("''", "'")),
+                Path(match.group(2).replace("''", "'")),
+                selected_home,
+            )
     try:
         arguments = shlex.split(command)
     except ValueError:
@@ -1038,7 +1045,25 @@ def _parse_owned_command(command: str, host: Host) -> tuple[Path, Path] | None:
         return None
     if len(arguments) == 6 and arguments[4] != "--home":
         return None
-    return Path(arguments[0]), Path(arguments[1])
+    return (
+        Path(arguments[0]),
+        Path(arguments[1]),
+        Path(arguments[5]) if len(arguments) == 6 else None,
+    )
+
+
+def _owned_command_bound_to_home(command: str, host: Host, home: Path | None) -> bool:
+    if home is None:
+        return False
+    parsed = _parse_owned_command(command, host)
+    if parsed is None:
+        return False
+    selected_home = parsed[2]
+    return (
+        selected_home is not None
+        and selected_home.is_absolute()
+        and _lexical_absolute(selected_home) == _lexical_absolute(home)
+    )
 
 
 def _without_shadow_groups(
@@ -1113,7 +1138,7 @@ def _ownership_from_manifest(
         or not isinstance(payload.get("command"), str)
         or not isinstance(payload.get("wrapper_digest"), str)
         or re.fullmatch(r"sha256:[0-9a-f]{64}", str(payload.get("wrapper_digest"))) is None
-        or _parse_owned_command(cast(str, payload["command"]), host) is None
+        or not _owned_command_bound_to_home(cast(str, payload["command"]), host, home)
     ):
         raise ValueError("invalid Latent Compass hook ownership manifest")
     return cast(str, payload["command"]), cast(str, payload["wrapper_digest"])
@@ -1512,7 +1537,21 @@ def plan_install_shadow_hooks(
                 if hook_script is not None
                 else config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
             )
+            managed_wrapper = config_path.parent / "runtime" / "latent-compass-shadow-hook.py"
             if hook_script is not None:
+                if _path_identity(installed_hook) in {
+                    _path_identity(settings_path),
+                    _path_identity(config_path),
+                    _path_identity(ownership_path),
+                    _path_identity(managed_wrapper),
+                }:
+                    conflicts.append(
+                        {
+                            "code": "hook_script_target_overlap",
+                            "path": str(installed_hook),
+                        }
+                    )
+                    continue
                 try:
                     _assert_safe_path_under(config_path.parent, installed_hook)
                 except (OSError, ValueError) as exc:

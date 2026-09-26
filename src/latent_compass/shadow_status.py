@@ -135,6 +135,7 @@ def _owned_command(store: Path, host: Host) -> tuple[str | None, str | None, boo
             )
             or (
                 parsed[2] is not None
+                and parsed[2].is_absolute()
                 and _lexical_absolute(parsed[2]) == _lexical_absolute(store.parents[1])
             )
         )
@@ -455,7 +456,10 @@ def inspect_host(*, home: Path, host: Host, project_root: Path) -> dict[str, obj
                 selected_home is None and _lexical_absolute(home) != _lexical_absolute(Path.home())
             ) or (
                 selected_home is not None
-                and _lexical_absolute(selected_home) != _lexical_absolute(home)
+                and (
+                    not selected_home.is_absolute()
+                    or _lexical_absolute(selected_home) != _lexical_absolute(home)
+                )
             ):
                 paths_safe = False
             else:
