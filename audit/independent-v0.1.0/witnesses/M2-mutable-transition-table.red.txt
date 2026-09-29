@@ -1,0 +1,3 @@
+FAILED tests/test_authority.py::test_the_enforcement_tables_are_not_mutable_by_consumers[table1]
+FAILED tests/test_authority.py::test_every_state_can_still_reach_rejected_without_evidence
+2 failed, 1401 passed, 33 skipped in 98.63s (0:01:38)

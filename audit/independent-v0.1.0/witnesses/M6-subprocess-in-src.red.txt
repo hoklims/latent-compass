@@ -1,0 +1,3 @@
+FAILED tests/test_lab_boundary.py::test_nothing_the_lab_can_import_launches_a_process_or_reaches_the_network
+FAILED tests/test_risk_packet.py::test_the_source_tree_imports_no_networking_or_process_machinery[import subprocess]
+2 failed, 1401 passed, 33 skipped in 101.15s (0:01:41)

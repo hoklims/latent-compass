@@ -1,0 +1,171 @@
+{
+  "schema": "hoklims/latent-compass:independent-audit/1",
+  "schema_v3_emitted": false,
+  "schema_v3_unavailable_reason": "The schema-v3 receipt specification, the active proof policy and the deterministic gate are not published in this repository and are not obtainable from any public source. An auditor outside the author's private tooling cannot emit a receipt in that schema, nor compute the policy digest the schema requires.",
+  "epoch": {
+    "opened_at": "2026-09-20T00:00:00Z",
+    "fresh": true,
+    "subject": {
+      "repository": "hoklims/latent-compass",
+      "tag": "v0.1.0",
+      "commit": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+      "tree": "f913208ad377cea5652a95a0603665b5c7a90804",
+      "tag_object_type": "commit",
+      "tag_is_annotated": false,
+      "tag_is_signed": false
+    },
+    "policy": {
+      "id": "UNRESOLVED",
+      "digest": "UNRESOLVED",
+      "status": "MISSING_INPUT",
+      "note": "Required by acceptance criterion 6. Not obtainable; see schema_v3_unavailable_reason."
+    }
+  },
+  "independence": {
+    "auditor_account": "Laegel",
+    "candidate_owner": "hoklims",
+    "not_a_contributor_to_the_candidate": true,
+    "contributor_list_checked": [
+      "hoklims"
+    ],
+    "repository_permissions_of_auditor": {
+      "admin": false,
+      "maintain": false,
+      "push": false,
+      "triage": false,
+      "pull": true
+    },
+    "push_to_candidate_denied": "403 Permission to hoklims/latent-compass.git denied to Laegel",
+    "read_only_on_the_frozen_candidate": true,
+    "fresh_unforked_session_without_author_memory": true,
+    "distinct_harness": true,
+    "distinct_account": true,
+    "distinct_environment": true,
+    "distinct_evidence_storage": true,
+    "first_pass_before_author_narrative": "partial",
+    "satisfied": "8 of 9; first-pass ordering partially violated (finding B2)"
+  },
+  "first_pass_inputs": {
+    "aggregate_candidate_diff": "AVAILABLE",
+    "acceptance_contract_and_release_invariants": "AVAILABLE",
+    "proof_surface_classifier_output": "MISSING_INPUT",
+    "raw_commands_outputs_and_artifact_identities": "AVAILABLE",
+    "representative_red_green_witnesses": "PRODUCED_BY_AUDITOR"
+  },
+  "reproduction": {
+    "environment": "Linux x86_64, CPython 3.13 via uv, fresh project venv and fresh uv cache scoped to a scratch directory",
+    "uv_version_used_by_auditor": "0.11.26",
+    "uv_version_pinned_by_ci": "0.12.5",
+    "cache_state": "cold for this audit; UV_CACHE_DIR and UV_PYTHON_INSTALL_DIR redirected to scratch",
+    "gate_results": [
+      {
+        "command": "uv sync --locked --all-groups",
+        "rc": 0
+      },
+      {
+        "command": "uv run --frozen ruff format --check .",
+        "rc": 0,
+        "output": "149 files already formatted"
+      },
+      {
+        "command": "uv run --frozen ruff check .",
+        "rc": 0,
+        "output": "All checks passed!"
+      },
+      {
+        "command": "uv run --frozen mypy",
+        "rc": 0,
+        "output": "Success: no issues found in 109 source files"
+      },
+      {
+        "command": "uv run --frozen pytest -o addopts='' -q",
+        "rc": 0,
+        "output": "1403 passed, 33 skipped"
+      }
+    ],
+    "ci_run_35512148649": {
+      "head_sha": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+      "conclusion": "success",
+      "ubuntu_latest": "1403 passed, 33 skipped",
+      "windows_latest": "1426 passed, 10 skipped"
+    }
+  },
+  "witnesses": [
+    {
+      "id": "M1",
+      "claim": "authorize_transition refuses Actor.LATENT_COMPASS unconditionally and table-independently",
+      "application_point": "src/latent_compass/authority.py::authorize_transition",
+      "oracle": "tests/test_authority.py, tests/test_cli.py",
+      "red_rc": 1,
+      "red": "10 failed, 1393 passed, 33 skipped",
+      "green_rc": 0,
+      "green": "1403 passed, 33 skipped"
+    },
+    {
+      "id": "M2",
+      "claim": "the enforcement tables are read-only mappings",
+      "application_point": "src/latent_compass/authority.py::ALLOWED_TRANSITIONS",
+      "oracle": "tests/test_authority.py",
+      "red_rc": 1,
+      "red": "2 failed, 1401 passed, 33 skipped",
+      "green_rc": 0,
+      "green": "1403 passed, 33 skipped"
+    },
+    {
+      "id": "M3",
+      "claim": "evidence-bearing advancement is refused without trusted external attestation",
+      "application_point": "src/latent_compass/authority.py::authorize_transition",
+      "oracle": "tests/test_authority.py",
+      "red_rc": 1,
+      "red": "15 failed, 1388 passed, 33 skipped",
+      "green_rc": 0,
+      "green": "1403 passed, 33 skipped"
+    },
+    {
+      "id": "M4",
+      "claim": "plan_confined_target refuses targets outside the named root",
+      "application_point": "src/latent_compass/confined_io.py::plan_confined_target",
+      "oracle": "tests/test_cli.py, tests/test_lab_observations.py",
+      "red_rc": 1,
+      "red": "8 failed, 1395 passed, 33 skipped",
+      "green_rc": 0,
+      "green": "1403 passed, 33 skipped"
+    },
+    {
+      "id": "M5",
+      "claim": "the episode ledger refuses a duplicate episode_id",
+      "application_point": "src/latent_compass/ledger.py (episodes schema)",
+      "oracle": "tests/test_ledger.py",
+      "red_rc": 1,
+      "red": "14 failed, 1389 passed, 33 skipped",
+      "green_rc": 0,
+      "green": "1403 passed, 33 skipped"
+    },
+    {
+      "id": "M6",
+      "claim": "no module under src/ imports subprocess",
+      "application_point": "src/latent_compass/canonical.py",
+      "oracle": "tests/test_lab_boundary.py",
+      "red_rc": 1,
+      "red": "2 failed, 1401 passed, 33 skipped",
+      "green_rc": 0,
+      "green": "1403 passed, 33 skipped"
+    }
+  ],
+  "artifact_identity": {
+    "released_wheel_sha256": "db01bac64d1a202767ada28b6d8815727dd67be63b6d10f83de23c1ee6115617",
+    "released_sdist_sha256": "5e976a8be421901192093f2d07aaf6e495f122d071d0db2fea29b1dba34826db",
+    "rebuilt_from_commit_wheel_sha256": "3cb70cceb7f2e1fc1db8be2de9f917997694d888975c497c6140c2abd7cbf783",
+    "rebuilt_from_commit_sdist_sha256": "d8ac92dd839190078d6aafa4ee6c13abde4736e653c4639fa655f18f1806c189",
+    "rebuild_is_deterministic": true,
+    "payload_equal_after_line_ending_normalisation": true,
+    "released_sdist_files_with_crlf": "185/186",
+    "released_wheel_payload_files_with_crlf": "57/57",
+    "published_sdist_self_test_rc": 1,
+    "published_sdist_self_test": "6 failed, 1397 passed, 33 skipped"
+  },
+  "decision": "BLOCK",
+  "verdict": "PROOF_WEAK",
+  "gate_exit_code": null,
+  "gate_status": "NOT_RUN \u2014 no deterministic gate is obtainable by an independent auditor"
+}
