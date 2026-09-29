@@ -1,0 +1,2 @@
+FAILED tests/test_lab_host_bench.py::test_the_language_server_answers_about_the_bytes_it_is_handed_not_the_file_on_disk
+1 failed, 41 passed in 4.13s

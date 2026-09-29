@@ -1,0 +1,7 @@
+FAILED tests/test_synthetic_corpus.py::test_the_committed_corpus_regenerates_byte_for_byte[train.json]
+FAILED tests/test_synthetic_corpus.py::test_the_committed_corpus_regenerates_byte_for_byte[validation.json]
+FAILED tests/test_synthetic_corpus.py::test_the_committed_corpus_regenerates_byte_for_byte[holdout.json]
+FAILED tests/test_synthetic_corpus.py::test_the_committed_corpus_regenerates_byte_for_byte[manifest.json]
+FAILED tests/test_synthetic_corpus.py::test_the_committed_corpus_regenerates_byte_for_byte[protocol.json]
+FAILED tests/test_synthetic_corpus.py::test_the_committed_corpus_regenerates_byte_for_byte[spec.json]
+6 failed, 1411 passed, 26 skipped in 100.52s (0:01:40)
