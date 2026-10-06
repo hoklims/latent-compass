@@ -21,10 +21,27 @@ expansions/globs, grouping, redirection, malformed or ambiguous syntax and
 exhausted character/token budgets produce `UNKNOWN` through the existing refusal
 path. An unquoted hash inside a word is unresolved, not treated as a comment;
 quoted hash paths remain literal and comments at token boundaries are ignored.
-Known cwd-changing commands, shell sourcing/evaluation, inline interpreter
-options and `env` cwd/split-string options also produce `UNKNOWN`: their command
-context is outside the grammar. A lexical absence result concerns literal
-references only, never arbitrary behavior inside a foreign program. This is not
+After quotes, comments and separators are classified, the unquoted alphabet is
+Unicode letters/digits and `._-/:\\=` only. Other characters are unresolved.
+Double quotes refuse dynamic `$`, backtick, `%`, `!` and `^`, including after a
+backslash; single-quoted contents remain literal. Environment assignments as
+executables are unresolved. This grammar covers POSIX literal invocation and
+the recognized PowerShell literal-call form, not all Windows command languages.
+Known Python launchers (including versioned names and `.exe`) accept only the
+separate flags `-u`, `-I`, `-B`, `-E`, `-s`, `-S`, `-P`, `-O`, `-OO`, `-b`,
+`-bb`, `-q`, an optional `--`, and an absolute script followed by literal
+arguments. Every other pre-script mode or flag, including attached/clustered
+inline code, is `UNKNOWN`. `env` accepts only `env EXEC...` without options or
+assignments and classifies the nested executable. Known shells, cwd-changing
+commands and sourcing/evaluation are `UNKNOWN`, apart from the supported
+PowerShell literal call. Explicit relative executable/path references and
+relative Python scripts lack an attested host cwd and are `UNKNOWN`; bare
+executable names are not resolved against the installer's cwd. Unquoted tilde
+is `UNKNOWN`; quoted tilde remains literal.
+Known Node, Bun, Deno, Ruby, Perl, PHP and Lua launchers accept only a direct
+absolute script without pre-script options; other launch modes are unresolved.
+A lexical absence result concerns literal references only, never arbitrary
+behavior inside a foreign program. This is not
 a general shell or foreign-program interpreter.
 
 New pending transaction journals use schema 2. Each entry includes

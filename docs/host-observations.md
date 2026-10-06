@@ -7,6 +7,11 @@ from `UNKNOWN`. Adjacent command separators are recognized; quoted punctuation
 is preserved. Nonliteral expansion, grouping, redirection, ambiguous syntax or
 exhausted scan budgets refuse lifecycle changes instead of establishing absence.
 The scan is lexical and does not execute or interpret arbitrary foreign hooks.
+Known Python launchers use the finite absolute-script grammar in ADR 0013;
+unsupported modes, option-bearing `env`, unquoted tilde and unresolved relative
+script/path references are `UNKNOWN`. Bare executable names are not resolved
+against the installer's cwd. Opaque programs retain literal-argument scanning;
+their internal behavior is outside this contract.
 
 Pending installer transactions now use journal schema 2. A confirmed create is
 bound to native identity/change evidence read from the original creating lease's

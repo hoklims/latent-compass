@@ -1659,7 +1659,17 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
             token = raw_token.strip("\"'")
             if token in {";", "&&", "||", "|", "&", "env"} or token.startswith("-"):
                 continue
-            if Path(token).resolve(strict=False) == expected:
+            candidate = Path(token)
+            if not candidate.is_absolute():
+                if token.startswith("~"):
+                    # Unquoted tilde was refused by the lexer; quoted tilde is literal.
+                    continue
+                if "/" in token or "\\" in token or token == wrapper.name:
+                    raise ValueError(
+                        "managed wrapper reference scan is unknown: relative path lacks host cwd"
+                    )
+                continue
+            if candidate.resolve(strict=False) == expected:
                 return True
     if not parsed:
         raise ValueError(
@@ -1680,7 +1690,25 @@ def _validate_literal_reference_segments(arguments: list[str]) -> None:
     for segment in segments:
         if not segment:
             continue
+        _validate_literal_launcher(segment)
+
+
+def _validate_literal_launcher(segment: list[str]) -> None:
+    # Classify launchers before inferring absence from their literal arguments.
+    while segment:
+        if "=" in segment[0] and not Path(segment[0]).is_absolute():
+            raise ValueError("managed wrapper reference scan is unknown: environment assignment")
+        executable_path = Path(segment[0])
+        if not executable_path.is_absolute() and ("/" in segment[0] or "\\" in segment[0]):
+            raise ValueError("managed wrapper reference scan is unknown: relative executable")
         executable = segment[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if executable in {"env", "env.exe"}:
+            if len(segment) < 2 or segment[1].startswith("-") or "=" in segment[1]:
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: env context is unresolved"
+                )
+            segment = segment[1:]
+            continue
         if executable in {
             "cd",
             "pushd",
@@ -1692,10 +1720,73 @@ def _validate_literal_reference_segments(arguments: list[str]) -> None:
             "eval",
             "source",
             ".",
+            "sh",
+            "bash",
+            "dash",
+            "zsh",
+            "ksh",
+            "fish",
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "pwsh",
+            "pwsh.exe",
         }:
             raise ValueError(
                 "managed wrapper reference scan is unknown: cwd-changing or interpreted command"
             )
+        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable):
+            index = 1
+            safe_options = {
+                "-u",
+                "-I",
+                "-B",
+                "-E",
+                "-s",
+                "-S",
+                "-P",
+                "-O",
+                "-OO",
+                "-b",
+                "-bb",
+                "-q",
+            }
+            while index < len(segment) and segment[index] in safe_options:
+                index += 1
+            if index < len(segment) and segment[index] == "--":
+                index += 1
+            if index >= len(segment) or segment[index].startswith("-"):
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: unsupported Python launcher mode"
+                )
+            if not Path(segment[index]).is_absolute():
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: "
+                    "relative Python script lacks host cwd"
+                )
+            return
+        if executable in {
+            "node",
+            "node.exe",
+            "bun",
+            "bun.exe",
+            "deno",
+            "deno.exe",
+            "ruby",
+            "ruby.exe",
+            "perl",
+            "perl.exe",
+            "php",
+            "php.exe",
+            "lua",
+            "lua.exe",
+        }:
+            if len(segment) < 2 or not Path(segment[1]).is_absolute():
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: unsupported script launcher mode"
+                )
+            return
         if any(
             arg.casefold()
             in {"-c", "-e", "/c", "/k", "--eval", "--command", "-command", "-encodedcommand"}
@@ -1704,19 +1795,7 @@ def _validate_literal_reference_segments(arguments: list[str]) -> None:
             raise ValueError(
                 "managed wrapper reference scan is unknown: inline command interpretation"
             )
-        if executable in {"env", "env.exe"} and any(
-            arg in {"-C", "-S", "--chdir", "--split-string"}
-            or arg.startswith(("--chdir=", "--split-string="))
-            or (
-                arg.startswith("-")
-                and not arg.startswith("--")
-                and any(option in arg[1:] for option in "CS")
-            )
-            for arg in segment[1:]
-        ):
-            raise ValueError(
-                "managed wrapper reference scan is unknown: env option context is unresolved"
-            )
+        return
 
 
 def _validate_literal_reference_grammar(command: str, *, powershell_call: bool) -> None:
@@ -1729,10 +1808,12 @@ def _validate_literal_reference_grammar(command: str, *, powershell_call: bool) 
         if quote is not None:
             if char == quote:
                 quote = None
-            elif quote == '"' and char in {"$", "`"}:
+            elif quote == '"' and char in {"$", "`", "%", "!", "^"}:
                 raise ValueError("managed wrapper reference scan is unknown: nonliteral expansion")
-            elif quote == '"' and char == "\\":
-                index += 1
+            elif quote == '"' and char == "\\" and command[index + 1 : index + 2] == '"':
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: ambiguous quoted escape"
+                )
             index += 1
             continue
         if char in {"'", '"'}:
@@ -1742,17 +1823,6 @@ def _validate_literal_reference_grammar(command: str, *, powershell_call: bool) 
             if index > 0 and not command[index - 1].isspace():
                 raise ValueError("managed wrapper reference scan is unknown: non-boundary hash")
             break
-        elif char == "\\":
-            if index + 1 < len(command) and command[index + 1] in {"#", "$", "`"}:
-                raise ValueError(
-                    "managed wrapper reference scan is unknown: ambiguous shell escape"
-                )
-            have_word = True
-            index += 1
-        elif char in {"$", "`", "(", ")", "<", ">", "*", "?", "[", "{", "}", "\n", "\r"}:
-            raise ValueError(
-                "managed wrapper reference scan is unknown: unsupported nonliteral shell syntax"
-            )
         elif char in ";&|":
             end = index + 1
             while end < len(command) and command[end] in ";&|":
@@ -1768,8 +1838,12 @@ def _validate_literal_reference_grammar(command: str, *, powershell_call: bool) 
             have_word = False
             index = end
             continue
-        elif not char.isspace():
+        elif char.isalnum() or char in "._-/:\\=":
             have_word = True
+        elif char not in " \t":
+            raise ValueError(
+                "managed wrapper reference scan is unknown: unsupported literal alphabet"
+            )
         index += 1
     if quote is not None or (not have_word and last_separator not in {None, ";", "&"}):
         raise ValueError("managed wrapper reference scan is unknown: incomplete literal command")

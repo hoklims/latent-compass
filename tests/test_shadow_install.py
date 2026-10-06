@@ -1102,6 +1102,159 @@ def test_reference_scan_attached_env_context_options_are_unknown(
         _command_references_wrapper(f"env {option} python managed.py", tmp_path / "managed.py")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python -cprint(1)",
+        "python -ucprint(1)",
+        'python -c"print(1)"',
+        "python3.13.exe -m module",
+        "python --unknown managed.py",
+        "env -i python managed.py",
+        "env HOME=other python managed.py",
+        "python managed.py",
+        "python ./managed.py",
+        "python ~/managed.py",
+        "./python /absolute/managed.py",
+        "bash /absolute/managed.py",
+    ],
+)
+def test_literal_launcher_grammar_refuses_unresolved_modes(tmp_path: Path, command: str) -> None:
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(command, tmp_path / "managed.py")
+
+
+@pytest.mark.parametrize("launcher", ["python -u -I --", "python3.13.exe -B", "env python"])
+def test_literal_launcher_grammar_accepts_absolute_scripts(tmp_path: Path, launcher: str) -> None:
+    wrapper = tmp_path / "managed.py"
+    assert _command_references_wrapper(f'{launcher} "{wrapper}" --literal', wrapper)
+    assert not _command_references_wrapper(f'{launcher} "{tmp_path / "other.py"}"', wrapper)
+    assert not _command_references_wrapper('echo "~/literal"', wrapper)
+
+
+@pytest.mark.parametrize("operation", ["install", "remove"])
+@pytest.mark.parametrize("form", ["attached", "clustered", "relative", "tilde"])
+def test_unresolved_launcher_foreign_hook_preserves_lifecycle_bytes(
+    tmp_path: Path, operation: str, form: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex/hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    assert (
+        install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="grammar-install",
+            hosts=("codex",),
+        )["conflicts"]
+        == []
+    )
+    store = home / ".codex/latent-compass-shadow"
+    wrapper = store / "runtime/latent-compass-shadow-hook.py"
+    commands = {
+        "attached": f"python -c\"import runpy; runpy.run_path('{wrapper.as_posix()}')\"",
+        "clustered": f"python -uc\"import runpy; runpy.run_path('{wrapper.as_posix()}')\"",
+        "relative": f"python {wrapper.name}",
+        "tilde": "python ~/.codex/latent-compass-shadow/runtime/latent-compass-shadow-hook.py",
+    }
+    payload = json.loads(hooks.read_text())
+    payload["hooks"]["PreToolUse"].append(
+        {"matcher": "foreign", "hooks": [{"type": "command", "command": commands[form]}]}
+    )
+    _write(hooks, payload)
+    before = {
+        path: path.read_bytes()
+        for path in (hooks, wrapper, store / "config.json", store / "ownership.json")
+    }
+    result = (
+        install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="grammar-repeat",
+            hosts=("codex",),
+        )
+        if operation == "install"
+        else remove_shadow_hooks(
+            home=home,
+            backup_tag="grammar-remove",
+            hosts=("codex",),
+        )
+    )
+    assert result["conflicts"]
+    assert all(path.is_file() and path.read_bytes() == content for path, content in before.items())
+
+
+@pytest.mark.parametrize("option", ["-c", "-uc"])
+def test_attached_inline_python_reaches_only_owned_dummy(tmp_path: Path, option: str) -> None:
+    dummy = tmp_path / "dummy.py"
+    dummy.write_text("print('LC_INLINE_DUMMY_WRAPPER_REACHED')\n")
+    code = f"import runpy; runpy.run_path({str(dummy)!r})"
+    result = subprocess.run(  # noqa: S603 - fixed Python and owned dummy program only
+        [sys.executable, option + code], capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "LC_INLINE_DUMMY_WRAPPER_REACHED"
+
+
+def test_unquoted_tilde_reaches_owned_dummy_in_real_bash(tmp_path: Path) -> None:
+    bash = "C:/Program Files/Git/bin/bash.exe" if os.name == "nt" else shutil.which("bash")
+    if bash is None or not Path(bash).is_file():
+        pytest.skip("native Bash unavailable for isolated tilde observation")
+    dummy = tmp_path / "dummy.py"
+    dummy.write_text("print('LC_TILDE_DUMMY_WRAPPER_REACHED')\n")
+    command = f"{shlex.quote(Path(sys.executable).as_posix())} ~/dummy.py"
+    result = subprocess.run(  # noqa: S603 - no-profile Bash and owned dummy only
+        [bash, "--noprofile", "--norc", "-c", command],
+        env={**os.environ, "HOME": tmp_path.as_posix()},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "LC_TILDE_DUMMY_WRAPPER_REACHED"
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(command, dummy)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo %WRAPPER%",
+        "echo !WRAPPER!",
+        "echo ^literal",
+        "echo @literal",
+        r'echo "\$WRAPPER"',
+        r'echo "\`WRAPPER"',
+        r"echo \%WRAPPER%",
+        "NAME=VALUE echo keep",
+        "node --require other.js",
+        "node -pCODE",
+        "bun -eCODE",
+        "deno run other.js",
+        "ruby -eCODE",
+        "perl relative.pl",
+    ],
+)
+def test_literal_alphabet_and_known_script_launchers_refuse_unknown(
+    tmp_path: Path, command: str
+) -> None:
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(command, tmp_path / "managed.py")
+
+
+@pytest.mark.parametrize("launcher", ["node", "bun.exe", "deno", "ruby", "perl"])
+def test_known_script_launchers_accept_only_direct_absolute_script(
+    tmp_path: Path, launcher: str
+) -> None:
+    wrapper = tmp_path / "managed.py"
+    assert _command_references_wrapper(f'{launcher} "{wrapper}"', wrapper)
+    assert not _command_references_wrapper("echo '%!^@~$`literal'", wrapper)
+
+
 @pytest.mark.parametrize("option", ["-C", "-iC"])
 def test_attached_env_context_foreign_hook_preserves_lifecycle_bytes(
     tmp_path: Path, option: str
