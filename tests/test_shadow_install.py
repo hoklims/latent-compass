@@ -961,6 +961,76 @@ def test_final_removal_refuses_foreign_reference_to_managed_wrapper(
     assert all(path.read_bytes() == content for path, content in before.items())
 
 
+@pytest.mark.parametrize("boundary", ["preflight", "snapshot", "journal"])
+def test_install_refusal_reports_existing_state_after_closing_leases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    arguments = {
+        "home": home,
+        "runtime_python": Path(sys.executable),
+        "project_root": project,
+        "hosts": ("codex",),
+    }
+    accepted = install_shadow_hooks(**arguments, backup_tag="control")  # type: ignore[arg-type]
+    assert accepted["conflicts"] == []
+    before_status = host_status(home=home, project_root=project, hosts=("codex",))
+    assert before_status["states"]["codex"]["installed"] is True  # type: ignore[index]
+    assert before_status["states"]["codex"]["configured"] is True  # type: ignore[index]
+    before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    observed_with_leases: list[dict[str, object]] = []
+
+    def observe() -> None:
+        observed_with_leases.append(
+            host_status(home=home, project_root=project, hosts=("codex",))["states"]  # type: ignore[arg-type]
+        )
+
+    def refuse_preflight(*args: object, **kwargs: object) -> list[dict[str, str]]:
+        observe()
+        return [{"code": "fixture_refusal", "path": "", "detail": "owned preflight refusal"}]
+
+    def refuse_after_preflight(*args: object, **kwargs: object) -> None:
+        observe()
+        raise ContractViolation("owned refusal while preflight leases are held")
+
+    helper = {
+        "preflight": "_backup_conflicts",
+        "snapshot": "_transaction_snapshot",
+        "journal": "_begin_transaction_lease",
+    }[boundary]
+    monkeypatch.setattr(
+        shadow_install,
+        helper,
+        refuse_preflight if boundary == "preflight" else refuse_after_preflight,
+    )
+    # A second project forces an apply plan for the journal refusal boundary.
+    if boundary == "journal":
+        second_project = tmp_path / "second-project"
+        second_project.mkdir()
+        arguments["project_root"] = second_project
+        arguments["project_alias"] = "second-project"
+    refused = install_shadow_hooks(**arguments, backup_tag="refused")  # type: ignore[arg-type]
+    assert refused["conflicts"]
+    assert observed_with_leases
+    if os.name == "nt":
+        held_state = cast(dict[str, dict[str, object]], observed_with_leases[-1])["codex"]
+        assert held_state["installed"] is False
+        assert held_state["configured"] is False
+    standalone = host_status(
+        home=home,
+        project_root=arguments["project_root"],
+        hosts=("codex",),  # type: ignore[arg-type]
+    )
+    assert refused["states"] == standalone["states"]
+    assert refused["states"]["codex"]["installed"] is True  # type: ignore[index]
+    if boundary != "journal":
+        assert refused["states"]["codex"]["configured"] is True  # type: ignore[index]
+    assert {path: path.read_bytes() for path in home.rglob("*") if path.is_file()} == before
+
+
 def test_install_refuses_foreign_reference_to_managed_wrapper(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

@@ -2634,6 +2634,9 @@ def install_shadow_hooks(
     if plan["conflicts"]:
         _close_file_leases(_pop_plan_leases(plan))
         plan["dry_run"] = False
+        plan["states"] = host_status(
+            home=home, project_root=project_root, hosts=hosts, dry_run=False
+        )["states"]
         return plan
     try:
         snapshots = _transaction_snapshot(home, plan)
@@ -2643,6 +2646,9 @@ def install_shadow_hooks(
             {"code": "concurrent_change", "path": "", "detail": str(exc)}
         )
         plan["dry_run"] = False
+        plan["states"] = host_status(
+            home=home, project_root=project_root, hosts=hosts, dry_run=False
+        )["states"]
         return plan
     if plan["changed"] is False:
         plan.pop("_operations", None)
@@ -2716,6 +2722,9 @@ def install_shadow_hooks(
             journal_lease.close()
         _close_file_leases(file_leases)
         plan["dry_run"] = False
+        plan["states"] = host_status(
+            home=home, project_root=project_root, hosts=hosts, dry_run=False
+        )["states"]
         return plan
     except BaseException:
         if journal_lease is not None:
