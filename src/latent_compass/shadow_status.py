@@ -341,7 +341,22 @@ def _event_summary(store: Path, alias: str, *, host: Host, host_id: str) -> dict
                 invalid += 1
                 continue
             record = decode_host_json(raw.decode("utf-8"))
-        except ContractViolation:
+        except ContractViolation as exc:
+            detail = exc.detail
+            if isinstance(detail, dict):
+                size = detail.get("size")
+                limit = detail.get("limit")
+                if (
+                    detail.get("what") == "shadow event record"
+                    and type(size) is int
+                    and type(limit) is int
+                    and limit == MAX_EVENT_BYTES + 1
+                    and size > limit
+                ):
+                    # Native read limits refuse bytes before allocation. This is an
+                    # invalid record, unlike an unsafe path or unstable read.
+                    invalid += 1
+                    continue
             return {"unsafe_event_store": True}
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             invalid += 1

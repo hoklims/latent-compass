@@ -572,6 +572,60 @@ def test_oversized_event_is_bounded_and_degrades(tmp_path: Path) -> None:
     assert report["invalid_event_count"] == 1
 
 
+@pytest.mark.parametrize("extra_bytes", [1, 2, 100_000])
+def test_oversized_event_preserves_valid_observation_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_bytes: int
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+    valid = next((store / "events").rglob("*.json"))
+    oversized = valid.with_name("huge.json")
+    oversized.write_bytes(b"x" * (shadow_status.MAX_EVENT_BYTES + extra_bytes))
+    # Windows enumeration remains UNKNOWN in production; supply known paths only,
+    # preserving real native confined reads and the full host report classification.
+    monkeypatch.setattr(
+        shadow_status,
+        "list_confined_json_files",
+        lambda *_args, **_kwargs: ([oversized, valid], False),
+    )
+    before = {path: path.read_bytes() for path in (valid, oversized)}
+    report = inspect_host(home=home, host="codex", project_root=project)
+    assert report["status"] == "DEGRADED"
+    assert report["invalid_event_count"] == 1
+    assert report["event_count"] == 1
+    assert report["session_count"] == 1
+    assert report["verdicts"] == {"ADVICE": 1}
+    assert all(path.read_bytes() == content for path, content in before.items())
+
+
+def test_oversized_linked_event_remains_unsafe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    store = _install_fixture(home, project)
+    _event(store, verdict="ADVICE", observed_at="2026-09-20T10:00:00Z", session="1")
+    valid = next((store / "events").rglob("*.json"))
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"x" * (shadow_status.MAX_EVENT_BYTES + 2))
+    linked = valid.with_name("linked.json")
+    linked.symlink_to(outside)
+    monkeypatch.setattr(
+        shadow_status,
+        "list_confined_json_files",
+        lambda *_args, **_kwargs: ([linked, valid], False),
+    )
+    before = outside.read_bytes()
+    report = inspect_host(home=home, host="codex", project_root=project)
+    assert report["status"] == "HOST_CONFIGURATION_INVALID"
+    assert report["event_count"] == 0
+    assert outside.read_bytes() == before
+
+
 def test_total_discovery_is_bounded_and_marked_partial(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
