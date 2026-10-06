@@ -1021,8 +1021,8 @@ def test_install_refusal_reports_existing_state_after_closing_leases(
         assert held_state["configured"] is False
     standalone = host_status(
         home=home,
-        project_root=arguments["project_root"],
-        hosts=("codex",),  # type: ignore[arg-type]
+        project_root=cast(Path, arguments["project_root"]),
+        hosts=("codex",),
     )
     assert refused["states"] == standalone["states"]
     assert refused["states"]["codex"]["installed"] is True  # type: ignore[index]
