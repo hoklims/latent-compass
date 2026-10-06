@@ -530,10 +530,17 @@ def _apply_frozen_operations(
                 _atomic_bytes(path, after, home=home, expected=before)
             if before is None:
                 journal_state[0] = (
-                    _set_create_publication_state_lease(journal_lease, path, "confirmed")
+                    _set_create_publication_state_lease(
+                        journal_lease, path, "confirmed", published_lease=target_lease
+                    )
                     if journal_lease is not None
                     else _set_create_publication_state(
-                        home, journal_path, journal_state[0], path, "confirmed"
+                        home,
+                        journal_path,
+                        journal_state[0],
+                        path,
+                        "confirmed",
+                        published_lease=target_lease,
                     )
                 )
         written[path] = after
@@ -549,6 +556,8 @@ def _set_create_publication_state(
     journal_content: bytes,
     path: Path,
     state: str,
+    *,
+    published_lease: ConfinedFileLease | None = None,
 ) -> bytes:
     lease = lease_confined_file(
         home,
@@ -559,7 +568,9 @@ def _set_create_publication_state(
     try:
         if lease.content != journal_content:
             raise ValueError("pending transaction journal changed before state update")
-        return _set_create_publication_state_lease(lease, path, state)
+        return _set_create_publication_state_lease(
+            lease, path, state, published_lease=published_lease
+        )
     finally:
         lease.close()
 
@@ -568,6 +579,8 @@ def _set_create_publication_state_lease(
     lease: ConfinedFileLease,
     path: Path,
     state: str,
+    *,
+    published_lease: ConfinedFileLease | None = None,
 ) -> bytes:
     journal_content = lease.content
     if journal_content is None:
@@ -577,6 +590,17 @@ def _set_create_publication_state_lease(
     entries = cast(list[dict[str, object]], payload["entries"])
     for entry in entries:
         if Path(str(entry["path"])) == path:
+            if state == "confirmed":
+                if (
+                    payload.get("schema_version") != 2
+                    or published_lease is None
+                    or published_lease.path != path
+                    or published_lease.root != lease.root
+                    or entry.get("before_sha256") is not None
+                    or _bytes_digest(published_lease.content) != entry.get("after_sha256")
+                ):
+                    raise ValueError("create ownership is unknown: held publication lease required")
+                entry["publication_identity"] = _publication_fingerprint(published_lease)
             entry.pop("publication_confirmed", None)
             entry["publication_state"] = state
             break
@@ -586,9 +610,59 @@ def _set_create_publication_state_lease(
 
 
 def _confirm_create_publication(
-    home: Path, journal_path: Path, journal_content: bytes, path: Path
+    home: Path,
+    journal_path: Path,
+    journal_content: bytes,
+    path: Path,
+    *,
+    published_lease: ConfinedFileLease,
 ) -> bytes:
-    return _set_create_publication_state(home, journal_path, journal_content, path, "confirmed")
+    return _set_create_publication_state(
+        home, journal_path, journal_content, path, "confirmed", published_lease=published_lease
+    )
+
+
+def _publication_fingerprint(lease: ConfinedFileLease) -> dict[str, object]:
+    identity, stamps = lease.publication_fingerprint()
+    token = [part.hex() if isinstance(part, bytes) else part for part in identity.token]
+    result: dict[str, object] = {
+        "domain": "latent-compass-created-file/1",
+        "backend": identity.backend,
+        "token": token,
+        "stamps": list(stamps),
+    }
+    _validate_publication_fingerprint(result)
+    return result
+
+
+def _validate_publication_fingerprint(raw: object) -> None:
+    backend = "windows" if os.name == "nt" else "posix"
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"domain", "backend", "token", "stamps"}
+        or raw.get("domain") != "latent-compass-created-file/1"
+        or raw.get("backend") != backend
+    ):
+        raise ValueError("invalid or foreign-platform created-file publication identity")
+    token, stamps = raw["token"], raw["stamps"]
+    if (
+        not isinstance(token, list)
+        or len(token) != 2
+        or type(token[0]) is not int
+        or not 0 <= token[0] < 2**64
+    ):
+        raise ValueError("invalid created-file identity token")
+    if backend == "posix":
+        if type(token[1]) is not int or not 0 <= token[1] < 2**64:
+            raise ValueError("invalid POSIX created-file identity token")
+    elif not isinstance(token[1], str) or re.fullmatch(r"[0-9a-f]{32}", token[1]) is None:
+        raise ValueError("invalid Windows created-file identity token")
+    if (
+        not isinstance(stamps, list)
+        or len(stamps) != (2 if backend == "windows" else 1)
+        or any(type(stamp) is not int or not 0 < stamp < 2**64 for stamp in stamps)
+    ):
+        raise ValueError("created-file generation/change evidence is unavailable or invalid")
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -737,10 +811,11 @@ def _begin_transaction_lease(
                 "publication_state": (
                     "planned" if item["action"] == "create" else "not_applicable"
                 ),
+                "publication_identity": None,
             }
         )
     journal = {
-        "schema_version": 1,
+        "schema_version": 2,
         "operation": operation,
         "backup_tag": backup_tag,
         "entries": entries,
@@ -778,7 +853,7 @@ def _decode_pending_transaction(
     if (
         set(payload) != {"schema_version", "operation", "backup_tag", "entries"}
         or type(payload.get("schema_version")) is not int
-        or payload.get("schema_version") != 1
+        or payload.get("schema_version") not in {1, 2}
         or not isinstance(entries, list)
         or not entries
     ):
@@ -819,8 +894,36 @@ def _decode_pending_transaction(
                 "backup_path",
                 "publication_state",
             },
+            {
+                "path",
+                "before_sha256",
+                "after_sha256",
+                "backup_path",
+                "publication_state",
+                "publication_identity",
+            },
         ):
             raise ValueError("invalid pending transaction entry")
+        if payload["schema_version"] == 2 and set(raw) != {
+            "path",
+            "before_sha256",
+            "after_sha256",
+            "backup_path",
+            "publication_state",
+            "publication_identity",
+        }:
+            raise ValueError("schema 2 publication identity field is required")
+        if payload["schema_version"] == 1 and "publication_identity" in raw:
+            raise ValueError("legacy publication identity cannot be implicitly migrated")
+        identity = raw.get("publication_identity")
+        if identity is not None:
+            if (
+                payload["schema_version"] != 2
+                or raw.get("before_sha256") is not None
+                or raw.get("publication_state") not in {"confirmed", "revoked"}
+            ):
+                raise ValueError("publication identity is inconsistent with its journal entry")
+            _validate_publication_fingerprint(identity)
         if "publication_confirmed" in raw and not isinstance(raw["publication_confirmed"], bool):
             raise ValueError("invalid pending transaction publication provenance")
         if raw.get("publication_state") not in {
@@ -898,6 +1001,10 @@ def _observe_recovery_targets(
         )
         for entry in cast(list[dict[str, object]], payload["entries"])
     }
+    publication_identities = {
+        _lexical_absolute(Path(str(entry["path"]))): entry.get("publication_identity")
+        for entry in cast(list[dict[str, object]], payload["entries"])
+    }
     target_lease: ConfinedFileLease | None = None
     backup_lease: ConfinedFileLease | None = None
     try:
@@ -906,6 +1013,22 @@ def _observe_recovery_targets(
         ):
             target_lease = None
             backup_lease = None
+            if (
+                before_digest is None
+                and publication_confirmed[path]
+                and publication_identities[path] is None
+            ):
+                _close_recovery_observations(observations)
+                return [
+                    {
+                        "code": "pending_transaction_conflict",
+                        "path": str(path),
+                        "detail": (
+                            "confirmed create ownership is unknown: publication identity missing; "
+                            "preserve and inspect journal"
+                        ),
+                    }
+                ], []
             try:
                 target_lease = lease_confined_file(
                     home,
@@ -933,6 +1056,28 @@ def _observe_recovery_targets(
             current = target_lease.content if target_lease is not None else None
             backup_content = backup_lease.content if backup_lease is not None else None
             current_digest = _bytes_digest(current)
+            if before_digest is None and publication_confirmed[path]:
+                try:
+                    if (
+                        target_lease is None
+                        or _publication_fingerprint(target_lease) != publication_identities[path]
+                    ):
+                        raise ValueError(
+                            "created-file publication identity changed; preserve and inspect"
+                        )
+                except (ValueError, OSError, ContractViolation) as exc:
+                    if target_lease is not None:
+                        target_lease.close()
+                    if backup_lease is not None:
+                        backup_lease.close()
+                    _close_recovery_observations(observations)
+                    return [
+                        {
+                            "code": "pending_transaction_conflict",
+                            "path": str(path),
+                            "detail": str(exc),
+                        }
+                    ], []
             if current_digest not in {before_digest, after_digest}:
                 if target_lease is not None:
                     target_lease.close()
@@ -1070,12 +1215,42 @@ def _recover_pending_transaction(
             ]
         if journal_lease.content is None:
             return []
+        _decode_pending_transaction(home, journal_lease.content)
         if observations is None:
             conflicts, observations = _observe_recovery_targets(home, journal_lease.content)
             if conflicts:
                 return conflicts
         revoked_owned_creates: set[Path] = set()
         if apply:
+            publication_entries = decode_host_json(journal_lease.content.decode("utf-8"))
+            assert isinstance(publication_entries, dict)
+            identities = {
+                _lexical_absolute(Path(str(entry["path"]))): entry.get("publication_identity")
+                for entry in cast(list[dict[str, object]], publication_entries["entries"])
+            }
+            for observation in observations:
+                if (
+                    observation["before_digest"] is None
+                    and observation["publication_state"] == "confirmed"
+                ):
+                    try:
+                        held = observation["target_lease"]
+                        if (
+                            held is None
+                            or _publication_fingerprint(held) != identities[observation["path"]]
+                        ):
+                            raise ValueError(
+                                "created-file identity/change evidence drifted "
+                                "before recovery mutation"
+                            )
+                    except (OSError, ValueError, ContractViolation) as exc:
+                        return [
+                            {
+                                "code": "pending_transaction_conflict",
+                                "path": str(observation["path"]),
+                                "detail": str(exc),
+                            }
+                        ]
             try:
                 journal_lease.assert_current()
             except ContractViolation as exc:
@@ -1457,15 +1632,18 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
             "inspect or simplify the foreign hook before install/remove"
         )
     powershell = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)'(?: .*)?$", command)
+    _validate_literal_reference_grammar(command, powershell_call=powershell is not None)
+    known_reference = False
     if powershell is not None:
         candidate_wrapper = Path(powershell.group(2).replace("''", "'"))
-        if candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False):
-            return True
+        known_reference = candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False)
     expected = wrapper.resolve(strict=False)
     parsed = False
     for posix in (True, False):
         try:
-            arguments = shlex.split(command, comments=True, posix=posix)
+            lexer = shlex.shlex(command, posix=posix, punctuation_chars="();<>|&")
+            lexer.whitespace_split = True
+            arguments = list(lexer)
         except ValueError:
             continue
         parsed = True
@@ -1474,9 +1652,12 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
                 "managed wrapper reference scan is unknown: command exceeds 128 arguments; "
                 "inspect or simplify the foreign hook before install/remove"
             )
+        _validate_literal_reference_segments(arguments)
+        if known_reference:
+            return True
         for raw_token in arguments:
             token = raw_token.strip("\"'")
-            if token in {"&", "env"} or token.startswith("-"):
+            if token in {";", "&&", "||", "|", "&", "env"} or token.startswith("-"):
                 continue
             if Path(token).resolve(strict=False) == expected:
                 return True
@@ -1486,6 +1667,107 @@ def _command_references_wrapper(command: object, wrapper: Path) -> bool:
             "inspect or simplify the foreign hook before install/remove"
         )
     return False
+
+
+def _validate_literal_reference_segments(arguments: list[str]) -> None:
+    segments: list[list[str]] = [[]]
+    for raw in arguments:
+        token = raw.strip("\"'")
+        if token in {";", "&&", "||", "|", "&"}:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    for segment in segments:
+        if not segment:
+            continue
+        executable = segment[0].replace("\\", "/").rsplit("/", 1)[-1].casefold()
+        if executable in {
+            "cd",
+            "pushd",
+            "popd",
+            "chdir",
+            "set-location",
+            "push-location",
+            "pop-location",
+            "eval",
+            "source",
+            ".",
+        }:
+            raise ValueError(
+                "managed wrapper reference scan is unknown: cwd-changing or interpreted command"
+            )
+        if any(
+            arg.casefold()
+            in {"-c", "-e", "/c", "/k", "--eval", "--command", "-command", "-encodedcommand"}
+            for arg in segment[1:]
+        ):
+            raise ValueError(
+                "managed wrapper reference scan is unknown: inline command interpretation"
+            )
+        if executable == "env" and any(
+            arg in {"-C", "-S", "--chdir", "--split-string"}
+            or arg.startswith(("--chdir=", "--split-string="))
+            for arg in segment[1:]
+        ):
+            raise ValueError(
+                "managed wrapper reference scan is unknown: env changes command context"
+            )
+
+
+def _validate_literal_reference_grammar(command: str, *, powershell_call: bool) -> None:
+    quote: str | None = None
+    have_word = False
+    last_separator: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            elif quote == '"' and char in {"$", "`"}:
+                raise ValueError("managed wrapper reference scan is unknown: nonliteral expansion")
+            elif quote == '"' and char == "\\":
+                index += 1
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            have_word = True
+        elif char == "#":
+            if index > 0 and not command[index - 1].isspace():
+                raise ValueError("managed wrapper reference scan is unknown: non-boundary hash")
+            break
+        elif char == "\\":
+            if index + 1 < len(command) and command[index + 1] in {"#", "$", "`"}:
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: ambiguous shell escape"
+                )
+            have_word = True
+            index += 1
+        elif char in {"$", "`", "(", ")", "<", ">", "*", "?", "[", "{", "}", "\n", "\r"}:
+            raise ValueError(
+                "managed wrapper reference scan is unknown: unsupported nonliteral shell syntax"
+            )
+        elif char in ";&|":
+            end = index + 1
+            while end < len(command) and command[end] in ";&|":
+                end += 1
+            separator = command[index:end]
+            if separator not in {";", "&&", "||", "|", "&"} or (
+                not have_word and not (index == 0 and separator == "&" and powershell_call)
+            ):
+                raise ValueError(
+                    "managed wrapper reference scan is unknown: ambiguous command separator"
+                )
+            last_separator = separator
+            have_word = False
+            index = end
+            continue
+        elif not char.isspace():
+            have_word = True
+        index += 1
+    if quote is not None or (not have_word and last_separator not in {None, ";", "&"}):
+        raise ValueError("managed wrapper reference scan is unknown: incomplete literal command")
 
 
 def _recovery_command(home: Path, *, platform: str = os.name) -> str:

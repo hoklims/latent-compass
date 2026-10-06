@@ -1,5 +1,23 @@
 # Host observations and the host session (HOK-800, HOK-801/802)
 
+## Installer reference and recovery observations
+
+The passive host installer distinguishes supported literal reference scans
+from `UNKNOWN`. Adjacent command separators are recognized; quoted punctuation
+is preserved. Nonliteral expansion, grouping, redirection, ambiguous syntax or
+exhausted scan budgets refuse lifecycle changes instead of establishing absence.
+The scan is lexical and does not execute or interpret arbitrary foreign hooks.
+
+Pending installer transactions now use journal schema 2. A confirmed create is
+bound to native identity/change evidence read from the original creating lease's
+held handle, persisted atomically with confirmation. Recovery compares that
+fingerprint before mutation; content equality alone never upgrades a legacy or
+unconfirmed creation into ownership. Missing/incompatible evidence preserves
+the file and journal for inspection. Native identifiers/timestamps depend on
+the local filesystem and trusted journal; they do not authenticate a file or
+prove a universally unique generation. See
+[ADR 0013](adr/0013-literal-references-and-durable-created-file-ownership.md).
+
 Status: **experimental**, part of the isolated `latent_compass.lab`. See
 [ADR 0011](adr/0011-experimental-active-diagnosis.md) for the boundary and
 [`docs/active-diagnosis-scope.md`](active-diagnosis-scope.md) for the perimeter.

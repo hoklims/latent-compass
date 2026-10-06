@@ -78,6 +78,24 @@ def _commands(path: Path, event: str) -> list[str]:
     ]
 
 
+def _publish_confirmed_fixture(
+    home: Path, journal: Path, journal_content: bytes, target: Path, content: bytes
+) -> bytes:
+    with confined_io.lease_confined_file(
+        home,
+        target,
+        max_bytes=1_000_000,
+        what="fixture creator lease",
+        allow_absent=True,
+        create_parents=True,
+    ) as creator:
+        assert creator.content is None
+        creator.replace(content)
+        return _confirm_create_publication(
+            home, journal, journal_content, target, published_lease=creator
+        )
+
+
 def _bash_for_hook_command() -> Path:
     if os.name == "nt":
         git_bash = Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git/bin/bash.exe"
@@ -1015,6 +1033,299 @@ def test_reference_scan_exhaustion_is_unknown_not_absent(tmp_path: Path, limit: 
 def test_unparseable_reference_scan_is_unknown(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="reference scan is unknown"):
         _command_references_wrapper('python "unterminated', tmp_path / "managed.py")
+
+
+@pytest.mark.parametrize("separator", [";", "&&", "||", "|", "&"])
+def test_literal_reference_scan_recognizes_adjacent_command_boundaries(
+    tmp_path: Path, separator: str
+) -> None:
+    wrapper = tmp_path / "managed.py"
+    assert _command_references_wrapper(f"python {wrapper.as_posix()}{separator} echo keep", wrapper)
+
+
+@pytest.mark.parametrize(
+    "syntax",
+    [
+        "echo $(whoami)",
+        "echo `whoami`",
+        "echo $HOME",
+        "(echo keep)",
+        "echo keep > out",
+        "echo keep &&& other",
+    ],
+)
+def test_reference_scan_refuses_nonliteral_or_unsupported_syntax(
+    tmp_path: Path, syntax: str
+) -> None:
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(syntax, tmp_path / "managed.py")
+
+
+def test_literal_reference_scan_preserves_quoted_punctuation_and_comments(tmp_path: Path) -> None:
+    wrapper = tmp_path / "managed; literal $(safe).py"
+    assert _command_references_wrapper(
+        f"python {shlex.quote(wrapper.as_posix())}; echo keep", wrapper
+    )
+    assert not _command_references_wrapper(f"echo keep # {wrapper.as_posix()}", wrapper)
+
+
+def test_reference_scan_hash_inside_word_is_unknown_but_quoted_hash_is_literal(
+    tmp_path: Path,
+) -> None:
+    wrapper = tmp_path / "home#literal" / "managed.py"
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(f"python {wrapper.as_posix()}", wrapper)
+    assert _command_references_wrapper(f"python {shlex.quote(wrapper.as_posix())}", wrapper)
+    assert not _command_references_wrapper(f"echo keep # {wrapper.as_posix()}", wrapper)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd other; python managed.py",
+        "env -C other python managed.py",
+        "python -c 'invoke_hidden_wrapper()'",
+    ],
+)
+def test_reference_scan_cwd_change_and_inline_interpretation_are_unknown(
+    tmp_path: Path, command: str
+) -> None:
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(command, tmp_path / "managed.py")
+
+
+@pytest.mark.parametrize("operation", ["install", "remove"])
+def test_adjacent_semicolon_foreign_hook_refuses_lifecycle(tmp_path: Path, operation: str) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    assert (
+        install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="semicolon-install",
+            hosts=("codex",),
+        )["conflicts"]
+        == []
+    )
+    store = home / ".codex" / "latent-compass-shadow"
+    wrapper = store / "runtime" / "latent-compass-shadow-hook.py"
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    payload["hooks"]["PreToolUse"].append(
+        {
+            "matcher": "foreign",
+            "hooks": [{"type": "command", "command": f"python {wrapper.as_posix()}; echo keep"}],
+        }
+    )
+    _write(hooks, payload)
+    before = {
+        path: path.read_bytes()
+        for path in (hooks, wrapper, store / "config.json", store / "ownership.json")
+    }
+    result = (
+        install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="semicolon-rerun",
+            hosts=("codex",),
+        )
+        if operation == "install"
+        else remove_shadow_hooks(home=home, backup_tag="semicolon-remove", hosts=("codex",))
+    )
+    assert result["conflicts"], "literal command boundary must not hide a foreign wrapper reference"
+    assert all(path.is_file() and path.read_bytes() == content for path, content in before.items())
+
+
+def _interrupted_confirmed_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path]:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    real_replace = confined_io.ConfinedFileLease.replace
+
+    def interrupt_next_file(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        if lease.path.name == "config.json":
+            raise KeyboardInterrupt("isolated interruption after wrapper confirmation")
+        real_replace(lease, data)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(confined_io.ConfinedFileLease, "replace", interrupt_next_file)
+        with pytest.raises(KeyboardInterrupt):
+            install_shadow_hooks(
+                home=home,
+                runtime_python=Path(sys.executable),
+                project_root=project,
+                backup_tag="durable-owned",
+                hosts=("codex",),
+            )
+    return (
+        home,
+        home / ".codex/latent-compass-shadow/runtime/latent-compass-shadow-hook.py",
+        home / ".latent-compass-shadow.pending.json",
+    )
+
+
+@pytest.mark.parametrize("scenario", ["original", "peer-before-observation", "legacy-no-identity"])
+def test_durable_created_file_identity_binds_recovery_before_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    home, wrapper, journal = _interrupted_confirmed_creation(tmp_path, monkeypatch)
+    owned = wrapper.read_bytes()
+    with confined_io.lease_confined_file(
+        home, wrapper, max_bytes=1_000_000, what="fixture original identity"
+    ) as held:
+        original = held.identity
+    assert original is not None
+    payload = json.loads(journal.read_text(encoding="utf-8"))
+    entry = next(item for item in payload["entries"] if item["path"] == str(wrapper))
+    if scenario == "original":
+        assert payload["schema_version"] == 2
+        assert entry["publication_identity"] is not None
+    elif scenario == "peer-before-observation":
+        peer = tmp_path / "peer.py"
+        peer.write_bytes(owned)
+        peer.replace(wrapper)
+        with confined_io.lease_confined_file(
+            home, wrapper, max_bytes=1_000_000, what="fixture peer identity"
+        ) as held:
+            assert held.identity != original
+    else:
+        payload["schema_version"] = 1
+        for item in payload["entries"]:
+            item.pop("publication_identity", None)
+        journal.write_bytes(_json_bytes(payload))
+    result = recover_shadow_hooks(home=home)
+    if scenario == "original":
+        assert result["conflicts"] == []
+        assert not wrapper.exists()
+        assert not journal.exists()
+    else:
+        assert result["conflicts"], (
+            "hash parity must not authorize deletion of peer/unknown created file"
+        )
+        assert wrapper.read_bytes() == owned
+        assert journal.exists()
+
+
+def test_durable_fingerprint_rejects_reused_native_id_with_different_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, wrapper, journal = _interrupted_confirmed_creation(tmp_path, monkeypatch)
+    owned = wrapper.read_bytes()
+    payload = json.loads(journal.read_text(encoding="utf-8"))
+    entry = next(item for item in payload["entries"] if item["path"] == str(wrapper))
+    original_stamps = entry["publication_identity"]["stamps"]
+    peer = tmp_path / "same-bytes-peer.py"
+    peer.write_bytes(owned)
+    peer.replace(wrapper)
+    with confined_io.lease_confined_file(
+        home, wrapper, max_bytes=1_000_000, what="peer fixture"
+    ) as held:
+        identity, stamps = held.publication_fingerprint()
+    assert list(stamps) != original_stamps
+    # Model identifier reuse explicitly: retain the publication's old change
+    # stamp but make its native token equal to the current peer's token.
+    entry["publication_identity"]["token"] = [
+        part.hex() if isinstance(part, bytes) else part for part in identity.token
+    ]
+    journal.write_bytes(_json_bytes(payload))
+    result = recover_shadow_hooks(home=home)
+    assert result["conflicts"]
+    assert wrapper.read_bytes() == owned
+    assert journal.exists()
+
+
+def test_durable_fingerprint_unavailable_preserves_all_recovery_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home, wrapper, journal = _interrupted_confirmed_creation(tmp_path, monkeypatch)
+    before = journal.read_bytes()
+    real = confined_io.ConfinedFileLease.publication_fingerprint
+
+    def unavailable(
+        lease: confined_io.ConfinedFileLease,
+    ) -> tuple[confined_io.FileIdentity, tuple[int, ...]]:
+        if lease.path == wrapper:
+            raise ContractViolation("native generation evidence is unavailable")
+        return real(lease)
+
+    monkeypatch.setattr(confined_io.ConfinedFileLease, "publication_fingerprint", unavailable)
+    result = recover_shadow_hooks(home=home)
+    assert result["conflicts"]
+    assert wrapper.exists()
+    assert journal.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "defect", ["domain", "platform", "token-bool", "stamp-bool", "stamp-missing"]
+)
+def test_durable_fingerprint_schema_types_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, defect: str
+) -> None:
+    home, wrapper, journal = _interrupted_confirmed_creation(tmp_path, monkeypatch)
+    payload = json.loads(journal.read_text(encoding="utf-8"))
+    identity = next(item for item in payload["entries"] if item["path"] == str(wrapper))[
+        "publication_identity"
+    ]
+    if defect == "domain":
+        identity["domain"] = "foreign"
+    elif defect == "platform":
+        identity["backend"] = "posix" if os.name == "nt" else "windows"
+    elif defect == "token-bool":
+        identity["token"][0] = True
+    elif defect == "stamp-bool":
+        identity["stamps"][0] = True
+    else:
+        identity.pop("stamps")
+    journal.write_bytes(_json_bytes(payload))
+    before = journal.read_bytes()
+    assert recover_shadow_hooks(home=home)["conflicts"]
+    assert wrapper.exists()
+    assert journal.read_bytes() == before
+
+
+def test_create_interruption_before_identity_persistence_does_not_adopt_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex/hooks.json", {"hooks": {"PreToolUse": []}})
+    journal = home / ".latent-compass-shadow.pending.json"
+    real = confined_io.ConfinedFileLease.replace
+
+    def interrupted(lease: confined_io.ConfinedFileLease, data: bytes) -> None:
+        if lease.path == journal and any(
+            entry.get("publication_state") == "confirmed" for entry in json.loads(data)["entries"]
+        ):
+            raise KeyboardInterrupt("before atomic confirmation/identity journal publication")
+        real(lease, data)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(confined_io.ConfinedFileLease, "replace", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            install_shadow_hooks(
+                home=home,
+                runtime_python=Path(sys.executable),
+                project_root=project,
+                backup_tag="identity-not-persisted",
+                hosts=("codex",),
+            )
+    wrapper = home / ".codex/latent-compass-shadow/runtime/latent-compass-shadow-hook.py"
+    entry = next(
+        item for item in json.loads(journal.read_text())["entries"] if item["path"] == str(wrapper)
+    )
+    assert entry["publication_state"] == "attempted"
+    assert entry["publication_identity"] is None
+    assert recover_shadow_hooks(home=home)["conflicts"]
+    assert wrapper.exists()
+    assert journal.exists()
 
 
 @pytest.mark.parametrize("limit", ["characters", "arguments"])
@@ -3500,8 +3811,7 @@ def test_recovery_preserves_unconfirmed_future_create_after_interruption(tmp_pat
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
     wrapper_after = next(item["after"] for item in operations if item["path"] == wrapper)
     assert isinstance(wrapper_after, bytes)
-    _atomic_bytes(wrapper, wrapper_after, home=home, expected=None)
-    _confirm_create_publication(home, journal, journal_content, wrapper)
+    _publish_confirmed_fixture(home, journal, journal_content, wrapper, wrapper_after)
     config = home / ".codex" / "latent-compass-shadow" / "config.json"
     config_after = next(item["after"] for item in operations if item["path"] == config)
     assert isinstance(config_after, bytes)
@@ -3639,8 +3949,9 @@ def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path)
         plan=plan,
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
-    _atomic_text(wrapper, _packaged_hook_text())
-    _confirm_create_publication(home, journal, journal_content, wrapper)
+    _publish_confirmed_fixture(
+        home, journal, journal_content, wrapper, _packaged_hook_text().encode("utf-8")
+    )
 
     install_arguments = [
         "install",
@@ -3713,8 +4024,9 @@ def test_recovery_preflights_all_backups_before_first_mutation(tmp_path: Path) -
         plan=plan,
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
-    _atomic_text(wrapper, _packaged_hook_text())
-    _confirm_create_publication(home, journal, journal_content, wrapper)
+    _publish_confirmed_fixture(
+        home, journal, journal_content, wrapper, _packaged_hook_text().encode("utf-8")
+    )
     operations = cast(list[dict[str, Any]], plan["_operations"])
     settings_after = next(item["after"] for item in operations if item["path"] == hooks)
     assert isinstance(settings_after, bytes)
@@ -3751,8 +4063,9 @@ def test_recovery_preserves_created_file_changed_before_delete(
         plan=plan,
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
-    _atomic_text(wrapper, _packaged_hook_text())
-    _confirm_create_publication(home, journal, journal_content, wrapper)
+    _publish_confirmed_fixture(
+        home, journal, journal_content, wrapper, _packaged_hook_text().encode("utf-8")
+    )
     real_remove = confined_io.ConfinedFileLease.remove
     swapped = False
 
@@ -3796,8 +4109,7 @@ def test_recovery_revokes_before_identity_check_and_never_deletes_same_byte_peer
     )
     wrapper = next(path for path in snapshots if path.name == "latent-compass-shadow-hook.py")
     owned = _packaged_hook_text().encode("utf-8")
-    _atomic_bytes(wrapper, owned, home=home, expected=None)
-    _confirm_create_publication(home, journal, journal_content, wrapper)
+    _publish_confirmed_fixture(home, journal, journal_content, wrapper, owned)
     peer = tmp_path / "peer-wrapper.py"
     peer.write_bytes(owned)
     peer_stat = peer.stat()
@@ -3868,8 +4180,7 @@ def test_recovery_revokes_create_authority_before_delete(
         if item["path"] == wrapper
     )
     assert isinstance(wrapper_after, bytes)
-    _atomic_bytes(wrapper, wrapper_after)
-    _confirm_create_publication(home, journal, journal_content, wrapper)
+    _publish_confirmed_fixture(home, journal, journal_content, wrapper, wrapper_after)
     real_remove = confined_io.ConfinedFileLease.remove
     real_replace = confined_io.ConfinedFileLease.replace
     revoked_before_delete = False
@@ -4286,26 +4597,22 @@ def test_recovery_description_uses_preflight_target_observation(
     hooks = home / ".codex" / "hooks.json"
     hooks.parent.mkdir(parents=True)
     state_x = b"transaction-after"
-    hooks.write_bytes(state_x)
-    journal = home / ".latent-compass-shadow.pending.json"
-    journal.write_bytes(
-        _json_bytes(
-            {
-                "schema_version": 1,
-                "operation": "install",
-                "backup_tag": "observe-once",
-                "entries": [
-                    {
-                        "path": str(hooks),
-                        "before_sha256": None,
-                        "after_sha256": _bytes_digest(state_x),
-                        "backup_path": None,
-                        "publication_confirmed": True,
-                    }
-                ],
-            }
-        )
+    journal, journal_content = _begin_transaction(
+        home=home,
+        operation="install",
+        backup_tag="observe-once",
+        plan={
+            "files": [
+                {
+                    "path": str(hooks),
+                    "action": "create",
+                    "before_sha256": None,
+                    "after_sha256": _bytes_digest(state_x),
+                }
+            ]
+        },
     )
+    _publish_confirmed_fixture(home, journal, journal_content, hooks, state_x)
     real_lease = confined_io.lease_confined_file
     target_reads = 0
 
@@ -4345,7 +4652,7 @@ def test_recovery_description_uses_preflight_target_observation(
     assert not journal.exists()
 
 
-def test_legacy_confirmed_revocation_is_canonical_before_failed_delete(
+def test_legacy_confirmed_create_is_unknown_before_any_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -4384,13 +4691,13 @@ def test_legacy_confirmed_revocation_is_canonical_before_failed_delete(
         failed = recover_shadow_hooks(home=home)
 
     failed_conflicts = cast(list[dict[str, object]], failed["conflicts"])
-    assert failed_conflicts[0]["code"] == "pending_transaction_invalid"
+    assert failed_conflicts[0]["code"] == "pending_transaction_conflict"
+    assert "ownership is unknown" in str(failed_conflicts[0]["detail"])
     payload = json.loads(journal.read_text(encoding="utf-8"))
     entry = payload["entries"][0]
-    assert entry["publication_state"] == "revoked"
-    assert "publication_confirmed" not in entry
+    assert entry["publication_confirmed"] is True
+    assert "publication_state" not in entry
     assert hooks.read_bytes() == after
-
     preview = plan_recover_shadow_hooks(home=home)
     preview_conflicts = cast(list[dict[str, object]], preview["conflicts"])
     assert preview_conflicts[0]["code"] == "pending_transaction_conflict"
@@ -4495,8 +4802,7 @@ def test_recovery_refuses_journal_replacement_before_any_target_mutation(
         if item["path"] == wrapper
     )
     assert isinstance(wrapper_after, bytes)
-    _atomic_bytes(wrapper, wrapper_after)
-    _confirm_create_publication(home, journal, journal_a, wrapper)
+    _publish_confirmed_fixture(home, journal, journal_a, wrapper, wrapper_after)
     journal_before = journal.read_bytes()
     real_assert_current = confined_io.ConfinedFileLease.assert_current
 

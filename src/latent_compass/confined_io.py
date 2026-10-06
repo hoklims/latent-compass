@@ -83,6 +83,24 @@ class ConfinedFileLease:
     def exists(self) -> bool:
         return self.identity is not None
 
+    def publication_fingerprint(self) -> tuple[FileIdentity, tuple[int, ...]]:
+        """Read local identity/change evidence from this held handle, never adopt a path."""
+        self._ensure_open()
+        self.assert_current()
+        if self.identity is None or self._file_handle is None:
+            raise ContractViolation("publication fingerprint is unavailable for an absent file")
+        stamps: tuple[int, ...]
+        if self._backend == "windows":
+            stamps = _file_generation_times_windows(self._file_handle, self.path)
+        else:
+            status = os.fstat(self._file_handle)
+            stamps = (getattr(status, "st_ctime_ns", 0),)
+        if any(type(stamp) is not int or stamp <= 0 for stamp in stamps):
+            raise ContractViolation(
+                "publication fingerprint has unavailable native change evidence"
+            )
+        return self.identity, stamps
+
     def assert_current(self) -> None:
         self._ensure_open()
         if self._publication_uncertain:
@@ -1495,6 +1513,15 @@ if sys.platform == "win32":
         return FileIdentity(
             "windows", (int(info.VolumeSerialNumber), bytes(info.FileId.Identifier))
         )
+
+    def _file_generation_times_windows(handle: int, path: Path) -> tuple[int, int]:
+        info = _FileBasicInfo()
+        if not _kernel32.GetFileInformationByHandleEx(
+            handle, 0, ctypes.byref(info), ctypes.sizeof(info)
+        ):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        return int(info.CreationTime), int(info.ChangeTime)
 
     def _read_all_windows(handle: int, size: int, path: Path, *, what: str) -> bytes:
         chunks: list[bytes] = []
