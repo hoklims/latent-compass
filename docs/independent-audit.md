@@ -18,10 +18,60 @@ files from the candidate Git object, reconstructs the tree and complete changed
 file inventory, then requires byte-for-byte equality with the submitted epoch.
 Working-tree edits therefore cannot change an epoch for an unchanged commit.
 
-The receipt uses schema `hoklims/latent-compass:independent-audit/3` and copies
-the epoch's `epoch_digest`, `policy_digest`, and `head_sha`. It records all eight
-independence booleans enforced by the gate, a non-empty `claims` array, an empty
-`unresolved_blockers` array, and verdict `PROOF_ADEQUATE`.
+Epochs and receipts use schema `hoklims/latent-compass:independent-audit/4`.
+The receipt copies the epoch's `epoch_digest`, `policy_digest`, and `head_sha`.
+It records `audit_profile`, `independence`, `isolation`, a non-empty `claims`
+array, an empty `unresolved_blockers` array, and verdict `PROOF_ADEQUATE`.
+Legacy v3 artifacts are rejected; do not relabel an old epoch or receipt as v4.
+Create a new Git-bound epoch and perform a new audit.
+
+## Explicit audit profiles
+
+The operator selects the profile through `--audit-profile`; its default is
+`separate-account`. The receipt must name exactly the same profile. Receipt
+contents never select or relax the gate's profile.
+
+`separate-account` retains the eight required true booleans:
+`not_candidate_author`, `read_only_candidate`, `fresh_session`,
+`distinct_harness`, `distinct_account`, `distinct_environment`,
+`distinct_evidence_store`, and `first_pass_before_author_narrative`.
+Its `isolation` field must be `null`.
+
+`isolated-session` is an operator-chosen adaptation for a fresh independent
+review on the same account. It requires exactly this receipt profile section:
+
+```json
+{
+  "audit_profile": "isolated-session",
+  "independence": {
+    "not_candidate_author": true,
+    "read_only_candidate": true,
+    "fresh_session": true,
+    "first_pass_before_author_narrative": true,
+    "distinct_account": false
+  },
+  "isolation": {
+    "session_id": "observed-fresh-session-id",
+    "forked": false,
+    "sandbox_mode": "read-only",
+    "persistent_memory": false,
+    "write_tools_enabled": false
+  }
+}
+```
+
+The session identifier must be non-empty, the session must not be forked, and
+the observed sandbox must be read-only. `persistent_memory` and
+`write_tools_enabled` may be `null` only when their attestations are unavailable;
+report that uncertainty rather than inventing a false attestation. `true`,
+missing or malformed values are refused. This profile does not claim a distinct
+account, host/environment, harness or evidence store. Additional independence
+or isolation fields are rejected.
+
+The auditor first reads the source without the author's narrative, then reviews
+the final raw evidence and candidate bindings before issuing the receipt. A
+fresh session on the same account is not author-independent if it authored the
+candidate or did not perform that first pass.
 
 Each claim names the claim and every invocation path. Its `witness` contains a
 specific mutation, one or more precise repository-relative pytest node IDs, the
@@ -41,9 +91,34 @@ python tools/independent_audit.py gate \
   --repository . --epoch epoch.json --receipt receipt.json
 ```
 
+To use the same-account adaptation explicitly:
+
+```bash
+python tools/independent_audit.py gate \
+  --repository . --epoch epoch.json --receipt receipt.json \
+  --audit-profile isolated-session
+```
+
 Only exit code zero with `"decision": "ALLOW"` is an adequate receipt. A
 missing field, stale epoch, failed independence condition, absent red/green
 witness, unresolved blocker, or weaker verdict exits non-zero with `BLOCK`.
+An isolated-session allowance reports verdict `PROOF_ADEQUATE_WITH_LIMITS` and
+always includes `SAME_ACCOUNT_ISOLATED_REVIEW`. Unknown attestations additionally
+produce `AUDITOR_ENVIRONMENT_UNATTESTED:persistent_memory` and/or
+`AUDITOR_ENVIRONMENT_UNATTESTED:write_tools_enabled`. The strict profile reports
+`PROOF_ADEQUATE` with an empty limits list. All Git-object bindings, claim and
+invocation requirements, mutation-byte checks, actual red rejection, pristine
+green replay and blocker/verdict requirements are identical across profiles.
+
+## Changes to this proof mechanism
+
+The candidate gate cannot approve its own modification. Admission of a change
+to this protocol, its gate or tests requires the immutable external N-1
+evaluator; in the current operator workflow this is the installed global proof
+policy, kept unchanged during candidate authoring and review. Exercise this
+public gate for behavioral evidence, but do not treat its result as authority
+to activate its own changed policy. A fresh independent source-first audit and
+final evidence review remain required before external admission.
 
 This protocol establishes that the named public candidate survived the stated
 independent adversarial checks. It does not establish comparative product

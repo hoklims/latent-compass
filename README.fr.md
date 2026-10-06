@@ -339,9 +339,14 @@ six invariants majeurs par mutants rouges/verts et n’a trouvé aucun contenu
 étranger dans la release, mais il a aussi relevé des défauts matériels dans la
 release et le contrat de preuve. Le
 [protocole public d’audit indépendant](docs/independent-audit.md) remplace
-désormais le gate privé inaccessible. Seul un nouveau reçu indépendant accepté
-par ce gate avec `ALLOW` peut changer le statut formel. Il n’autorise ni pilote,
-ni exécution des hooks, ni retrait d’index.
+désormais le gate privé inaccessible. Le schéma v4 conserve `separate-account`
+comme profil strict par défaut. L’opérateur peut choisir explicitement
+`isolated-session` pour une revue indépendante sur le même compte, avec une
+isolation observée et des limites déclarées. Un nouveau reçu lié au candidat
+exact reste requis. Toute modification du mécanisme de preuve doit aussi être
+admise par l’évaluateur extérieur N-1, maintenu inchangé : le gate candidat ne
+peut pas s’approuver lui-même. Cela n’autorise ni pilote, ni exécution des hooks,
+ni retrait d’index.
 
 ## Enregistrer et rejouer un épisode
 

@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 _TOOL = run_path(str(ROOT / "tools" / "independent_audit.py"))
 AuditError = cast(type[ValueError], _TOOL["AuditError"])
 create_epoch = cast(Callable[[Path, str, str], dict[str, object]], _TOOL["create_epoch"])
-gate = cast(Callable[[Path, dict[str, Any], dict[str, Any]], dict[str, object]], _TOOL["gate"])
+gate = cast(Callable[..., dict[str, object]], _TOOL["gate"])
 epoch_digest = cast(Callable[[dict[str, Any]], str], _TOOL["_epoch_digest"])
 digest = cast(Callable[[bytes], str], _TOOL["_digest"])
 changed_paths = cast(Callable[[Path, str, str], list[str]], _TOOL["_changed_paths"])
@@ -90,10 +90,12 @@ def _receipt(epoch: dict[str, Any]) -> dict[str, Any]:
     }
     claim = "the gate detects a representative defect"
     return {
-        "schema": "hoklims/latent-compass:independent-audit/3",
+        "schema": "hoklims/latent-compass:independent-audit/4",
         "epoch_digest": epoch["epoch_digest"],
         "policy_digest": epoch["policy_digest"],
         "head_sha": epoch["head_sha"],
+        "audit_profile": "separate-account",
+        "isolation": None,
         "independence": {
             "not_candidate_author": True,
             "read_only_candidate": True,
@@ -126,6 +128,216 @@ def test_gate_allows_a_repository_derived_adequate_receipt(
 ) -> None:
     repository, epoch, receipt = audited_repository
     assert gate(repository, epoch, receipt)["decision"] == "ALLOW"
+
+
+def _isolated_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(receipt)
+    result["audit_profile"] = "isolated-session"
+    result["independence"] = {
+        "not_candidate_author": True,
+        "read_only_candidate": True,
+        "fresh_session": True,
+        "first_pass_before_author_narrative": True,
+        "distinct_account": False,
+    }
+    result["isolation"] = {
+        "session_id": "fresh-independent-session",
+        "forked": False,
+        "sandbox_mode": "read-only",
+        "persistent_memory": False,
+        "write_tools_enabled": False,
+    }
+    return result
+
+
+def test_isolated_profile_requires_explicit_operator_opt_in(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    with pytest.raises(AuditError, match="audit_profile"):
+        gate(repository, epoch, _isolated_receipt(receipt))
+
+
+@pytest.mark.parametrize("unknown_environment", [False, True])
+def test_isolated_profile_reports_same_account_and_unknown_environment_honestly(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    unknown_environment: bool,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    if unknown_environment:
+        isolated["isolation"]["persistent_memory"] = None
+        isolated["isolation"]["write_tools_enabled"] = None
+    result = gate(repository, epoch, isolated, audit_profile="isolated-session")
+    assert result["decision"] == "ALLOW"
+    assert result["audit_profile"] == "isolated-session"
+    assert result["verdict"] == "PROOF_ADEQUATE_WITH_LIMITS"
+    assert result["limits"] == ["SAME_ACCOUNT_ISOLATED_REVIEW"] + (
+        [
+            "AUDITOR_ENVIRONMENT_UNATTESTED:persistent_memory",
+            "AUDITOR_ENVIRONMENT_UNATTESTED:write_tools_enabled",
+        ]
+        if unknown_environment
+        else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "field", "value"),
+    [
+        ("independence", "not_candidate_author", False),
+        ("independence", "read_only_candidate", False),
+        ("independence", "fresh_session", False),
+        ("independence", "first_pass_before_author_narrative", False),
+        ("independence", "distinct_account", True),
+        ("independence", "distinct_account", 0),
+        ("isolation", "session_id", " "),
+        ("isolation", "session_id", 123),
+        ("isolation", "forked", True),
+        ("isolation", "forked", None),
+        ("isolation", "sandbox_mode", "danger-full-access"),
+        ("isolation", "persistent_memory", True),
+        ("isolation", "persistent_memory", 0),
+        ("isolation", "write_tools_enabled", True),
+        ("isolation", "write_tools_enabled", "false"),
+    ],
+)
+def test_isolated_profile_refuses_false_independence_or_violated_isolation(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    group: str,
+    field: str,
+    value: object,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    isolated[group][field] = value
+    with pytest.raises(AuditError):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+@pytest.mark.parametrize("group", ["independence", "isolation"])
+@pytest.mark.parametrize("change", ["missing", "extra", "not-an-object"])
+def test_isolated_profile_requires_exact_metadata_fields(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    group: str,
+    change: str,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    if change == "missing":
+        isolated[group].pop(next(iter(isolated[group])))
+    elif change == "extra":
+        isolated[group]["invented"] = False
+    else:
+        isolated[group] = None
+    with pytest.raises(AuditError):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+@pytest.mark.parametrize("field", ["forked", "persistent_memory", "write_tools_enabled"])
+def test_isolated_profile_refuses_missing_environment_attestations(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]], field: str
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    del isolated["isolation"][field]
+    with pytest.raises(AuditError, match="isolation"):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+def test_strict_profile_still_refuses_same_account_and_nonnull_isolation(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    receipt["independence"]["distinct_account"] = False
+    with pytest.raises(AuditError, match="distinct_account"):
+        gate(repository, epoch, receipt)
+    receipt["independence"]["distinct_account"] = True
+    receipt["isolation"] = _isolated_receipt(receipt)["isolation"]
+    with pytest.raises(AuditError, match="isolation"):
+        gate(repository, epoch, receipt)
+
+
+@pytest.mark.parametrize("claimed_profile", ["separate-account", "invented", None])
+def test_isolated_profile_cannot_be_forged_or_selected_by_the_receipt(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]], claimed_profile: object
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    isolated["audit_profile"] = claimed_profile
+    with pytest.raises(AuditError, match="audit_profile"):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+def test_legacy_v3_is_not_relabelled_or_admitted_under_a_v4_epoch(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    receipt["schema"] = "hoklims/latent-compass:independent-audit/3"
+    with pytest.raises(AuditError, match="schema"):
+        gate(repository, epoch, receipt)
+
+
+@pytest.mark.parametrize("failure", ["claims", "invocations", "mutation", "verdict", "blockers"])
+def test_isolated_profile_preserves_existing_fail_closed_proof_rules(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]], failure: str
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    if failure == "claims":
+        isolated["claims"] = []
+    elif failure == "invocations":
+        isolated["claims"][0]["invocation_paths"] = ["local"]
+    elif failure == "mutation":
+        isolated["claims"][0]["witness"]["targets"][0]["before"] = "not the candidate"
+    elif failure == "verdict":
+        isolated["verdict"] = "PROOF_WEAK"
+    else:
+        isolated["unresolved_blockers"] = ["unresolved"]
+    with pytest.raises(AuditError):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+@pytest.mark.parametrize(
+    ("profile", "exit_code"), [(None, 1), ("isolated-session", 0), ("invented", 2)]
+)
+def test_cli_profile_selection_is_external_and_defaults_to_strict(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    tmp_path: Path,
+    profile: str | None,
+    exit_code: int,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    epoch_path = tmp_path / "epoch.json"
+    receipt_path = tmp_path / "receipt.json"
+    epoch_path.write_text(json.dumps(epoch), encoding="utf-8")
+    receipt_path.write_text(json.dumps(_isolated_receipt(receipt)), encoding="utf-8")
+    arguments = [
+        sys.executable,
+        str(ROOT / "tools" / "independent_audit.py"),
+        "gate",
+        "--repository",
+        str(repository),
+        "--epoch",
+        str(epoch_path),
+        "--receipt",
+        str(receipt_path),
+    ]
+    if profile is not None:
+        arguments += ["--audit-profile", profile]
+    result = subprocess.run(  # noqa: S603 - fixed CLI and fixture-only argv
+        arguments, check=False, capture_output=True, text=True, encoding="utf-8"
+    )
+    assert result.returncode == exit_code
+    if profile is None:
+        assert json.loads(result.stderr)["decision"] == "BLOCK"
+        assert "audit_profile" in json.loads(result.stderr)["error"]
+    elif profile == "isolated-session":
+        decision = json.loads(result.stdout)
+        assert decision["verdict"] == "PROOF_ADEQUATE_WITH_LIMITS"
+        assert decision["limits"] == ["SAME_ACCOUNT_ISOLATED_REVIEW"]
+    else:
+        assert "invalid choice" in result.stderr
 
 
 def test_epoch_inventory_covers_both_sides_of_a_rename(

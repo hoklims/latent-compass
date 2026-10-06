@@ -303,9 +303,13 @@ The current status remains **`PROOF_WEAK/BLOCK`**. The first independent audit
 verified six high-impact invariants with red/green mutants and found no foreign
 release payload, but it also found material release and proof-contract defects.
 The public [independent-audit protocol](docs/independent-audit.md) now replaces
-the unreachable private gate. Only a fresh independent receipt accepted by that
-gate with `ALLOW` can change the formal proof status. It does not authorize a
-pilot, hook execution, or index removal.
+the unreachable private gate. Schema v4 defaults to strict `separate-account`
+review; operators may explicitly choose `isolated-session` for an independent
+review on the same account, with observed isolation and stated limits. A fresh
+receipt bound to the exact candidate is required. Changes to the proof mechanism
+must also be admitted by the unchanged external N-1 evaluator; the candidate gate
+cannot approve itself. This does not authorize a pilot, hook execution, or index
+removal.
 
 ## Record and replay an episode
 

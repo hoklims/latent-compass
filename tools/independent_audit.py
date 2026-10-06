@@ -15,7 +15,8 @@ from pathlib import Path, PurePosixPath
 from re import fullmatch
 from typing import Any
 
-SCHEMA = "hoklims/latent-compass:independent-audit/3"
+SCHEMA = "hoklims/latent-compass:independent-audit/4"
+AUDIT_PROFILES = ("separate-account", "isolated-session")
 REPOSITORY = "hoklims/latent-compass"
 SHA256_PATTERN = r"sha256:[0-9a-f]{64}"
 GIT_SHA_PATTERN = r"[0-9a-f]{40}"
@@ -190,7 +191,69 @@ def _required_bool(mapping: dict[str, Any], key: str) -> None:
         raise AuditError(f"{key} must be true")
 
 
-def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
+def _audit_independence(receipt: dict[str, Any], audit_profile: str) -> list[str]:
+    if audit_profile not in AUDIT_PROFILES or receipt.get("audit_profile") != audit_profile:
+        raise AuditError("receipt audit_profile must match the externally selected audit_profile")
+    independence = receipt.get("independence")
+    if not isinstance(independence, dict):
+        raise AuditError("independence must be an object")
+    shared_fields = {
+        "not_candidate_author",
+        "read_only_candidate",
+        "fresh_session",
+        "first_pass_before_author_narrative",
+    }
+    independence_fields = shared_fields | {"distinct_account"}
+    if audit_profile == "separate-account":
+        independence_fields |= {
+            "distinct_harness",
+            "distinct_environment",
+            "distinct_evidence_store",
+        }
+    if set(independence) != independence_fields:
+        raise AuditError("independence fields do not match the selected schema 4 profile")
+    for key in shared_fields:
+        _required_bool(independence, key)
+    if audit_profile == "separate-account":
+        for key in independence_fields - shared_fields:
+            _required_bool(independence, key)
+        if receipt["isolation"] is not None:
+            raise AuditError("separate-account isolation must be null")
+        return []
+    if independence["distinct_account"] is not False:
+        raise AuditError("isolated-session distinct_account must be false")
+    isolation = receipt["isolation"]
+    isolation_fields = {
+        "session_id",
+        "forked",
+        "sandbox_mode",
+        "persistent_memory",
+        "write_tools_enabled",
+    }
+    if not isinstance(isolation, dict) or set(isolation) != isolation_fields:
+        raise AuditError("isolation fields do not match the isolated-session profile")
+    if not isinstance(isolation["session_id"], str) or not isolation["session_id"].strip():
+        raise AuditError("isolation session_id must be a non-empty string")
+    if isolation["forked"] is not False:
+        raise AuditError("isolation forked must be false")
+    if isolation["sandbox_mode"] != "read-only":
+        raise AuditError("isolation sandbox_mode must be read-only")
+    limits = ["SAME_ACCOUNT_ISOLATED_REVIEW"]
+    for key in ("persistent_memory", "write_tools_enabled"):
+        if isolation[key] is None:
+            limits.append(f"AUDITOR_ENVIRONMENT_UNATTESTED:{key}")
+        elif isolation[key] is not False:
+            raise AuditError(f"isolation {key} must be false or null")
+    return limits
+
+
+def gate(
+    repository: Path,
+    epoch: dict[str, Any],
+    receipt: dict[str, Any],
+    *,
+    audit_profile: str = "separate-account",
+) -> dict[str, object]:
     root = _root(repository)
     if epoch.get("schema") != SCHEMA or receipt.get("schema") != SCHEMA:
         raise AuditError(f"schema must be {SCHEMA}")
@@ -240,30 +303,16 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
         "epoch_digest",
         "policy_digest",
         "head_sha",
+        "audit_profile",
+        "isolation",
         "independence",
         "claims",
         "unresolved_blockers",
         "verdict",
     }
     if set(receipt) != required_receipt:
-        raise AuditError("receipt fields do not match schema 3")
-    independence = receipt.get("independence")
-    if not isinstance(independence, dict):
-        raise AuditError("independence must be an object")
-    independence_fields = {
-        "not_candidate_author",
-        "read_only_candidate",
-        "fresh_session",
-        "distinct_harness",
-        "distinct_account",
-        "distinct_environment",
-        "distinct_evidence_store",
-        "first_pass_before_author_narrative",
-    }
-    if set(independence) != independence_fields:
-        raise AuditError("independence fields do not match schema 3")
-    for key in independence_fields:
-        _required_bool(independence, key)
+        raise AuditError("receipt fields do not match schema 4")
+    limits = _audit_independence(receipt, audit_profile)
     claims = receipt.get("claims")
     if not isinstance(claims, list) or not claims:
         raise AuditError("at least one material claim is required")
@@ -275,7 +324,7 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
             raise AuditError(f"claim {index} has no claim text")
         invocation_paths = claim.get("invocation_paths")
         if invocation_paths != REQUIRED_INVOCATION_PATHS:
-            raise AuditError(f"claim {index} invocation paths do not match schema 3")
+            raise AuditError(f"claim {index} invocation paths do not match schema 4")
         witness = claim.get("witness")
         if not isinstance(witness, dict) or set(witness) != {
             "expected_failure",
@@ -362,6 +411,9 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
     return {
         "schema": SCHEMA,
         "decision": "ALLOW",
+        "audit_profile": audit_profile,
+        "verdict": "PROOF_ADEQUATE_WITH_LIMITS" if limits else "PROOF_ADEQUATE",
+        "limits": limits,
         "epoch_digest": epoch["epoch_digest"],
         "head_sha": epoch["head_sha"],
         "witnesses": witness_results,
@@ -387,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
     gate_parser.add_argument("--repository", type=Path, default=Path.cwd())
     gate_parser.add_argument("--epoch", type=Path, required=True)
     gate_parser.add_argument("--receipt", type=Path, required=True)
+    gate_parser.add_argument("--audit-profile", choices=AUDIT_PROFILES, default="separate-account")
     args = parser.parse_args(argv)
     try:
         if args.command == "epoch":
@@ -397,7 +450,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 sys.stdout.write(rendered)
         else:
-            result = gate(args.repository, _load(args.epoch), _load(args.receipt))
+            result = gate(
+                args.repository,
+                _load(args.epoch),
+                _load(args.receipt),
+                audit_profile=args.audit_profile,
+            )
             sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return 0
     except (AuditError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
