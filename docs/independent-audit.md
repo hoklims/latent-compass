@@ -79,10 +79,31 @@ node ID expected to fail, and the exact UTF-8 before/after bytes and digests for
 each canonical mutation target. The gate creates two independent detached
 disposable worktrees at the candidate commit. In the first it checks every
 `before` value against that Git object, applies the mutation, and requires both
-a non-zero exit and the named failure in pytest output. In the pristine second
-worktree it requires the same tests to pass. Exit codes and output digests are
+pytest exit 1 and a trusted execution report showing the named node actually
+failed during its `call` phase. Collection, usage, internal, setup and teardown
+errors, signals, timeouts, failures outside declared selectors, skipped and
+xfailed executions cannot count as detection. In the pristine second worktree it requires exit 0
+and all selected nodes to have been collected, executed and passed. Qualified
+class and parameter selectors are resolved against exact collected node IDs.
+The expected failure identifies a leaf function/method or its parameter group,
+never an arbitrary class prefix. Other declared selected tests may also fail
+during `call`; the expected leaf must be among those actual failures.
+Before any child runs, each selector's file must be a canonical tracked regular
+Git blob in the candidate. Traversal, aliased or missing paths and symlink nodes
+are rejected, and the expected failure must belong to the selected nodes.
+Exit codes and output digests are
 produced by the gate itself, not accepted from the receipt. Every claim must
 cover the exact invocation paths `local`, `pull_request`, and `main`.
+
+The pytest reporter belongs to the policy digest. Before each child process the
+evaluator copies it from its canonical policy directory into a temporary
+directory outside the mutated worktree. Each fresh report has a per-run nonce;
+missing, malformed or stale reports refuse admission.
+The child imports installed pytest and canonical instrumentation before adding
+the candidate's import paths, so candidate module names cannot replace either
+evaluator during bootstrap. Reported execution proves the test outcome and
+phase, not universal semantic relevance of every possible
+test-body failure. Independent source and material-claim review remain required.
 
 Run the fail-closed gate with:
 

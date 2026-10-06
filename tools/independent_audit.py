@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path, PurePosixPath
 from re import fullmatch
 from typing import Any
@@ -26,6 +27,7 @@ PYTEST_NODE_PATTERN = r"tests/[A-Za-z0-9_./-]+\.py::[A-Za-z0-9_\[\].:-]+"
 POLICY_FILES = (
     "docs/independent-audit.md",
     "tools/independent_audit.py",
+    "tools/audit_pytest_reporter.py",
     "tests/test_independent_audit.py",
 )
 
@@ -100,11 +102,27 @@ def _changed_paths(root: Path, base_sha: str, head_sha: str) -> list[str]:
     return sorted(set(paths))
 
 
-def _run_pytest(root: Path, targets: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_pytest(
+    root: Path,
+    targets: list[str],
+    reporter: Path,
+    report: Path,
+    nonce: str,
+) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join((str(root), str(root / "src")))
+    environment["PYTHONPATH"] = str(reporter.parent)
     return subprocess.run(  # noqa: S603 - fixed interpreter/module; targets are argv entries
-        [sys.executable, "-m", "pytest", "-q", *targets],
+        [
+            sys.executable,
+            "-P",
+            str(reporter),
+            str(root),
+            "--latent-audit-report",
+            str(report),
+            "--latent-audit-nonce",
+            nonce,
+            *targets,
+        ],
         cwd=root,
         env=environment,
         capture_output=True,
@@ -116,6 +134,120 @@ def _run_pytest(root: Path, targets: list[str]) -> subprocess.CompletedProcess[s
     )
 
 
+def _matches_selector(node: str, selector: str) -> bool:
+    return node == selector or node.startswith(selector + "[") or node.startswith(selector + "::")
+
+
+def _matches_failure(node: str, expected: str) -> bool:
+    return node == expected or node.startswith(expected + "[")
+
+
+def _validate_pytest_node(root: Path, revision: str, node: str) -> None:
+    relative = node.split("::", 1)[0]
+    path = PurePosixPath(relative)
+    if path.as_posix() != relative or any(part in {".", ".."} for part in path.parts):
+        raise AuditError("pytest node path must be canonical and repository-relative")
+    entry = _git(root, "ls-tree", "-z", revision, "--", relative, binary=True)
+    assert isinstance(entry, bytes)
+    entries = entry.split(b"\0")
+    if len(entries) != 2 or entries[1] != b"":
+        raise AuditError("pytest node file must be tracked in the candidate")
+    metadata, separator, recorded_path = entries[0].partition(b"\t")
+    if (
+        not separator
+        or recorded_path.decode("utf-8") != relative
+        or metadata.split(b" ")[:2] not in [[b"100644", b"blob"], [b"100755", b"blob"]]
+    ):
+        raise AuditError("pytest node file must be a regular candidate blob, not a symlink")
+
+
+def _validate_test_report(
+    report: Path,
+    nonce: str,
+    exit_code: int,
+    targets: list[str],
+    expected: str,
+    *,
+    red: bool,
+) -> None:
+    expected_exit = 1 if red else 0
+    if exit_code != expected_exit:
+        raise AuditError(
+            f"witness {'red' if red else 'green'} requires pytest exit {expected_exit}"
+        )
+    try:
+        if report.stat().st_size > MAX_MUTATION_BYTES:
+            raise AuditError("witness execution report is too large")
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AuditError("witness execution report is missing or malformed") from exc
+    if not isinstance(data, dict) or set(data) != {
+        "schema",
+        "nonce",
+        "collected",
+        "reports",
+        "collection_errors",
+        "internal_error",
+        "exit_status",
+    }:
+        raise AuditError("witness execution report fields are malformed")
+    if type(data["schema"]) is not int or data["schema"] != 1 or data["nonce"] != nonce:
+        raise AuditError("witness execution report is stale or unsupported")
+    if type(data["exit_status"]) is not int or data["exit_status"] != exit_code:
+        raise AuditError("witness execution report exit status is invalid")
+    if data["collection_errors"] != [] or data["internal_error"] is not False:
+        raise AuditError("witness collection or internal errors are not defect detection")
+    collected = data["collected"]
+    reports = data["reports"]
+    if (
+        not isinstance(collected, list)
+        or not collected
+        or not all(isinstance(node, str) for node in collected)
+        or len(set(collected)) != len(collected)
+        or not isinstance(reports, list)
+    ):
+        raise AuditError("witness selected tests were not collected")
+    for selector in targets:
+        if not any(_matches_selector(node, selector) for node in collected):
+            raise AuditError("expected failure marker does not identify a collected test")
+    if not any(_matches_failure(node, expected) for node in collected):
+        raise AuditError("expected failure marker must identify a collected leaf test")
+    if any(
+        not any(_matches_selector(node, selector) for selector in targets) for node in collected
+    ):
+        raise AuditError("witness collected unrelated test nodes")
+    phases: dict[str, dict[str, str]] = {node: {} for node in collected}
+    for item in reports:
+        if not isinstance(item, dict) or set(item) != {"nodeid", "when", "outcome", "xfail"}:
+            raise AuditError("witness execution record is malformed")
+        node, when, outcome = item["nodeid"], item["when"], item["outcome"]
+        if (
+            not isinstance(node, str)
+            or node not in phases
+            or not isinstance(when, str)
+            or not isinstance(outcome, str)
+            or when not in {"setup", "call", "teardown"}
+            or outcome not in {"passed", "failed"}
+            or item["xfail"] is not False
+            or when in phases[node]
+        ):
+            raise AuditError("witness skipped, xfailed, duplicate or invalid execution record")
+        phases[node][when] = outcome
+    failed = []
+    for node, outcomes in phases.items():
+        if set(outcomes) != {"setup", "call", "teardown"}:
+            raise AuditError("witness expected tests did not execute every phase")
+        if outcomes["setup"] != "passed" or outcomes["teardown"] != "passed":
+            raise AuditError("witness setup or teardown failure is not defect detection")
+        if outcomes["call"] == "failed":
+            failed.append(node)
+    if red:
+        if not any(_matches_failure(node, expected) for node in failed):
+            raise AuditError("expected failure marker does not identify the executed failed call")
+    elif failed:
+        raise AuditError("witness restoration did not pass the executed tests")
+
+
 def _execute_witness(
     repository: Path,
     head_sha: str,
@@ -123,6 +255,8 @@ def _execute_witness(
     pytest_targets: list[str],
     expected_failure: str,
 ) -> dict[str, object]:
+    reporter_bytes = Path(__file__).with_name("audit_pytest_reporter.py").read_bytes()
+
     def run_variant(*, mutate: bool) -> subprocess.CompletedProcess[str]:
         temporary = tempfile.mkdtemp(prefix="latent-compass-audit-")
         worktree = Path(temporary) / "candidate"
@@ -133,19 +267,30 @@ def _execute_witness(
                     (worktree / target["path"]).write_text(
                         target["after"], encoding="utf-8", newline=""
                     )
-            return _run_pytest(worktree, pytest_targets)
+            # Evaluator instrumentation is copied from canonical policy, never the mutated tree.
+            reporter = Path(temporary) / "_latent_audit_reporter.py"
+            reporter.write_bytes(reporter_bytes)
+            report = Path(temporary) / "execution.json"
+            nonce = uuid.uuid4().hex
+            try:
+                result = _run_pytest(worktree, pytest_targets, reporter, report, nonce)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise AuditError("witness runner failed or timed out") from exc
+            _validate_test_report(
+                report,
+                nonce,
+                result.returncode,
+                pytest_targets,
+                expected_failure,
+                red=mutate,
+            )
+            return result
         finally:
             _git(repository, "worktree", "remove", "--force", str(worktree))
             shutil.rmtree(temporary, ignore_errors=True)
 
     red = run_variant(mutate=True)
     green = run_variant(mutate=False)
-    if red.returncode == 0:
-        raise AuditError("witness mutation did not make its oracle fail")
-    if expected_failure not in (red.stdout + red.stderr):
-        raise AuditError("witness red output lacks the expected failure marker")
-    if green.returncode != 0:
-        raise AuditError("witness restoration did not make its oracle pass")
     return {
         "red_exit": red.returncode,
         "green_exit": green.returncode,
@@ -351,6 +496,13 @@ def gate(
             )
         ):
             raise AuditError(f"claim {index} witness has invalid pytest targets")
+        for node in [expected_failure, *pytest_targets]:
+            _validate_pytest_node(root, epoch["head_sha"], node)
+        if not any(
+            _matches_selector(expected_failure, node) or _matches_selector(node, expected_failure)
+            for node in pytest_targets
+        ):
+            raise AuditError("expected failure marker must identify a selected pytest node")
         targets = witness.get("targets")
         if not isinstance(targets, list) or not targets:
             raise AuditError(f"claim {index} witness has no mutation targets")

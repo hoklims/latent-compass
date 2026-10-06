@@ -42,6 +42,7 @@ def _write_policy(repository: Path) -> None:
     for relative in (
         "docs/independent-audit.md",
         "tools/independent_audit.py",
+        "tools/audit_pytest_reporter.py",
         "tests/test_independent_audit.py",
     ):
         destination = repository / relative
@@ -538,6 +539,271 @@ def test_gate_executes_the_mutation_and_oracle_itself(
     witnesses = cast(list[dict[str, object]], result["witnesses"])
     assert witnesses[0]["red_exit"] != 0
     assert witnesses[0]["green_exit"] == 0
+
+
+def _commit_subject_test(
+    fixture: tuple[Path, dict[str, Any], dict[str, Any]],
+    before: str,
+    after: str,
+    expected: str = "tests/test_subject.py::test_subject_is_pristine",
+    targets: list[str] | None = None,
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    repository, old_epoch, receipt = fixture
+    relative = "tests/test_subject.py"
+    (repository / relative).write_text(before, encoding="utf-8", newline="")
+    _git(repository, "add", relative)
+    _git(repository, "commit", "--quiet", "-m", "subject oracle fixture")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    witness = receipt["claims"][0]["witness"]
+    witness["expected_failure"] = expected
+    witness["pytest_targets"] = targets or [expected]
+    witness["targets"] = [
+        {
+            "path": relative,
+            "before": before,
+            "after": after,
+            "before_digest": digest(before.encode()),
+            "after_digest": digest(after.encode()),
+        }
+    ]
+    return repository, epoch, receipt
+
+
+@pytest.mark.parametrize("mentions_node", [False, True])
+def test_gate_refuses_collection_errors_even_when_the_expected_node_is_printed(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    mentions_node: bool,
+) -> None:
+    before = "def test_subject_is_pristine():\n    assert True\n"
+    message = (
+        "tests/test_subject.py::test_subject_is_pristine" if mentions_node else "import failed"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        f"raise RuntimeError({message!r})\n" + before,
+    )
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+@pytest.mark.parametrize("phase", ["setup", "teardown"])
+def test_gate_refuses_fixture_errors_despite_pytest_exit_one(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    phase: str,
+) -> None:
+    before = "import pytest\n\ndef test_subject_is_pristine():\n    assert True\n"
+    body = (
+        "    raise RuntimeError('setup failed')\n    yield\n"
+        if phase == "setup"
+        else "    yield\n    raise RuntimeError('teardown failed')\n"
+    )
+    after = "import pytest\n\n@pytest.fixture(autouse=True)\ndef bad_fixture():\n" + body + before
+    fixture = _commit_subject_test(audited_repository, before, after)
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+def test_gate_refuses_an_unrelated_failure_printing_the_expected_node(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "def test_subject_is_pristine():\n    assert True\n\n"
+        "def test_unrelated():\n    assert True\n"
+    )
+    after = before.replace(
+        "def test_unrelated():\n    assert True",
+        "def test_unrelated():\n    assert False, "
+        "'tests/test_subject.py::test_subject_is_pristine'",
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        after,
+        targets=[
+            "tests/test_subject.py::test_subject_is_pristine",
+            "tests/test_subject.py::test_unrelated",
+        ],
+    )
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+@pytest.mark.parametrize("mark", ["skip", "xfail"])
+def test_gate_refuses_skip_or_xfail_only_restoration(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    mark: str,
+) -> None:
+    before = (
+        "import pytest\n\n@pytest.mark." + mark + "\n"
+        "def test_subject_is_pristine():\n    assert False\n"
+    )
+    after = "def test_subject_is_pristine():\n    assert False\n"
+    fixture = _commit_subject_test(audited_repository, before, after)
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+def test_gate_accepts_executed_qualified_and_parameterized_assertion_failures(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "import pytest\n\nclass TestSubject:\n"
+        "    @pytest.mark.parametrize('value', [1, 2])\n"
+        "    def test_value(self, value):\n        assert value > 0\n"
+    )
+    after = before.replace("value > 0", "value < 0")
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        after,
+        "tests/test_subject.py::TestSubject::test_value",
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "stale"])
+def test_gate_refuses_execution_reports_damaged_by_a_real_child(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    damage: str,
+) -> None:
+    before = "def test_subject_is_pristine():\n    assert True\n"
+    actions = {
+        "missing": "report.unlink(missing_ok=True)",
+        "malformed": "report.write_text('not-json', encoding='utf-8')",
+        "stale": (
+            "data = json.loads(report.read_text()); data['nonce'] = 'stale'; "
+            "report.write_text(json.dumps(data), encoding='utf-8')"
+        ),
+    }
+    after = (
+        "import atexit, json\nfrom pathlib import Path\n\n"
+        "def test_subject_is_pristine(pytestconfig):\n"
+        "    report = Path(pytestconfig.getoption('--latent-audit-report'))\n"
+        "    def damage():\n        " + actions[damage] + "\n"
+        "    atexit.register(damage)\n    assert False\n"
+    )
+    fixture = _commit_subject_test(audited_repository, before, after)
+    with pytest.raises(AuditError, match="report"):
+        gate(*fixture)
+
+
+def test_gate_accepts_a_specific_parameter_node(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "import pytest\n\n@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_subject_is_pristine(value):\n    assert value > 0\n"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("value > 0", "value < 0"),
+        "tests/test_subject.py::test_subject_is_pristine[1]",
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+def test_gate_refuses_traversal_before_an_outside_test_can_execute(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    marker = repository.parent / "outside-test-executed"
+    outside = repository.parent / "outside.py"
+    outside.write_text(
+        "from pathlib import Path\n\ndef test_subject_is_pristine():\n"
+        f"    Path({str(marker)!r}).write_text('executed')\n    assert False\n",
+        encoding="utf-8",
+    )
+    witness = receipt["claims"][0]["witness"]
+    traversal = "tests/" + "../" * 32 + outside.relative_to(outside.anchor).as_posix()
+    witness["pytest_targets"] = [traversal + "::test_subject_is_pristine"]
+    witness["expected_failure"] = witness["pytest_targets"][0]
+    with pytest.raises(AuditError):
+        gate(repository, epoch, receipt)
+    assert not marker.exists(), "outside test executed before the gate rejected traversal"
+
+
+def test_gate_refuses_a_symlink_mode_pytest_node_before_execution(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, old_epoch, receipt = audited_repository
+    relative = "tests/test_subject.py"
+    blob = _git(repository, "rev-parse", f"HEAD:{relative}")
+    _git(repository, "update-index", "--cacheinfo", f"120000,{blob},{relative}")
+    _git(repository, "commit", "--quiet", "-m", "noneligible node mode")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    with pytest.raises(AuditError, match="regular candidate blob"):
+        gate(repository, epoch, receipt)
+
+
+def test_gate_accepts_multiple_declared_call_failures_when_expected_leaf_fails(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "def test_subject_is_pristine():\n    assert True\n\ndef test_second():\n    assert True\n"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("assert True", "assert False"),
+        targets=[
+            "tests/test_subject.py::test_subject_is_pristine",
+            "tests/test_subject.py::test_second",
+        ],
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+def test_gate_refuses_a_class_prefix_as_the_expected_failed_leaf(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = "class TestSubject:\n    def test_value(self):\n        assert True\n"
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("assert True", "assert False"),
+        "tests/test_subject.py::TestSubject",
+        ["tests/test_subject.py::TestSubject::test_value"],
+    )
+    with pytest.raises(AuditError, match="leaf"):
+        gate(*fixture)
+
+
+def test_gate_bootstraps_the_canonical_reporter_not_candidate_modules(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, old_epoch, receipt = audited_repository
+    for relative in ("pytest.py", "_latent_audit_reporter.py"):
+        (repository / relative).write_text(
+            "raise RuntimeError('candidate evaluator module must not execute')\n",
+            encoding="utf-8",
+        )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "--quiet", "-m", "candidate evaluator collision")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    assert gate(repository, epoch, receipt)["decision"] == "ALLOW"
+
+
+def test_gate_preserves_a_false_xfail_condition_with_real_executed_passes(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "import pytest\n\n@pytest.mark.xfail(False, reason='disabled marker')\n"
+        "def test_subject_is_pristine():\n    assert True\n"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("assert True", "assert False"),
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
 
 
 @pytest.mark.parametrize(
