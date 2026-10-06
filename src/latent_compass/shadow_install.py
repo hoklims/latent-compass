@@ -1704,13 +1704,18 @@ def _validate_literal_reference_segments(arguments: list[str]) -> None:
             raise ValueError(
                 "managed wrapper reference scan is unknown: inline command interpretation"
             )
-        if executable == "env" and any(
+        if executable in {"env", "env.exe"} and any(
             arg in {"-C", "-S", "--chdir", "--split-string"}
             or arg.startswith(("--chdir=", "--split-string="))
+            or (
+                arg.startswith("-")
+                and not arg.startswith("--")
+                and any(option in arg[1:] for option in "CS")
+            )
             for arg in segment[1:]
         ):
             raise ValueError(
-                "managed wrapper reference scan is unknown: env changes command context"
+                "managed wrapper reference scan is unknown: env option context is unresolved"
             )
 
 

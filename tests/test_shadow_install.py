@@ -1094,6 +1094,57 @@ def test_reference_scan_cwd_change_and_inline_interpretation_are_unknown(
         _command_references_wrapper(command, tmp_path / "managed.py")
 
 
+@pytest.mark.parametrize("option", ["-Cother", "-Sother", "-iCother", "-viSother"])
+def test_reference_scan_attached_env_context_options_are_unknown(
+    tmp_path: Path, option: str
+) -> None:
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(f"env {option} python managed.py", tmp_path / "managed.py")
+
+
+@pytest.mark.parametrize("option", ["-C", "-iC"])
+def test_attached_env_context_foreign_hook_preserves_lifecycle_bytes(
+    tmp_path: Path, option: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex/hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    assert (
+        install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="env-install",
+            hosts=("codex",),
+        )["conflicts"]
+        == []
+    )
+    store = home / ".codex/latent-compass-shadow"
+    wrapper = store / "runtime/latent-compass-shadow-hook.py"
+    payload = json.loads(hooks.read_text())
+    payload["hooks"]["PreToolUse"].append(
+        {
+            "matcher": "foreign",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"env {option}{wrapper.parent.as_posix()} python {wrapper.name}",
+                }
+            ],
+        }
+    )
+    _write(hooks, payload)
+    before = {
+        path: path.read_bytes()
+        for path in (hooks, wrapper, store / "config.json", store / "ownership.json")
+    }
+    result = remove_shadow_hooks(home=home, backup_tag="env-remove", hosts=("codex",))
+    assert result["conflicts"], "attached env cwd option must not establish absence"
+    assert all(path.is_file() and path.read_bytes() == content for path, content in before.items())
+
+
 @pytest.mark.parametrize("operation", ["install", "remove"])
 def test_adjacent_semicolon_foreign_hook_refuses_lifecycle(tmp_path: Path, operation: str) -> None:
     home = tmp_path / "home"
@@ -2457,7 +2508,9 @@ def test_fresh_store_rollback_preserves_same_byte_peer_identity(
         assert not wrapper.exists()
     else:
         assert substitution_blocked is False
-        assert [item["code"] for item in conflicts] == ["apply_failed", "rollback_conflict"]
+        # Confirmation failed before this created target entered written[];
+        # its peer remains unowned, so no rollback deletion is attempted.
+        assert [item["code"] for item in conflicts] == ["apply_failed"]
         assert wrapper.is_file()
         wrapper_stat = wrapper.stat()
         assert (wrapper_stat.st_dev, wrapper_stat.st_ino) == peer_identity
@@ -2467,7 +2520,9 @@ def test_fresh_store_rollback_preserves_same_byte_peer_identity(
     wrapper_entry = next(
         entry for entry in journal_payload["entries"] if entry["path"] == str(wrapper)
     )
-    assert wrapper_entry["publication_state"] == "revoked"
+    assert wrapper_entry["publication_state"] == ("revoked" if os.name == "nt" else "attempted")
+    if os.name != "nt":
+        assert wrapper_entry["publication_identity"] is None
 
     recovery = recover_shadow_hooks(home=home)
     recovery_conflicts = cast(list[dict[str, object]], recovery["conflicts"])
@@ -4086,7 +4141,7 @@ def test_recovery_preserves_created_file_changed_before_delete(
     assert journal.is_file()
 
 
-def test_recovery_revokes_before_identity_check_and_never_deletes_same_byte_peer(
+def test_recovery_checks_identity_before_revocation_and_preserves_same_byte_peer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -4145,13 +4200,14 @@ def test_recovery_revokes_before_identity_check_and_never_deletes_same_byte_peer
             assert conflicts[0]["code"] == "pending_transaction_conflict"
         first_conflicts = cast(list[dict[str, object]], first["conflicts"])
         second_conflicts = cast(list[dict[str, object]], second["conflicts"])
-        assert "changed after preflight" in str(first_conflicts[0]["detail"])
-        assert "unconfirmed" in str(second_conflicts[0]["detail"])
+        assert "identity" in str(first_conflicts[0]["detail"])
+        assert "publication identity changed" in str(second_conflicts[0]["detail"])
         wrapper_stat = wrapper.stat()
         assert (wrapper_stat.st_dev, wrapper_stat.st_ino) == peer_identity
         payload = json.loads(journal.read_text(encoding="utf-8"))
         entry = next(item for item in payload["entries"] if item["path"] == str(wrapper))
-        assert entry["publication_state"] == "revoked"
+        # The peer is rejected before even the journal revocation write.
+        assert entry["publication_state"] == "confirmed"
         assert journal.is_file()
 
 

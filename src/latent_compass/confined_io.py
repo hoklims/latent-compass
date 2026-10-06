@@ -984,6 +984,10 @@ def _list_posix_json(
 
 if sys.platform != "win32":
 
+    def _file_generation_times_windows(handle: int, path: Path) -> tuple[int, int]:
+        del handle, path
+        raise RuntimeError("Windows file generation evidence is unavailable on this platform")
+
     def _lease_open_windows(
         root: Path,
         relative: Path,
