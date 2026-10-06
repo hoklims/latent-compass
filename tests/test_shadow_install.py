@@ -46,6 +46,7 @@ from latent_compass.shadow_install import (
     _pending_recovery_preview,
     _pending_recovery_session,
     _recover_pending_transaction,
+    _recovery_command,
     _regular_file_bytes_or_none,
     _transaction_snapshot,
     _without_project,
@@ -1000,6 +1001,198 @@ def test_bounded_reference_scan_handles_interpreter_forms_and_comments(
     command = command_template.format(wrapper=wrapper)
 
     assert _command_references_wrapper(command, wrapper) is expected
+
+
+@pytest.mark.parametrize("limit", ["characters", "arguments"])
+def test_reference_scan_exhaustion_is_unknown_not_absent(tmp_path: Path, limit: str) -> None:
+    wrapper = tmp_path / "managed.py"
+    command = f'python "{wrapper}" --host other'
+    command += " # " + "x" * 9000 if limit == "characters" else " x" * 129
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper(command, wrapper)
+
+
+def test_unparseable_reference_scan_is_unknown(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="reference scan is unknown"):
+        _command_references_wrapper('python "unterminated', tmp_path / "managed.py")
+
+
+@pytest.mark.parametrize("limit", ["characters", "arguments"])
+@pytest.mark.parametrize("operation", ["install", "remove"])
+def test_exhausted_foreign_reference_blocks_wrapper_lifecycle_before_writes(
+    tmp_path: Path, limit: str, operation: str
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    hooks = home / ".codex" / "hooks.json"
+    _write(hooks, {"hooks": {"PreToolUse": []}})
+    assert (
+        install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="reference-install",
+            hosts=("codex",),
+        )["conflicts"]
+        == []
+    )
+    store = home / ".codex" / "latent-compass-shadow"
+    wrapper = store / "runtime" / "latent-compass-shadow-hook.py"
+    payload = json.loads(hooks.read_text(encoding="utf-8"))
+    command = f'python "{wrapper}" --host other'
+    command += " # " + "x" * 9000 if limit == "characters" else " x" * 129
+    payload["hooks"]["PreToolUse"].append(
+        {"matcher": "foreign", "hooks": [{"type": "command", "command": command}]}
+    )
+    _write(hooks, payload)
+    before = {
+        path: path.read_bytes()
+        for path in (hooks, wrapper, store / "config.json", store / "ownership.json")
+    }
+    if operation == "install":
+        result = install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="reference-rerun",
+            hosts=("codex",),
+        )
+    else:
+        result = remove_shadow_hooks(home=home, backup_tag="reference-remove", hosts=("codex",))
+    conflicts = cast(list[dict[str, object]], result["conflicts"])
+    assert conflicts, "unresolved reference must block wrapper replacement/removal"
+    assert "reference scan is unknown" in str(conflicts[0]["detail"])
+    assert "referenced by a foreign hook" not in str(conflicts[0]["detail"])
+    assert all(path.is_file() and path.read_bytes() == content for path, content in before.items())
+
+
+def test_recovery_instructions_preserve_literal_home_in_a_real_shell(tmp_path: Path) -> None:
+    home = tmp_path / "home $(touch${IFS}$LC_RECO_MARKER) `touch${IFS}$LC_RECO_BACKTICK` space"
+    project = tmp_path / "project"
+    project.mkdir()
+    _write(home / ".codex" / "hooks.json", {"hooks": {"PreToolUse": []}})
+    plan = plan_install_shadow_hooks(
+        home=home,
+        runtime_python=Path(sys.executable),
+        project_root=project,
+        backup_tag="literal-recovery",
+        hosts=("codex",),
+    )
+    _begin_transaction(home=home, operation="install", backup_tag="literal-recovery", plan=plan)
+    plans = [
+        plan_install_shadow_hooks(
+            home=home,
+            runtime_python=Path(sys.executable),
+            project_root=project,
+            backup_tag="literal-rerun",
+            hosts=("codex",),
+        ),
+        plan_remove_shadow_hooks(home=home, hosts=("codex",)),
+    ]
+    shell = _bash_for_hook_command()
+    substitution = tmp_path / "recovery-substitution-sentinel"
+    backtick = tmp_path / "recovery-backtick-sentinel"
+    for report in plans:
+        commands = cast(list[str], report["next_steps"])
+        commands += [
+            item["detail"].removeprefix("run ")
+            for item in cast(list[dict[str, str]], report["conflicts"])
+            if item.get("detail", "").startswith("run latent-compass host recover")
+        ]
+        assert commands
+        for command in commands:
+            result = subprocess.run(  # noqa: S603 - emitted command parsed only, in isolated fixture
+                [str(shell), "-c", f"set -- {command}; printf '%s\\0' \"$@\""],
+                cwd=tmp_path,
+                env={
+                    **os.environ,
+                    "LC_RECO_MARKER": substitution.name,
+                    "LC_RECO_BACKTICK": backtick.name,
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            assert result.returncode == 0, result.stderr
+            assert not substitution.exists(), (
+                "recovery command expanded a literal home substitution"
+            )
+            assert not backtick.exists(), "recovery command expanded literal home backticks"
+            assert result.stdout.split("\0")[:-1] == [
+                "latent-compass",
+                "host",
+                "recover",
+                "--home",
+                str(home) if os.name == "nt" else home.as_posix(),
+                "--dry-run",
+                "--json",
+            ]
+
+
+def test_posix_recovery_quote_preserves_apostrophe_and_substitutions_in_bash(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home quote' $(touch${IFS}$LC_RECO_MARKER) `touch${IFS}$LC_RECO_BACKTICK`"
+    command = _recovery_command(home, platform="posix")
+    substitution = tmp_path / "posix-recovery-substitution"
+    backtick = tmp_path / "posix-recovery-backtick"
+    result = subprocess.run(  # noqa: S603 - exact POSIX form, isolated argv parsing only
+        [str(_bash_for_hook_command()), "-c", f"set -- {command}; printf '%s\\0' \"$@\""],
+        cwd=tmp_path,
+        env={**os.environ, "LC_RECO_MARKER": substitution.name, "LC_RECO_BACKTICK": backtick.name},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split("\0")[:-1] == [
+        "latent-compass",
+        "host",
+        "recover",
+        "--home",
+        home.as_posix(),
+        "--dry-run",
+        "--json",
+    ]
+    assert not substitution.exists()
+    assert not backtick.exists()
+
+
+def test_windows_recovery_quote_preserves_literal_home_in_powershell(tmp_path: Path) -> None:
+    if os.name != "nt":
+        return
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    assert shell is not None, "PowerShell is required for the Windows recovery quoting witness"
+    home = (
+        tmp_path / "home quote' $LC_RECOVERY_PS $(New-Item -Name ps-marker -ItemType File) `literal"
+    )
+    command = _recovery_command(home, platform="nt")
+    script = (
+        "$LC_RECOVERY_PS='EXPANDED'; "
+        "function latent-compass { ConvertTo-Json -InputObject @($args) -Compress }; " + command
+    )
+    result = subprocess.run(  # noqa: S603 - fixed isolated no-profile argv-capture function
+        [shell, "-NoProfile", "-NonInteractive", "-Command", script],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "host",
+        "recover",
+        "--home",
+        str(home),
+        "--dry-run",
+        "--json",
+    ]
+    assert not (tmp_path / "ps-marker").exists()
 
 
 def test_default_backup_tags_allow_rapid_install_remove_lifecycle(
@@ -3486,7 +3679,9 @@ def test_install_rerun_recovers_durable_pending_wrapper_creation(tmp_path: Path)
     assert blocked_code == 3
     assert blocked["conflicts"][0]["code"] == "recovery_required"
     assert blocked["next_steps"] == [
-        f'latent-compass host recover --home "{home}" --dry-run --json'
+        "latent-compass host recover --home "
+        + (f"'{str(home).replace("'", "''")}'" if os.name == "nt" else shlex.quote(home.as_posix()))
+        + " --dry-run --json"
     ]
     assert recovery_preview_code == recovery_apply_code == 0
     assert recovery_preview["files"] == recovery_apply["files"]

@@ -1449,27 +1449,50 @@ def _owned_command(command: object, *, host: Host, wrapper: Path) -> bool:
 
 
 def _command_references_wrapper(command: object, wrapper: Path) -> bool:
-    if not isinstance(command, str) or len(command) > 8192:
+    if not isinstance(command, str):
         return False
+    if len(command) > 8192:
+        raise ValueError(
+            "managed wrapper reference scan is unknown: command exceeds 8192 characters; "
+            "inspect or simplify the foreign hook before install/remove"
+        )
     powershell = re.fullmatch(r"^& '((?:[^']|'')+)' '((?:[^']|'')+)'(?: .*)?$", command)
     if powershell is not None:
         candidate_wrapper = Path(powershell.group(2).replace("''", "'"))
-        return candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False)
+        if candidate_wrapper.resolve(strict=False) == wrapper.resolve(strict=False):
+            return True
     expected = wrapper.resolve(strict=False)
+    parsed = False
     for posix in (True, False):
         try:
             arguments = shlex.split(command, comments=True, posix=posix)
         except ValueError:
             continue
+        parsed = True
         if len(arguments) > 128:
-            return False
+            raise ValueError(
+                "managed wrapper reference scan is unknown: command exceeds 128 arguments; "
+                "inspect or simplify the foreign hook before install/remove"
+            )
         for raw_token in arguments:
             token = raw_token.strip("\"'")
             if token in {"&", "env"} or token.startswith("-"):
                 continue
             if Path(token).resolve(strict=False) == expected:
                 return True
+    if not parsed:
+        raise ValueError(
+            "managed wrapper reference scan is unknown: command cannot be parsed; "
+            "inspect or simplify the foreign hook before install/remove"
+        )
     return False
+
+
+def _recovery_command(home: Path, *, platform: str = os.name) -> str:
+    literal = (
+        f"'{str(home).replace("'", "''")}'" if platform == "nt" else shlex.quote(home.as_posix())
+    )
+    return f"latent-compass host recover --home {literal} --dry-run --json"
 
 
 def _owned_command_bound_to_home(command: str, host: Host, home: Path | None) -> bool:
@@ -1908,7 +1931,7 @@ def plan_install_shadow_hooks(
                 {
                     "code": "recovery_required",
                     "path": str(pending),
-                    "detail": (f'run latent-compass host recover --home "{home}" --dry-run --json'),
+                    "detail": (f"run {_recovery_command(home)}"),
                 }
             )
         return {
@@ -1924,7 +1947,7 @@ def plan_install_shadow_hooks(
             "states": host_status(home=home, project_root=project_root, hosts=hosts, dry_run=True)[
                 "states"
             ],
-            "next_steps": [f'latent-compass host recover --home "{home}" --dry-run --json'],
+            "next_steps": [_recovery_command(home)],
             "recovery": recovery,
         }
     files: list[dict[str, object]] = []
@@ -1946,7 +1969,7 @@ def plan_install_shadow_hooks(
                         "path": str(pending),
                         "detail": (
                             "pending transaction journal appeared after preflight; "
-                            f'run latent-compass host recover --home "{home}" --dry-run --json'
+                            f"run {_recovery_command(home)}"
                         ),
                     }
                 )
@@ -2376,7 +2399,7 @@ def plan_remove_shadow_hooks(
                 {
                     "code": "recovery_required",
                     "path": str(pending),
-                    "detail": (f'run latent-compass host recover --home "{home}" --dry-run --json'),
+                    "detail": (f"run {_recovery_command(home)}"),
                 }
             )
         return {
@@ -2388,7 +2411,7 @@ def plan_remove_shadow_hooks(
             "hosts": list(hosts),
             "files": [],
             "conflicts": conflicts,
-            "next_steps": [f'latent-compass host recover --home "{home}" --dry-run --json'],
+            "next_steps": [_recovery_command(home)],
             "recovery": recovery,
         }
     files: list[dict[str, object]] = []
@@ -2410,7 +2433,7 @@ def plan_remove_shadow_hooks(
                         "path": str(pending),
                         "detail": (
                             "pending transaction journal appeared after preflight; "
-                            f'run latent-compass host recover --home "{home}" --dry-run --json'
+                            f"run {_recovery_command(home)}"
                         ),
                     }
                 )
