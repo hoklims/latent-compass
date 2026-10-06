@@ -806,6 +806,64 @@ def test_gate_preserves_a_false_xfail_condition_with_real_executed_passes(
     assert gate(*fixture)["decision"] == "ALLOW"
 
 
+def test_mutation_symlink_target_never_writes_owned_outside_bytes_or_runs_tests(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, old_epoch, receipt = audited_repository
+    outside = repository.parent / "owned-outside.txt"
+    marker = repository.parent / "child-ran"
+    outside.write_bytes(b"outside-original")
+    linked = repository / "linked.txt"
+    try:
+        linked.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"native symlink capability unavailable; confinement unproven: {exc}")
+    assert linked.is_symlink()
+    _git(repository, "config", "core.symlinks", "true")
+    (repository / "tests/test_subject.py").write_text(
+        "from pathlib import Path\n\ndef test_subject_is_pristine():\n"
+        f"    Path({str(marker)!r}).write_text('ran')\n"
+        f"    assert Path({str(outside)!r}).read_text() == 'outside-original'\n",
+        encoding="utf-8",
+    )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "--quiet", "-m", "owned native symlink fixture")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    before = _git(repository, "show", "HEAD:linked.txt")
+    after = "outside-mutated"
+    receipt["claims"][0]["witness"]["targets"] = [
+        {
+            "path": "linked.txt",
+            "before": before,
+            "after": after,
+            "before_digest": digest(before.encode()),
+            "after_digest": digest(after.encode()),
+        }
+    ]
+    with pytest.raises(AuditError):
+        gate(repository, epoch, receipt)
+    assert outside.read_bytes() == b"outside-original", "mutation followed the candidate symlink"
+    assert not marker.exists(), "child test ran before symlink target refusal"
+
+
+def test_mutation_destination_refuses_a_native_symlink_parent(tmp_path: Path) -> None:
+    worktree, outside = tmp_path / "copy", tmp_path / "owned-outside"
+    worktree.mkdir()
+    outside.mkdir()
+    protected = outside / "leaf.txt"
+    protected.write_bytes(b"protected")
+    try:
+        (worktree / "nested").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"native directory symlink unavailable; confinement unproven: {exc}")
+    validate = cast(Callable[[Path, str], Path], _TOOL["_validate_mutation_destination"])
+    with pytest.raises(AuditError, match="filesystem link"):
+        validate(worktree, "nested/leaf.txt")
+    assert protected.read_bytes() == b"protected"
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [

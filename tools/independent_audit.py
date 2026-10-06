@@ -144,21 +144,47 @@ def _matches_failure(node: str, expected: str) -> bool:
 
 def _validate_pytest_node(root: Path, revision: str, node: str) -> None:
     relative = node.split("::", 1)[0]
+    _validate_regular_blob(root, revision, relative)
+
+
+def _validate_regular_blob(root: Path, revision: str, relative: str) -> None:
     path = PurePosixPath(relative)
     if path.as_posix() != relative or any(part in {".", ".."} for part in path.parts):
-        raise AuditError("pytest node path must be canonical and repository-relative")
+        raise AuditError("audit file path must be canonical and repository-relative")
     entry = _git(root, "ls-tree", "-z", revision, "--", relative, binary=True)
     assert isinstance(entry, bytes)
     entries = entry.split(b"\0")
     if len(entries) != 2 or entries[1] != b"":
-        raise AuditError("pytest node file must be tracked in the candidate")
+        raise AuditError("audit file must be tracked in the candidate")
     metadata, separator, recorded_path = entries[0].partition(b"\t")
     if (
         not separator
         or recorded_path.decode("utf-8") != relative
         or metadata.split(b" ")[:2] not in [[b"100644", b"blob"], [b"100755", b"blob"]]
     ):
-        raise AuditError("pytest node file must be a regular candidate blob, not a symlink")
+        raise AuditError("audit file must be a regular candidate blob, not a symlink")
+    for parent in path.parents:
+        if parent == PurePosixPath("."):
+            continue
+        ancestor = _git(root, "ls-tree", "-z", revision, "--", parent.as_posix(), binary=True)
+        assert isinstance(ancestor, bytes)
+        if not ancestor.startswith(b"040000 tree "):
+            raise AuditError("audit file parent must be a candidate Git tree, not a symlink")
+
+
+def _validate_mutation_destination(worktree: Path, relative: str) -> Path:
+    destination = worktree
+    for part in ("", *PurePosixPath(relative).parts):
+        destination = destination / part
+        if not destination.is_relative_to(worktree):
+            raise AuditError("mutation destination left the disposable worktree")
+        if destination.is_symlink() or destination.is_junction():
+            raise AuditError("mutation target or parent is a filesystem link")
+        if not destination.exists():
+            raise AuditError("mutation target or parent disappeared before write")
+    if not destination.is_file():
+        raise AuditError("mutation target must remain a regular file before write")
+    return destination
 
 
 def _validate_test_report(
@@ -264,7 +290,7 @@ def _execute_witness(
         try:
             if mutate:
                 for target in targets:
-                    (worktree / target["path"]).write_text(
+                    _validate_mutation_destination(worktree, target["path"]).write_text(
                         target["after"], encoding="utf-8", newline=""
                     )
             # Evaluator instrumentation is copied from canonical policy, never the mutated tree.
@@ -549,6 +575,7 @@ def gate(
                 raise AuditError(
                     f"claim {index} target {target_index} baseline differs from the candidate"
                 )
+            _validate_regular_blob(root, epoch["head_sha"], path)
             normalized_targets.append({key: target[key] for key in sorted(required)})
         if total_bytes > MAX_MUTATION_BYTES:
             raise AuditError(f"claim {index} witness mutation payload is too large")

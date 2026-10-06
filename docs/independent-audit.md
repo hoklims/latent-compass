@@ -105,6 +105,22 @@ evaluator during bootstrap. Reported execution proves the test outcome and
 phase, not universal semantic relevance of every possible
 test-body failure. Independent source and material-claim review remain required.
 
+Mutation targets must also be tracked regular Git blobs. Git parent paths must
+be trees; symlink entries are not eligible mutation targets. Immediately before
+each mutation write, the disposable worktree path and all its components are
+checked again for filesystem symlinks/junctions and missing entries. A refused
+target cannot reach pytest or write through an observed external link.
+These checks apply to owned, quiescent disposable fixtures; they do not claim
+race-proof confinement against a peer replacing paths between observation and
+write. Concurrent hostile filesystem mutation is outside this runner boundary.
+
+This runner assumes reviewed child tests and conftest code. They execute in the
+same process as pytest instrumentation. The nonce binds a fresh report to its
+run; it is not authentication against hostile child code forging or tampering
+with reporter state or files. Such code is outside this protocol's guarantee.
+Immutable external N-1 enforcement and independent source/claim review remain
+the authority for admitting changes to this evaluator.
+
 Run the fail-closed gate with:
 
 ```bash
