@@ -43,6 +43,22 @@ def _hook(home: Path, payload: dict[str, object]) -> subprocess.CompletedProcess
     )
 
 
+def _hook_raw(home: Path, raw: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [
+            sys.executable,
+            str(WRAPPER),
+            "--host",
+            "codex",
+            "--home",
+            str(home),
+            "--now",
+            NOW,
+        ],
+        input_text=raw,
+    )
+
+
 def test_wrapper_refreshes_git_source_and_never_persists_hook_content(tmp_path: Path) -> None:
     root = tmp_path / "repository"
     root.mkdir()
@@ -125,3 +141,89 @@ def test_wrapper_refreshes_git_source_and_never_persists_hook_content(tmp_path: 
     assert "PROMPT-MUST-NOT-PERSIST" not in persisted
     assert "raw-session-must-not-persist" not in persisted
     assert "raw-turn-must-not-persist" not in persisted
+
+
+def test_wrapper_rejects_hidden_config_and_payload_before_source_collection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    _git(root, "init", "-q")
+    _git(root, "config", "user.name", "Harness Test")
+    _git(root, "config", "user.email", "harness@example.invalid")
+    (root / "tracked.txt").write_text("fixture\n", encoding="utf-8")
+    _git(root, "add", "tracked.txt")
+    _git(root, "commit", "-qm", "fixture")
+    home = tmp_path / "home"
+    store = home / ".codex" / "latent-compass-shadow"
+    store.mkdir(parents=True)
+    config = {
+        "contract_version": "1.0.0",
+        "enabled": True,
+        "host_id": "codex-local",
+        "agent_family": "codex",
+        "projects": [
+            {
+                "root": str(root),
+                "alias": "wrapper-strict",
+                "capabilities": [
+                    {"capability_id": "functions.exec", "kind": "TOOL", "cost_ceiling": 0}
+                ],
+                "remaining_budget": 0,
+            }
+        ],
+    }
+    config_path = store / "config.json"
+    canonical = json.dumps(config, separators=(",", ":"))
+    valid_payload = json.dumps(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "cwd": str(root),
+            "session_id": "strict-session",
+            "turn_id": "strict-turn",
+            "model": "strict-model",
+            "permission_mode": "default",
+        }
+    )
+    hidden_values = ["NaN", "Infinity", "-Infinity", "[" * 65 + "0" + "]" * 65]
+
+    for hidden in hidden_values:
+        poisoned_config = '{"enabled":' + hidden + "," + canonical[1:]
+        config_path.write_text(poisoned_config, encoding="utf-8")
+        config_result = _hook_raw(home, valid_payload)
+        assert "fail-open" in config_result.stderr
+        assert not (store / "source").exists()
+        assert not (store / "events").exists()
+
+        config_path.write_text(canonical, encoding="utf-8")
+        poisoned_payload = (
+            '{"cwd":'
+            + hidden
+            + ',"cwd":'
+            + json.dumps(str(root))
+            + ',"hook_event_name":"SessionStart","source":"startup"}'
+        )
+        payload_result = _hook_raw(home, poisoned_payload)
+        assert "fail-open" in payload_result.stderr
+        assert not (store / "source").exists()
+        assert not (store / "events").exists()
+
+    config_path.write_text(canonical, encoding="utf-8")
+    accepted = _hook_raw(home, valid_payload)
+    assert accepted.stderr == ""
+    assert (store / "source" / "wrapper-strict.json").is_file()
+    recorded = _hook(
+        home,
+        {
+            "hook_event_name": "PreToolUse",
+            "cwd": str(root),
+            "session_id": "strict-session",
+            "turn_id": "strict-turn",
+            "model": "strict-model",
+            "permission_mode": "default",
+            "tool_name": "functions.exec",
+        },
+    )
+    assert recorded.stderr == ""
+    assert (store / "events" / "wrapper-strict").is_dir()

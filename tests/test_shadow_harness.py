@@ -8,6 +8,7 @@ from typing import Literal
 import pytest
 
 from latent_compass.canonical import seal
+from latent_compass.errors import ContractViolation
 from latent_compass.shadow_harness import (
     DEFAULT_CONFIG_NAME,
     ShadowHarnessConfig,
@@ -100,6 +101,30 @@ def test_store_roots_are_host_local_and_separate(tmp_path: Path) -> None:
     assert default_store_root("codex", tmp_path) != default_store_root("claude", tmp_path)
 
 
+@pytest.mark.parametrize("alias", ["CON", "foo:bar"])
+def test_project_alias_must_be_a_portable_storage_component(repository: Path, alias: str) -> None:
+    payload = _config(repository).canonical_payload()
+    projects = payload["projects"]
+    assert isinstance(projects, list)
+    projects[0]["alias"] = alias
+
+    with pytest.raises(ContractViolation):
+        load_shadow_config(payload)
+
+
+def test_project_aliases_are_unique_under_windows_case_identity(
+    repository: Path, tmp_path: Path
+) -> None:
+    payload = _config(repository).canonical_payload()
+    projects = payload["projects"]
+    assert isinstance(projects, list)
+    projects[0]["alias"] = "Foo"
+    projects.append({**projects[0], "root": str(tmp_path / "second"), "alias": "foo"})
+
+    with pytest.raises(ContractViolation):
+        load_shadow_config(payload)
+
+
 def test_known_tool_yields_non_authoritative_advice_without_sensitive_content(
     repository: Path, tmp_path: Path
 ) -> None:
@@ -125,6 +150,36 @@ def test_known_tool_yields_non_authoritative_advice_without_sensitive_content(
     assert "session-secret-identifier" not in persisted
     assert "turn-secret-identifier" not in persisted
     assert '"tool_name":"functions.exec"' in persisted
+
+
+def test_nested_project_routes_to_most_specific_registration(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    capabilities = [{"capability_id": "functions.exec", "kind": "TOOL", "cost_ceiling": 0}]
+    config = load_shadow_config(
+        {
+            "contract_version": "1.0.0",
+            "enabled": True,
+            "host_id": "codex-local",
+            "agent_family": "codex",
+            "projects": [
+                {"root": str(parent), "alias": "parent", "capabilities": capabilities},
+                {"root": str(child), "alias": "child", "capabilities": capabilities},
+            ],
+        }
+    )
+    store = tmp_path / "store"
+    _prime_source(child, host="codex", config=config, store=store, marker="child")
+
+    record = process_hook_event(
+        _payload(child), host="codex", config=config, store_root=store, now=NOW
+    )
+
+    assert record is not None
+    assert record["project_alias"] == "child"
+    assert next((store / "events" / "child").rglob("*.json")).is_file()
+    assert not (store / "events" / "parent").exists()
 
 
 def test_unknown_tool_abstains_without_affecting_the_host(repository: Path, tmp_path: Path) -> None:
@@ -233,4 +288,110 @@ def test_hook_entrypoint_ignores_projects_not_in_its_allowlist(
     )
 
     assert code == 0
+    assert not (store / "events").exists()
+
+
+def test_collector_refuses_linked_source_cache_parent_without_outside_read_or_write(
+    repository: Path, tmp_path: Path
+) -> None:
+    store = tmp_path / "store"
+    store.mkdir()
+    outside = tmp_path / "outside-source"
+    outside.mkdir()
+    outside_cache = outside / "latent-compass-shadow.json"
+    outside_cache.write_text(
+        json.dumps(
+            {
+                "source_declaration_digest": seal("test.shadow.source.v1", {"outside": True}),
+                "source_observed_at": NOW,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (store / "source").symlink_to(outside, target_is_directory=True)
+    before = outside_cache.read_bytes()
+
+    with pytest.raises(ContractViolation):
+        process_hook_event(
+            _payload(repository),
+            host="codex",
+            config=_config(repository),
+            store_root=store,
+            now=NOW,
+        )
+
+    assert outside_cache.read_bytes() == before
+    assert not (store / "events").exists()
+
+
+def test_collector_refuses_linked_events_parent_without_outside_write(
+    repository: Path, tmp_path: Path
+) -> None:
+    store = tmp_path / "store"
+    config = _config(repository)
+    _prime_source(repository, host="codex", config=config, store=store, marker="one")
+    outside = tmp_path / "outside-events"
+    outside.mkdir()
+    (store / "events").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ContractViolation):
+        process_hook_event(
+            _payload(repository),
+            host="codex",
+            config=config,
+            store_root=store,
+            now=NOW,
+        )
+
+    assert list(outside.iterdir()) == []
+
+
+def test_hook_entrypoint_stays_fail_open_when_event_store_is_linked(
+    repository: Path, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = default_store_root("codex", home)
+    config = _config(repository)
+    store.mkdir(parents=True)
+    (store / DEFAULT_CONFIG_NAME).write_text(
+        json.dumps(config.canonical_payload()), encoding="utf-8"
+    )
+    _prime_source(repository, host="codex", config=config, store=store, marker="one")
+    outside = tmp_path / "outside-events"
+    outside.mkdir()
+    (store / "events").symlink_to(outside, target_is_directory=True)
+    stderr = StringIO()
+
+    code = main(
+        ["--host", "codex", "--home", str(home), "--now", NOW],
+        stdin=StringIO(json.dumps(_payload(repository))),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "fail-open" in stderr.getvalue()
+    assert list(outside.iterdir()) == []
+
+
+def test_hook_entrypoint_fails_open_for_linked_config_leaf(
+    repository: Path, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    store = default_store_root("codex", home)
+    store.mkdir(parents=True)
+    outside = tmp_path / "outside-config.json"
+    outside.write_text(json.dumps(_config(repository).canonical_payload()), encoding="utf-8")
+    (store / DEFAULT_CONFIG_NAME).symlink_to(outside)
+    stderr = StringIO()
+
+    code = main(
+        ["--host", "codex", "--home", str(home), "--now", NOW],
+        stdin=StringIO(json.dumps(_payload(repository))),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 0
+    assert "fail-open" in stderr.getvalue()
     assert not (store / "events").exists()

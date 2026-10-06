@@ -1,6 +1,11 @@
 name: Verify
 
 on:
+  workflow_call:
+    inputs:
+      build-packages:
+        type: boolean
+        default: true
   push:
     branches: [main, 'codex/**']
   pull_request:
@@ -22,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,9 +55,12 @@ jobs:
       - name: Exercise independent audit gate fail-closed tests
         run: uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py
       - name: Build distributions
+        if: ${{ toJSON(inputs.build-packages) != 'false' }}
         run: uv build --no-sources
       - name: Test extracted source distribution
-        run: uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.2.0.tar.gz
+        if: ${{ toJSON(inputs.build-packages) != 'false' }}
+        run: uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.3.0.tar.gz
       - name: Verify installed wheel outside checkout
+        if: ${{ toJSON(inputs.build-packages) != 'false' }}
         working-directory: ${{ runner.temp }}
-        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-0.2.0-py3-none-any.whl" latent-compass-status --help
+        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-0.3.0-py3-none-any.whl" python "${{ github.workspace }}/tools/verify_installed_wheel.py"

@@ -196,10 +196,12 @@ not identify the best counterfactual, establish causality, or authorize action.
 
 Requires Python 3.13 and [uv](https://docs.astral.sh/uv/).
 
-This source line is the v0.2.0 candidate. It adds the installed
-`latent-compass-status` command and keeps all observations local, passive and
-non-authoritative. The GitHub release page remains the authority for whether
-that version has actually been published.
+This source line is the v0.3.0 candidate. It adds the `latent-compass host`
+installation workflow while keeping all observations local, passive and
+non-authoritative. The public v0.2.0 GitHub release remains a historical
+artifact at its original commit; the new PyPI candidate does not reuse that
+version. The GitHub release page and PyPI registry remain the authorities for
+whether v0.3.0 has actually been published.
 
 The public `v0.1.0` assets are historical artifacts pinned by SHA-256. An
 independent audit found that they were built from a Windows working tree rather
@@ -212,6 +214,45 @@ git clone https://github.com/hoklims/latent-compass
 cd latent-compass
 uv sync --all-groups
 ```
+
+Install this checkout as an isolated, persistent tool and preview the Codex
+integration before changing host configuration:
+
+```bash
+uv tool install .
+latent-compass host install --host codex --project-root . \
+  --project-alias latent-compass --dry-run --json
+latent-compass host install --host codex --project-root . \
+  --project-alias latent-compass --json
+latent-compass host status --host codex --project-root . --json
+```
+
+Repeat `--host` to target both hosts. Every selected host is preflighted before
+any file is changed. A malformed host file or a project alias/root collision
+refuses the whole operation. Repeating an installation is idempotent. Remove one
+registration without disturbing the others with `latent-compass host remove
+--host codex --project-alias latent-compass --dry-run --json`, then repeat
+without `--dry-run` after reviewing the plan. The legacy `python -m
+latent_compass.shadow_install ...` entry point remains available.
+
+If install or remove was interrupted, both commands refuse with
+`recovery_required` and include the exact recovery command in their JSON.
+Preview and apply the repair separately, then rerun the original setup:
+
+```bash
+latent-compass host recover --dry-run --json
+latent-compass host recover --json
+```
+
+Recovery restores only transaction-owned bytes. A concurrent third-party
+change returns `pending_transaction_conflict`; its file and backup are left
+untouched for inspection.
+
+The release workflow is configured for PyPI Trusted Publishing. The package
+name must first be bound to this repository, workflow and `pypi` environment in
+PyPI. Do not replace `.` with the registry package name in installation guidance
+until a tagged artifact has been published and installed successfully from
+PyPI.
 
 Run the self-contained synthetic walkthrough in a new output root:
 
@@ -243,6 +284,7 @@ tool arguments or tool results:
 ```bash
 latent-compass-status --project-root .
 latent-compass-status --project-root . --json
+latent-compass host status --project-root . --json
 ```
 
 For each Codex or Claude host it reports whether all three hooks are present,
@@ -250,7 +292,9 @@ whether the current project is registered, how many privacy-minimised events
 and sessions were observed, the latest observation time, and the counts of
 `ADVICE` and `ABSTAIN` records. `OBSERVING` means records exist; it does not mean
 the host followed the advice. Hook trust remains `UNKNOWN` until reviewed in the
-host itself. The footer always restates that Latent Compass has no execution
+host itself. On Windows, an existing event directory is reported as
+`OBSERVATION_UNKNOWN` with `null` derived metrics because this release does not
+enumerate it without a handle-bound directory API. The footer always restates that Latent Compass has no execution
 authority, did not influence host routing and recorded no content.
 
 ## Independent proof status
@@ -259,9 +303,13 @@ The current status remains **`PROOF_WEAK/BLOCK`**. The first independent audit
 verified six high-impact invariants with red/green mutants and found no foreign
 release payload, but it also found material release and proof-contract defects.
 The public [independent-audit protocol](docs/independent-audit.md) now replaces
-the unreachable private gate. Only a fresh independent receipt accepted by that
-gate with `ALLOW` can change the formal proof status. It does not authorize a
-pilot, hook execution, or index removal.
+the unreachable private gate. Schema v4 defaults to strict `separate-account`
+review; operators may explicitly choose `isolated-session` for an independent
+review on the same account, with observed isolation and stated limits. A fresh
+receipt bound to the exact candidate is required. Changes to the proof mechanism
+must also be admitted by the unchanged external N-1 evaluator; the candidate gate
+cannot approve itself. This does not authorize a pilot, hook execution, or index
+removal.
 
 ## Record and replay an episode
 

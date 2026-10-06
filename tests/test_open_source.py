@@ -14,6 +14,15 @@ from pathlib import Path
 import pytest
 
 from latent_compass.canonical import seal
+from workflow_assertions import (
+    assert_conditional_run,
+    assert_required,
+    assert_run,
+    job,
+    needs,
+    step,
+    workflow,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -168,6 +177,182 @@ def test_the_readme_carries_only_workflow_backed_badges() -> None:
         assert [line for line in lines if "![" in line] == expected
     assert (REPO / ".github" / "workflows" / "verify.yml").is_file()
     assert (REPO / ".github" / "workflows" / "release.yml").is_file()
+
+
+def test_release_workflow_keeps_publish_permissions_in_separate_jobs() -> None:
+    payload = workflow(REPO / ".github" / "workflows" / "release.yml")
+    verify = job(payload, "verify")
+    build = job(payload, "build")
+    verify_artifacts = job(payload, "verify-artifacts")
+    attest_job = job(payload, "attest")
+    github_release = job(payload, "github-release")
+    pypi = job(payload, "pypi-publish")
+
+    assert verify["uses"] == "./.github/workflows/verify.yml"
+    assert verify["with"] == {"build-packages": False}
+    assert verify["permissions"] == {"contents": "read"}
+    assert build["permissions"] == {
+        "contents": "read",
+    }
+    assert verify_artifacts["permissions"] == {"contents": "read"}
+    assert attest_job["permissions"] == {"id-token": "write", "attestations": "write"}
+    assert github_release["permissions"] == {"contents": "write"}
+    assert pypi["permissions"] == {"id-token": "write"}
+    attest = step(attest_job, "Attest exact verified artifacts")
+    publish_pypi = step(pypi, "Publish distributions to PyPI with trusted publishing")
+    assert attest["uses"].startswith("actions/attest-build-provenance@")
+    assert publish_pypi["uses"] == (
+        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    )
+    assert pypi["environment"]["name"] == "pypi"
+    for required in (
+        verify,
+        build,
+        verify_artifacts,
+        attest_job,
+        github_release,
+        pypi,
+        attest,
+        publish_pypi,
+    ):
+        assert_required(required)
+    assert needs(build) == {"verify"}
+    assert needs(verify_artifacts) == {"build"}
+    assert needs(attest_job) == {"build", "verify-artifacts"}
+    assert needs(github_release) == {"attest"}
+    assert needs(pypi) == {"github-release"}
+    verify_workflow = workflow(REPO / ".github" / "workflows" / "verify.yml")
+    assert "workflow_call" in verify_workflow["on"]
+    assert job(verify_workflow, "verify")["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "windows-latest",
+        "macos-latest",
+    ]
+
+
+def test_github_release_uses_an_explicit_repository_without_checkout() -> None:
+    payload = workflow(REPO / ".github" / "workflows" / "release.yml")
+    github_release = job(payload, "github-release")
+    publish = step(github_release, "Publish exact attested artifacts to GitHub")
+
+    assert all(
+        not str(candidate.get("uses", "")).startswith("actions/checkout@")
+        for candidate in github_release["steps"]
+    )
+    assert publish["env"]["GH_REPO"] == "${{ github.repository }}"
+    assert_required(publish)
+    command = publish["run"]
+    assert "--clobber" not in command
+    assert 'gh release download "$GITHUB_REF_NAME"' in command
+    assert 'cmp -- "$artifact" "$existing/$name"' in command
+    assert 'gh release upload "$GITHUB_REF_NAME" "$artifact"' in command
+
+
+def test_verify_workflow_exercises_the_installed_host_cli_on_all_supported_os() -> None:
+    verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
+    condition = "${{ toJSON(inputs.build-packages) != 'false' }}"
+    for name in (
+        "Build distributions",
+        "Test extracted source distribution",
+        "Verify installed wheel outside checkout",
+    ):
+        assert step(verify, name)["if"] == condition
+    assert_conditional_run(
+        verify,
+        "Verify installed wheel outside checkout",
+        'uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/'
+        'latent_compass-0.3.0-py3-none-any.whl" python '
+        '"${{ github.workspace }}/tools/verify_installed_wheel.py"',
+        condition,
+    )
+
+    assert verify["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "windows-latest",
+        "macos-latest",
+    ]
+    assert_required(verify)
+    assert_run(
+        verify,
+        "Test complete source tree",
+        "uv run --frozen pytest -o addopts='' -q",
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_name", "build_packages", "expected"),
+    [
+        ("push", "", True),
+        ("pull_request", "", True),
+        ("workflow_call", True, True),
+        ("workflow_call", False, False),
+        ("push-tag-caller", False, False),
+    ],
+)
+def test_verify_artifact_guard_skips_only_explicit_false(
+    event_name: str, build_packages: bool | str, expected: bool
+) -> None:
+    del event_name
+    verify = job(workflow(REPO / ".github" / "workflows" / "verify.yml"), "verify")
+    condition = "${{ toJSON(inputs.build-packages) != 'false' }}"
+    rendered = json.dumps(build_packages, separators=(",", ":"))
+    assert (rendered != "false") is expected
+    assert_conditional_run(
+        verify,
+        "Test extracted source distribution",
+        "uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.3.0.tar.gz",
+        condition,
+    )
+    assert_conditional_run(verify, "Build distributions", "uv build --no-sources", condition)
+    names = [candidate["name"] for candidate in verify["steps"]]
+    assert names.index("Build distributions") < names.index(
+        "Verify installed wheel outside checkout"
+    )
+
+
+def test_release_workflow_verifies_the_exact_published_artifacts_on_three_os() -> None:
+    payload = workflow(REPO / ".github" / "workflows" / "release.yml")
+    build = job(payload, "build")
+    verify_artifacts = job(payload, "verify-artifacts")
+    attest_job = job(payload, "attest")
+    github_release = job(payload, "github-release")
+    pypi = job(payload, "pypi-publish")
+    artifact_name = step(build, "Retain exact release artifacts")["with"]["name"]
+
+    assert build["outputs"]["version"] == "${{ steps.package.outputs.version }}"
+    assert verify_artifacts["strategy"]["matrix"]["os"] == [
+        "ubuntu-latest",
+        "windows-latest",
+        "macos-latest",
+    ]
+    for candidate_job, download_step in (
+        (verify_artifacts, "Retrieve exact release artifacts"),
+        (attest_job, "Retrieve verified release artifacts"),
+        (github_release, "Retrieve exact release artifacts"),
+        (pypi, "Retrieve exact release artifacts"),
+    ):
+        assert step(candidate_job, download_step)["with"]["name"] == artifact_name
+    assert_run(
+        verify_artifacts,
+        "Test exact installed wheel lifecycle",
+        'uv run --no-project --isolated --python 3.13 --with "${{ runner.temp }}/dist/'
+        'latent_compass-${{ needs.build.outputs.version }}-py3-none-any.whl" python '
+        '"${{ github.workspace }}/tools/verify_installed_wheel.py"',
+    )
+    assert_run(
+        verify_artifacts,
+        "Test exact source distribution",
+        'uv run --frozen python tools/verify_sdist.py "${{ runner.temp }}/dist/'
+        'latent_compass-${{ needs.build.outputs.version }}.tar.gz"',
+    )
+    build_commands = [
+        candidate.get("run", "")
+        for candidate_job in payload["jobs"].values()
+        if isinstance(candidate_job, dict)
+        for candidate in candidate_job.get("steps", [])
+        if isinstance(candidate, dict) and "uv build" in str(candidate.get("run", ""))
+    ]
+    assert build_commands == ["uv build --no-sources"]
 
 
 def test_the_honest_limit_appears_in_every_document_that_relies_on_it() -> None:

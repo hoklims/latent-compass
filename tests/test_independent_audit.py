@@ -12,11 +12,13 @@ from typing import Any, cast
 
 import pytest
 
+from workflow_assertions import assert_run, job, workflow
+
 ROOT = Path(__file__).resolve().parents[1]
 _TOOL = run_path(str(ROOT / "tools" / "independent_audit.py"))
 AuditError = cast(type[ValueError], _TOOL["AuditError"])
 create_epoch = cast(Callable[[Path, str, str], dict[str, object]], _TOOL["create_epoch"])
-gate = cast(Callable[[Path, dict[str, Any], dict[str, Any]], dict[str, object]], _TOOL["gate"])
+gate = cast(Callable[..., dict[str, object]], _TOOL["gate"])
 epoch_digest = cast(Callable[[dict[str, Any]], str], _TOOL["_epoch_digest"])
 digest = cast(Callable[[bytes], str], _TOOL["_digest"])
 changed_paths = cast(Callable[[Path, str, str], list[str]], _TOOL["_changed_paths"])
@@ -40,6 +42,7 @@ def _write_policy(repository: Path) -> None:
     for relative in (
         "docs/independent-audit.md",
         "tools/independent_audit.py",
+        "tools/audit_pytest_reporter.py",
         "tests/test_independent_audit.py",
     ):
         destination = repository / relative
@@ -88,10 +91,12 @@ def _receipt(epoch: dict[str, Any]) -> dict[str, Any]:
     }
     claim = "the gate detects a representative defect"
     return {
-        "schema": "hoklims/latent-compass:independent-audit/3",
+        "schema": "hoklims/latent-compass:independent-audit/4",
         "epoch_digest": epoch["epoch_digest"],
         "policy_digest": epoch["policy_digest"],
         "head_sha": epoch["head_sha"],
+        "audit_profile": "separate-account",
+        "isolation": None,
         "independence": {
             "not_candidate_author": True,
             "read_only_candidate": True,
@@ -124,6 +129,216 @@ def test_gate_allows_a_repository_derived_adequate_receipt(
 ) -> None:
     repository, epoch, receipt = audited_repository
     assert gate(repository, epoch, receipt)["decision"] == "ALLOW"
+
+
+def _isolated_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    result = deepcopy(receipt)
+    result["audit_profile"] = "isolated-session"
+    result["independence"] = {
+        "not_candidate_author": True,
+        "read_only_candidate": True,
+        "fresh_session": True,
+        "first_pass_before_author_narrative": True,
+        "distinct_account": False,
+    }
+    result["isolation"] = {
+        "session_id": "fresh-independent-session",
+        "forked": False,
+        "sandbox_mode": "read-only",
+        "persistent_memory": False,
+        "write_tools_enabled": False,
+    }
+    return result
+
+
+def test_isolated_profile_requires_explicit_operator_opt_in(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    with pytest.raises(AuditError, match="audit_profile"):
+        gate(repository, epoch, _isolated_receipt(receipt))
+
+
+@pytest.mark.parametrize("unknown_environment", [False, True])
+def test_isolated_profile_reports_same_account_and_unknown_environment_honestly(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    unknown_environment: bool,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    if unknown_environment:
+        isolated["isolation"]["persistent_memory"] = None
+        isolated["isolation"]["write_tools_enabled"] = None
+    result = gate(repository, epoch, isolated, audit_profile="isolated-session")
+    assert result["decision"] == "ALLOW"
+    assert result["audit_profile"] == "isolated-session"
+    assert result["verdict"] == "PROOF_ADEQUATE_WITH_LIMITS"
+    assert result["limits"] == ["SAME_ACCOUNT_ISOLATED_REVIEW"] + (
+        [
+            "AUDITOR_ENVIRONMENT_UNATTESTED:persistent_memory",
+            "AUDITOR_ENVIRONMENT_UNATTESTED:write_tools_enabled",
+        ]
+        if unknown_environment
+        else []
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "field", "value"),
+    [
+        ("independence", "not_candidate_author", False),
+        ("independence", "read_only_candidate", False),
+        ("independence", "fresh_session", False),
+        ("independence", "first_pass_before_author_narrative", False),
+        ("independence", "distinct_account", True),
+        ("independence", "distinct_account", 0),
+        ("isolation", "session_id", " "),
+        ("isolation", "session_id", 123),
+        ("isolation", "forked", True),
+        ("isolation", "forked", None),
+        ("isolation", "sandbox_mode", "danger-full-access"),
+        ("isolation", "persistent_memory", True),
+        ("isolation", "persistent_memory", 0),
+        ("isolation", "write_tools_enabled", True),
+        ("isolation", "write_tools_enabled", "false"),
+    ],
+)
+def test_isolated_profile_refuses_false_independence_or_violated_isolation(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    group: str,
+    field: str,
+    value: object,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    isolated[group][field] = value
+    with pytest.raises(AuditError):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+@pytest.mark.parametrize("group", ["independence", "isolation"])
+@pytest.mark.parametrize("change", ["missing", "extra", "not-an-object"])
+def test_isolated_profile_requires_exact_metadata_fields(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    group: str,
+    change: str,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    if change == "missing":
+        isolated[group].pop(next(iter(isolated[group])))
+    elif change == "extra":
+        isolated[group]["invented"] = False
+    else:
+        isolated[group] = None
+    with pytest.raises(AuditError):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+@pytest.mark.parametrize("field", ["forked", "persistent_memory", "write_tools_enabled"])
+def test_isolated_profile_refuses_missing_environment_attestations(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]], field: str
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    del isolated["isolation"][field]
+    with pytest.raises(AuditError, match="isolation"):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+def test_strict_profile_still_refuses_same_account_and_nonnull_isolation(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    receipt["independence"]["distinct_account"] = False
+    with pytest.raises(AuditError, match="distinct_account"):
+        gate(repository, epoch, receipt)
+    receipt["independence"]["distinct_account"] = True
+    receipt["isolation"] = _isolated_receipt(receipt)["isolation"]
+    with pytest.raises(AuditError, match="isolation"):
+        gate(repository, epoch, receipt)
+
+
+@pytest.mark.parametrize("claimed_profile", ["separate-account", "invented", None])
+def test_isolated_profile_cannot_be_forged_or_selected_by_the_receipt(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]], claimed_profile: object
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    isolated["audit_profile"] = claimed_profile
+    with pytest.raises(AuditError, match="audit_profile"):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+def test_legacy_v3_is_not_relabelled_or_admitted_under_a_v4_epoch(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    receipt["schema"] = "hoklims/latent-compass:independent-audit/3"
+    with pytest.raises(AuditError, match="schema"):
+        gate(repository, epoch, receipt)
+
+
+@pytest.mark.parametrize("failure", ["claims", "invocations", "mutation", "verdict", "blockers"])
+def test_isolated_profile_preserves_existing_fail_closed_proof_rules(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]], failure: str
+) -> None:
+    repository, epoch, receipt = audited_repository
+    isolated = _isolated_receipt(receipt)
+    if failure == "claims":
+        isolated["claims"] = []
+    elif failure == "invocations":
+        isolated["claims"][0]["invocation_paths"] = ["local"]
+    elif failure == "mutation":
+        isolated["claims"][0]["witness"]["targets"][0]["before"] = "not the candidate"
+    elif failure == "verdict":
+        isolated["verdict"] = "PROOF_WEAK"
+    else:
+        isolated["unresolved_blockers"] = ["unresolved"]
+    with pytest.raises(AuditError):
+        gate(repository, epoch, isolated, audit_profile="isolated-session")
+
+
+@pytest.mark.parametrize(
+    ("profile", "exit_code"), [(None, 1), ("isolated-session", 0), ("invented", 2)]
+)
+def test_cli_profile_selection_is_external_and_defaults_to_strict(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    tmp_path: Path,
+    profile: str | None,
+    exit_code: int,
+) -> None:
+    repository, epoch, receipt = audited_repository
+    epoch_path = tmp_path / "epoch.json"
+    receipt_path = tmp_path / "receipt.json"
+    epoch_path.write_text(json.dumps(epoch), encoding="utf-8")
+    receipt_path.write_text(json.dumps(_isolated_receipt(receipt)), encoding="utf-8")
+    arguments = [
+        sys.executable,
+        str(ROOT / "tools" / "independent_audit.py"),
+        "gate",
+        "--repository",
+        str(repository),
+        "--epoch",
+        str(epoch_path),
+        "--receipt",
+        str(receipt_path),
+    ]
+    if profile is not None:
+        arguments += ["--audit-profile", profile]
+    result = subprocess.run(  # noqa: S603 - fixed CLI and fixture-only argv
+        arguments, check=False, capture_output=True, text=True, encoding="utf-8"
+    )
+    assert result.returncode == exit_code
+    if profile is None:
+        assert json.loads(result.stderr)["decision"] == "BLOCK"
+        assert "audit_profile" in json.loads(result.stderr)["error"]
+    elif profile == "isolated-session":
+        decision = json.loads(result.stdout)
+        assert decision["verdict"] == "PROOF_ADEQUATE_WITH_LIMITS"
+        assert decision["limits"] == ["SAME_ACCOUNT_ISOLATED_REVIEW"]
+    else:
+        assert "invalid choice" in result.stderr
 
 
 def test_epoch_inventory_covers_both_sides_of_a_rename(
@@ -326,6 +541,329 @@ def test_gate_executes_the_mutation_and_oracle_itself(
     assert witnesses[0]["green_exit"] == 0
 
 
+def _commit_subject_test(
+    fixture: tuple[Path, dict[str, Any], dict[str, Any]],
+    before: str,
+    after: str,
+    expected: str = "tests/test_subject.py::test_subject_is_pristine",
+    targets: list[str] | None = None,
+) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    repository, old_epoch, receipt = fixture
+    relative = "tests/test_subject.py"
+    (repository / relative).write_text(before, encoding="utf-8", newline="")
+    _git(repository, "add", relative)
+    _git(repository, "commit", "--quiet", "-m", "subject oracle fixture")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    witness = receipt["claims"][0]["witness"]
+    witness["expected_failure"] = expected
+    witness["pytest_targets"] = targets or [expected]
+    witness["targets"] = [
+        {
+            "path": relative,
+            "before": before,
+            "after": after,
+            "before_digest": digest(before.encode()),
+            "after_digest": digest(after.encode()),
+        }
+    ]
+    return repository, epoch, receipt
+
+
+@pytest.mark.parametrize("mentions_node", [False, True])
+def test_gate_refuses_collection_errors_even_when_the_expected_node_is_printed(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    mentions_node: bool,
+) -> None:
+    before = "def test_subject_is_pristine():\n    assert True\n"
+    message = (
+        "tests/test_subject.py::test_subject_is_pristine" if mentions_node else "import failed"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        f"raise RuntimeError({message!r})\n" + before,
+    )
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+@pytest.mark.parametrize("phase", ["setup", "teardown"])
+def test_gate_refuses_fixture_errors_despite_pytest_exit_one(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    phase: str,
+) -> None:
+    before = "import pytest\n\ndef test_subject_is_pristine():\n    assert True\n"
+    body = (
+        "    raise RuntimeError('setup failed')\n    yield\n"
+        if phase == "setup"
+        else "    yield\n    raise RuntimeError('teardown failed')\n"
+    )
+    after = "import pytest\n\n@pytest.fixture(autouse=True)\ndef bad_fixture():\n" + body + before
+    fixture = _commit_subject_test(audited_repository, before, after)
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+def test_gate_refuses_an_unrelated_failure_printing_the_expected_node(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "def test_subject_is_pristine():\n    assert True\n\n"
+        "def test_unrelated():\n    assert True\n"
+    )
+    after = before.replace(
+        "def test_unrelated():\n    assert True",
+        "def test_unrelated():\n    assert False, "
+        "'tests/test_subject.py::test_subject_is_pristine'",
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        after,
+        targets=[
+            "tests/test_subject.py::test_subject_is_pristine",
+            "tests/test_subject.py::test_unrelated",
+        ],
+    )
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+@pytest.mark.parametrize("mark", ["skip", "xfail"])
+def test_gate_refuses_skip_or_xfail_only_restoration(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    mark: str,
+) -> None:
+    before = (
+        "import pytest\n\n@pytest.mark." + mark + "\n"
+        "def test_subject_is_pristine():\n    assert False\n"
+    )
+    after = "def test_subject_is_pristine():\n    assert False\n"
+    fixture = _commit_subject_test(audited_repository, before, after)
+    with pytest.raises(AuditError):
+        gate(*fixture)
+
+
+def test_gate_accepts_executed_qualified_and_parameterized_assertion_failures(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "import pytest\n\nclass TestSubject:\n"
+        "    @pytest.mark.parametrize('value', [1, 2])\n"
+        "    def test_value(self, value):\n        assert value > 0\n"
+    )
+    after = before.replace("value > 0", "value < 0")
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        after,
+        "tests/test_subject.py::TestSubject::test_value",
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+@pytest.mark.parametrize("damage", ["missing", "malformed", "stale"])
+def test_gate_refuses_execution_reports_damaged_by_a_real_child(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+    damage: str,
+) -> None:
+    before = "def test_subject_is_pristine():\n    assert True\n"
+    actions = {
+        "missing": "report.unlink(missing_ok=True)",
+        "malformed": "report.write_text('not-json', encoding='utf-8')",
+        "stale": (
+            "data = json.loads(report.read_text()); data['nonce'] = 'stale'; "
+            "report.write_text(json.dumps(data), encoding='utf-8')"
+        ),
+    }
+    after = (
+        "import atexit, json\nfrom pathlib import Path\n\n"
+        "def test_subject_is_pristine(pytestconfig):\n"
+        "    report = Path(pytestconfig.getoption('--latent-audit-report'))\n"
+        "    def damage():\n        " + actions[damage] + "\n"
+        "    atexit.register(damage)\n    assert False\n"
+    )
+    fixture = _commit_subject_test(audited_repository, before, after)
+    with pytest.raises(AuditError, match="report"):
+        gate(*fixture)
+
+
+def test_gate_accepts_a_specific_parameter_node(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "import pytest\n\n@pytest.mark.parametrize('value', [1, 2])\n"
+        "def test_subject_is_pristine(value):\n    assert value > 0\n"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("value > 0", "value < 0"),
+        "tests/test_subject.py::test_subject_is_pristine[1]",
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+def test_gate_refuses_traversal_before_an_outside_test_can_execute(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, epoch, receipt = audited_repository
+    marker = repository.parent / "outside-test-executed"
+    outside = repository.parent / "outside.py"
+    outside.write_text(
+        "from pathlib import Path\n\ndef test_subject_is_pristine():\n"
+        f"    Path({str(marker)!r}).write_text('executed')\n    assert False\n",
+        encoding="utf-8",
+    )
+    witness = receipt["claims"][0]["witness"]
+    traversal = "tests/" + "../" * 32 + outside.relative_to(outside.anchor).as_posix()
+    witness["pytest_targets"] = [traversal + "::test_subject_is_pristine"]
+    witness["expected_failure"] = witness["pytest_targets"][0]
+    with pytest.raises(AuditError):
+        gate(repository, epoch, receipt)
+    assert not marker.exists(), "outside test executed before the gate rejected traversal"
+
+
+def test_gate_refuses_a_symlink_mode_pytest_node_before_execution(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, old_epoch, receipt = audited_repository
+    relative = "tests/test_subject.py"
+    blob = _git(repository, "rev-parse", f"HEAD:{relative}")
+    _git(repository, "update-index", "--cacheinfo", f"120000,{blob},{relative}")
+    _git(repository, "commit", "--quiet", "-m", "noneligible node mode")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    with pytest.raises(AuditError, match="regular candidate blob"):
+        gate(repository, epoch, receipt)
+
+
+def test_gate_accepts_multiple_declared_call_failures_when_expected_leaf_fails(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "def test_subject_is_pristine():\n    assert True\n\ndef test_second():\n    assert True\n"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("assert True", "assert False"),
+        targets=[
+            "tests/test_subject.py::test_subject_is_pristine",
+            "tests/test_subject.py::test_second",
+        ],
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+def test_gate_refuses_a_class_prefix_as_the_expected_failed_leaf(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = "class TestSubject:\n    def test_value(self):\n        assert True\n"
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("assert True", "assert False"),
+        "tests/test_subject.py::TestSubject",
+        ["tests/test_subject.py::TestSubject::test_value"],
+    )
+    with pytest.raises(AuditError, match="leaf"):
+        gate(*fixture)
+
+
+def test_gate_bootstraps_the_canonical_reporter_not_candidate_modules(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, old_epoch, receipt = audited_repository
+    for relative in ("pytest.py", "_latent_audit_reporter.py"):
+        (repository / relative).write_text(
+            "raise RuntimeError('candidate evaluator module must not execute')\n",
+            encoding="utf-8",
+        )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "--quiet", "-m", "candidate evaluator collision")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    assert gate(repository, epoch, receipt)["decision"] == "ALLOW"
+
+
+def test_gate_preserves_a_false_xfail_condition_with_real_executed_passes(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    before = (
+        "import pytest\n\n@pytest.mark.xfail(False, reason='disabled marker')\n"
+        "def test_subject_is_pristine():\n    assert True\n"
+    )
+    fixture = _commit_subject_test(
+        audited_repository,
+        before,
+        before.replace("assert True", "assert False"),
+    )
+    assert gate(*fixture)["decision"] == "ALLOW"
+
+
+def test_mutation_symlink_target_never_writes_owned_outside_bytes_or_runs_tests(
+    audited_repository: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    repository, old_epoch, receipt = audited_repository
+    outside = repository.parent / "owned-outside.txt"
+    marker = repository.parent / "child-ran"
+    outside.write_bytes(b"outside-original")
+    linked = repository / "linked.txt"
+    try:
+        linked.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"native symlink capability unavailable; confinement unproven: {exc}")
+    assert linked.is_symlink()
+    _git(repository, "config", "core.symlinks", "true")
+    (repository / "tests/test_subject.py").write_text(
+        "from pathlib import Path\n\ndef test_subject_is_pristine():\n"
+        f"    Path({str(marker)!r}).write_text('ran')\n"
+        f"    assert Path({str(outside)!r}).read_text() == 'outside-original'\n",
+        encoding="utf-8",
+    )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "--quiet", "-m", "owned native symlink fixture")
+    epoch = cast(dict[str, Any], create_epoch(repository, old_epoch["base_sha"], "HEAD"))
+    for key in ("epoch_digest", "policy_digest", "head_sha"):
+        receipt[key] = epoch[key]
+    before = _git(repository, "show", "HEAD:linked.txt")
+    after = "outside-mutated"
+    receipt["claims"][0]["witness"]["targets"] = [
+        {
+            "path": "linked.txt",
+            "before": before,
+            "after": after,
+            "before_digest": digest(before.encode()),
+            "after_digest": digest(after.encode()),
+        }
+    ]
+    with pytest.raises(AuditError):
+        gate(repository, epoch, receipt)
+    assert outside.read_bytes() == b"outside-original", "mutation followed the candidate symlink"
+    assert not marker.exists(), "child test ran before symlink target refusal"
+
+
+def test_mutation_destination_refuses_a_native_symlink_parent(tmp_path: Path) -> None:
+    worktree, outside = tmp_path / "copy", tmp_path / "owned-outside"
+    worktree.mkdir()
+    outside.mkdir()
+    protected = outside / "leaf.txt"
+    protected.write_bytes(b"protected")
+    try:
+        (worktree / "nested").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"native directory symlink unavailable; confinement unproven: {exc}")
+    validate = cast(Callable[[Path, str], Path], _TOOL["_validate_mutation_destination"])
+    with pytest.raises(AuditError, match="filesystem link"):
+        validate(worktree, "nested/leaf.txt")
+    assert protected.read_bytes() == b"protected"
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -384,9 +922,9 @@ def test_cli_gate_blocks_a_forged_epoch(
 
 
 def test_verify_workflow_explicitly_invokes_the_gate_tests() -> None:
-    lines = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8").splitlines()
-    step = "      - name: Exercise independent audit gate fail-closed tests"
-    index = lines.index(step)
-    assert lines[index + 1] == (
-        "        run: uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py"
+    verify = job(workflow(ROOT / ".github" / "workflows" / "verify.yml"), "verify")
+    assert_run(
+        verify,
+        "Exercise independent audit gate fail-closed tests",
+        "uv run --frozen pytest -o addopts='' -q tests/test_independent_audit.py",
     )

@@ -11,11 +11,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path, PurePosixPath
 from re import fullmatch
 from typing import Any
 
-SCHEMA = "hoklims/latent-compass:independent-audit/3"
+SCHEMA = "hoklims/latent-compass:independent-audit/4"
+AUDIT_PROFILES = ("separate-account", "isolated-session")
 REPOSITORY = "hoklims/latent-compass"
 SHA256_PATTERN = r"sha256:[0-9a-f]{64}"
 GIT_SHA_PATTERN = r"[0-9a-f]{40}"
@@ -25,6 +27,7 @@ PYTEST_NODE_PATTERN = r"tests/[A-Za-z0-9_./-]+\.py::[A-Za-z0-9_\[\].:-]+"
 POLICY_FILES = (
     "docs/independent-audit.md",
     "tools/independent_audit.py",
+    "tools/audit_pytest_reporter.py",
     "tests/test_independent_audit.py",
 )
 
@@ -99,11 +102,27 @@ def _changed_paths(root: Path, base_sha: str, head_sha: str) -> list[str]:
     return sorted(set(paths))
 
 
-def _run_pytest(root: Path, targets: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_pytest(
+    root: Path,
+    targets: list[str],
+    reporter: Path,
+    report: Path,
+    nonce: str,
+) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join((str(root), str(root / "src")))
+    environment["PYTHONPATH"] = str(reporter.parent)
     return subprocess.run(  # noqa: S603 - fixed interpreter/module; targets are argv entries
-        [sys.executable, "-m", "pytest", "-q", *targets],
+        [
+            sys.executable,
+            "-P",
+            str(reporter),
+            str(root),
+            "--latent-audit-report",
+            str(report),
+            "--latent-audit-nonce",
+            nonce,
+            *targets,
+        ],
         cwd=root,
         env=environment,
         capture_output=True,
@@ -115,6 +134,146 @@ def _run_pytest(root: Path, targets: list[str]) -> subprocess.CompletedProcess[s
     )
 
 
+def _matches_selector(node: str, selector: str) -> bool:
+    return node == selector or node.startswith(selector + "[") or node.startswith(selector + "::")
+
+
+def _matches_failure(node: str, expected: str) -> bool:
+    return node == expected or node.startswith(expected + "[")
+
+
+def _validate_pytest_node(root: Path, revision: str, node: str) -> None:
+    relative = node.split("::", 1)[0]
+    _validate_regular_blob(root, revision, relative)
+
+
+def _validate_regular_blob(root: Path, revision: str, relative: str) -> None:
+    path = PurePosixPath(relative)
+    if path.as_posix() != relative or any(part in {".", ".."} for part in path.parts):
+        raise AuditError("audit file path must be canonical and repository-relative")
+    entry = _git(root, "ls-tree", "-z", revision, "--", relative, binary=True)
+    assert isinstance(entry, bytes)
+    entries = entry.split(b"\0")
+    if len(entries) != 2 or entries[1] != b"":
+        raise AuditError("audit file must be tracked in the candidate")
+    metadata, separator, recorded_path = entries[0].partition(b"\t")
+    if (
+        not separator
+        or recorded_path.decode("utf-8") != relative
+        or metadata.split(b" ")[:2] not in [[b"100644", b"blob"], [b"100755", b"blob"]]
+    ):
+        raise AuditError("audit file must be a regular candidate blob, not a symlink")
+    for parent in path.parents:
+        if parent == PurePosixPath("."):
+            continue
+        ancestor = _git(root, "ls-tree", "-z", revision, "--", parent.as_posix(), binary=True)
+        assert isinstance(ancestor, bytes)
+        if not ancestor.startswith(b"040000 tree "):
+            raise AuditError("audit file parent must be a candidate Git tree, not a symlink")
+
+
+def _validate_mutation_destination(worktree: Path, relative: str) -> Path:
+    destination = worktree
+    for part in ("", *PurePosixPath(relative).parts):
+        destination = destination / part
+        if not destination.is_relative_to(worktree):
+            raise AuditError("mutation destination left the disposable worktree")
+        if destination.is_symlink() or destination.is_junction():
+            raise AuditError("mutation target or parent is a filesystem link")
+        if not destination.exists():
+            raise AuditError("mutation target or parent disappeared before write")
+    if not destination.is_file():
+        raise AuditError("mutation target must remain a regular file before write")
+    return destination
+
+
+def _validate_test_report(
+    report: Path,
+    nonce: str,
+    exit_code: int,
+    targets: list[str],
+    expected: str,
+    *,
+    red: bool,
+) -> None:
+    expected_exit = 1 if red else 0
+    if exit_code != expected_exit:
+        raise AuditError(
+            f"witness {'red' if red else 'green'} requires pytest exit {expected_exit}"
+        )
+    try:
+        if report.stat().st_size > MAX_MUTATION_BYTES:
+            raise AuditError("witness execution report is too large")
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AuditError("witness execution report is missing or malformed") from exc
+    if not isinstance(data, dict) or set(data) != {
+        "schema",
+        "nonce",
+        "collected",
+        "reports",
+        "collection_errors",
+        "internal_error",
+        "exit_status",
+    }:
+        raise AuditError("witness execution report fields are malformed")
+    if type(data["schema"]) is not int or data["schema"] != 1 or data["nonce"] != nonce:
+        raise AuditError("witness execution report is stale or unsupported")
+    if type(data["exit_status"]) is not int or data["exit_status"] != exit_code:
+        raise AuditError("witness execution report exit status is invalid")
+    if data["collection_errors"] != [] or data["internal_error"] is not False:
+        raise AuditError("witness collection or internal errors are not defect detection")
+    collected = data["collected"]
+    reports = data["reports"]
+    if (
+        not isinstance(collected, list)
+        or not collected
+        or not all(isinstance(node, str) for node in collected)
+        or len(set(collected)) != len(collected)
+        or not isinstance(reports, list)
+    ):
+        raise AuditError("witness selected tests were not collected")
+    for selector in targets:
+        if not any(_matches_selector(node, selector) for node in collected):
+            raise AuditError("expected failure marker does not identify a collected test")
+    if not any(_matches_failure(node, expected) for node in collected):
+        raise AuditError("expected failure marker must identify a collected leaf test")
+    if any(
+        not any(_matches_selector(node, selector) for selector in targets) for node in collected
+    ):
+        raise AuditError("witness collected unrelated test nodes")
+    phases: dict[str, dict[str, str]] = {node: {} for node in collected}
+    for item in reports:
+        if not isinstance(item, dict) or set(item) != {"nodeid", "when", "outcome", "xfail"}:
+            raise AuditError("witness execution record is malformed")
+        node, when, outcome = item["nodeid"], item["when"], item["outcome"]
+        if (
+            not isinstance(node, str)
+            or node not in phases
+            or not isinstance(when, str)
+            or not isinstance(outcome, str)
+            or when not in {"setup", "call", "teardown"}
+            or outcome not in {"passed", "failed"}
+            or item["xfail"] is not False
+            or when in phases[node]
+        ):
+            raise AuditError("witness skipped, xfailed, duplicate or invalid execution record")
+        phases[node][when] = outcome
+    failed = []
+    for node, outcomes in phases.items():
+        if set(outcomes) != {"setup", "call", "teardown"}:
+            raise AuditError("witness expected tests did not execute every phase")
+        if outcomes["setup"] != "passed" or outcomes["teardown"] != "passed":
+            raise AuditError("witness setup or teardown failure is not defect detection")
+        if outcomes["call"] == "failed":
+            failed.append(node)
+    if red:
+        if not any(_matches_failure(node, expected) for node in failed):
+            raise AuditError("expected failure marker does not identify the executed failed call")
+    elif failed:
+        raise AuditError("witness restoration did not pass the executed tests")
+
+
 def _execute_witness(
     repository: Path,
     head_sha: str,
@@ -122,6 +281,8 @@ def _execute_witness(
     pytest_targets: list[str],
     expected_failure: str,
 ) -> dict[str, object]:
+    reporter_bytes = Path(__file__).with_name("audit_pytest_reporter.py").read_bytes()
+
     def run_variant(*, mutate: bool) -> subprocess.CompletedProcess[str]:
         temporary = tempfile.mkdtemp(prefix="latent-compass-audit-")
         worktree = Path(temporary) / "candidate"
@@ -129,22 +290,33 @@ def _execute_witness(
         try:
             if mutate:
                 for target in targets:
-                    (worktree / target["path"]).write_text(
+                    _validate_mutation_destination(worktree, target["path"]).write_text(
                         target["after"], encoding="utf-8", newline=""
                     )
-            return _run_pytest(worktree, pytest_targets)
+            # Evaluator instrumentation is copied from canonical policy, never the mutated tree.
+            reporter = Path(temporary) / "_latent_audit_reporter.py"
+            reporter.write_bytes(reporter_bytes)
+            report = Path(temporary) / "execution.json"
+            nonce = uuid.uuid4().hex
+            try:
+                result = _run_pytest(worktree, pytest_targets, reporter, report, nonce)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise AuditError("witness runner failed or timed out") from exc
+            _validate_test_report(
+                report,
+                nonce,
+                result.returncode,
+                pytest_targets,
+                expected_failure,
+                red=mutate,
+            )
+            return result
         finally:
             _git(repository, "worktree", "remove", "--force", str(worktree))
             shutil.rmtree(temporary, ignore_errors=True)
 
     red = run_variant(mutate=True)
     green = run_variant(mutate=False)
-    if red.returncode == 0:
-        raise AuditError("witness mutation did not make its oracle fail")
-    if expected_failure not in (red.stdout + red.stderr):
-        raise AuditError("witness red output lacks the expected failure marker")
-    if green.returncode != 0:
-        raise AuditError("witness restoration did not make its oracle pass")
     return {
         "red_exit": red.returncode,
         "green_exit": green.returncode,
@@ -190,7 +362,69 @@ def _required_bool(mapping: dict[str, Any], key: str) -> None:
         raise AuditError(f"{key} must be true")
 
 
-def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> dict[str, object]:
+def _audit_independence(receipt: dict[str, Any], audit_profile: str) -> list[str]:
+    if audit_profile not in AUDIT_PROFILES or receipt.get("audit_profile") != audit_profile:
+        raise AuditError("receipt audit_profile must match the externally selected audit_profile")
+    independence = receipt.get("independence")
+    if not isinstance(independence, dict):
+        raise AuditError("independence must be an object")
+    shared_fields = {
+        "not_candidate_author",
+        "read_only_candidate",
+        "fresh_session",
+        "first_pass_before_author_narrative",
+    }
+    independence_fields = shared_fields | {"distinct_account"}
+    if audit_profile == "separate-account":
+        independence_fields |= {
+            "distinct_harness",
+            "distinct_environment",
+            "distinct_evidence_store",
+        }
+    if set(independence) != independence_fields:
+        raise AuditError("independence fields do not match the selected schema 4 profile")
+    for key in shared_fields:
+        _required_bool(independence, key)
+    if audit_profile == "separate-account":
+        for key in independence_fields - shared_fields:
+            _required_bool(independence, key)
+        if receipt["isolation"] is not None:
+            raise AuditError("separate-account isolation must be null")
+        return []
+    if independence["distinct_account"] is not False:
+        raise AuditError("isolated-session distinct_account must be false")
+    isolation = receipt["isolation"]
+    isolation_fields = {
+        "session_id",
+        "forked",
+        "sandbox_mode",
+        "persistent_memory",
+        "write_tools_enabled",
+    }
+    if not isinstance(isolation, dict) or set(isolation) != isolation_fields:
+        raise AuditError("isolation fields do not match the isolated-session profile")
+    if not isinstance(isolation["session_id"], str) or not isolation["session_id"].strip():
+        raise AuditError("isolation session_id must be a non-empty string")
+    if isolation["forked"] is not False:
+        raise AuditError("isolation forked must be false")
+    if isolation["sandbox_mode"] != "read-only":
+        raise AuditError("isolation sandbox_mode must be read-only")
+    limits = ["SAME_ACCOUNT_ISOLATED_REVIEW"]
+    for key in ("persistent_memory", "write_tools_enabled"):
+        if isolation[key] is None:
+            limits.append(f"AUDITOR_ENVIRONMENT_UNATTESTED:{key}")
+        elif isolation[key] is not False:
+            raise AuditError(f"isolation {key} must be false or null")
+    return limits
+
+
+def gate(
+    repository: Path,
+    epoch: dict[str, Any],
+    receipt: dict[str, Any],
+    *,
+    audit_profile: str = "separate-account",
+) -> dict[str, object]:
     root = _root(repository)
     if epoch.get("schema") != SCHEMA or receipt.get("schema") != SCHEMA:
         raise AuditError(f"schema must be {SCHEMA}")
@@ -240,30 +474,16 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
         "epoch_digest",
         "policy_digest",
         "head_sha",
+        "audit_profile",
+        "isolation",
         "independence",
         "claims",
         "unresolved_blockers",
         "verdict",
     }
     if set(receipt) != required_receipt:
-        raise AuditError("receipt fields do not match schema 3")
-    independence = receipt.get("independence")
-    if not isinstance(independence, dict):
-        raise AuditError("independence must be an object")
-    independence_fields = {
-        "not_candidate_author",
-        "read_only_candidate",
-        "fresh_session",
-        "distinct_harness",
-        "distinct_account",
-        "distinct_environment",
-        "distinct_evidence_store",
-        "first_pass_before_author_narrative",
-    }
-    if set(independence) != independence_fields:
-        raise AuditError("independence fields do not match schema 3")
-    for key in independence_fields:
-        _required_bool(independence, key)
+        raise AuditError("receipt fields do not match schema 4")
+    limits = _audit_independence(receipt, audit_profile)
     claims = receipt.get("claims")
     if not isinstance(claims, list) or not claims:
         raise AuditError("at least one material claim is required")
@@ -275,7 +495,7 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
             raise AuditError(f"claim {index} has no claim text")
         invocation_paths = claim.get("invocation_paths")
         if invocation_paths != REQUIRED_INVOCATION_PATHS:
-            raise AuditError(f"claim {index} invocation paths do not match schema 3")
+            raise AuditError(f"claim {index} invocation paths do not match schema 4")
         witness = claim.get("witness")
         if not isinstance(witness, dict) or set(witness) != {
             "expected_failure",
@@ -302,6 +522,13 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
             )
         ):
             raise AuditError(f"claim {index} witness has invalid pytest targets")
+        for node in [expected_failure, *pytest_targets]:
+            _validate_pytest_node(root, epoch["head_sha"], node)
+        if not any(
+            _matches_selector(expected_failure, node) or _matches_selector(node, expected_failure)
+            for node in pytest_targets
+        ):
+            raise AuditError("expected failure marker must identify a selected pytest node")
         targets = witness.get("targets")
         if not isinstance(targets, list) or not targets:
             raise AuditError(f"claim {index} witness has no mutation targets")
@@ -348,6 +575,7 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
                 raise AuditError(
                     f"claim {index} target {target_index} baseline differs from the candidate"
                 )
+            _validate_regular_blob(root, epoch["head_sha"], path)
             normalized_targets.append({key: target[key] for key in sorted(required)})
         if total_bytes > MAX_MUTATION_BYTES:
             raise AuditError(f"claim {index} witness mutation payload is too large")
@@ -362,6 +590,9 @@ def gate(repository: Path, epoch: dict[str, Any], receipt: dict[str, Any]) -> di
     return {
         "schema": SCHEMA,
         "decision": "ALLOW",
+        "audit_profile": audit_profile,
+        "verdict": "PROOF_ADEQUATE_WITH_LIMITS" if limits else "PROOF_ADEQUATE",
+        "limits": limits,
         "epoch_digest": epoch["epoch_digest"],
         "head_sha": epoch["head_sha"],
         "witnesses": witness_results,
@@ -387,6 +618,7 @@ def main(argv: list[str] | None = None) -> int:
     gate_parser.add_argument("--repository", type=Path, default=Path.cwd())
     gate_parser.add_argument("--epoch", type=Path, required=True)
     gate_parser.add_argument("--receipt", type=Path, required=True)
+    gate_parser.add_argument("--audit-profile", choices=AUDIT_PROFILES, default="separate-account")
     args = parser.parse_args(argv)
     try:
         if args.command == "epoch":
@@ -397,7 +629,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 sys.stdout.write(rendered)
         else:
-            result = gate(args.repository, _load(args.epoch), _load(args.receipt))
+            result = gate(
+                args.repository,
+                _load(args.epoch),
+                _load(args.receipt),
+                audit_profile=args.audit_profile,
+            )
             sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         return 0
     except (AuditError, OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:

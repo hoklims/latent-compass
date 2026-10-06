@@ -1,18 +1,25 @@
-name: Build attested release
+name: Build, attest and publish release
 
 on:
   push:
-    tags: ['v0.2.0']
-
-permissions:
-  contents: write
-  id-token: write
-  attestations: write
+    tags: ['v*']
 
 jobs:
-  release:
+  verify:
+    uses: ./.github/workflows/verify.yml
+    with:
+      build-packages: false
+    permissions:
+      contents: read
+
+  build:
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+    permissions:
+      contents: read
     steps:
       - name: Check out tagged source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -26,33 +33,121 @@ jobs:
           enable-cache: false
       - name: Install locked environment
         run: uv sync --locked --all-groups
+      - name: Bind tag to package version
+        id: package
+        shell: bash
+        run: |
+          version="$(uv run --frozen python -c 'from latent_compass import __version__; print(__version__)')"
+          test "$GITHUB_REF_NAME" = "v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build distributions from tag
         run: uv build --no-sources
-      - name: Test extracted source distribution
-        run: uv run --frozen python tools/verify_sdist.py dist/latent_compass-0.2.0.tar.gz
-      - name: Verify installed wheel outside checkout
-        working-directory: ${{ runner.temp }}
-        run: uv run --no-project --isolated --python 3.13 --with "${{ github.workspace }}/dist/latent_compass-0.2.0-py3-none-any.whl" latent-compass-status --help
-      - name: Attest exact release artifacts
-        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
-        with:
-          subject-path: |
-            dist/latent_compass-0.2.0.tar.gz
-            dist/latent_compass-0.2.0-py3-none-any.whl
       - name: Retain exact release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ github.ref_name }}
-          path: |
-            dist/latent_compass-0.2.0.tar.gz
-            dist/latent_compass-0.2.0-py3-none-any.whl
+          path: dist/*
           if-no-files-found: error
-      - name: Publish exact attested artifacts
+          retention-days: 7
+
+  verify-artifacts:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Check out tagged verification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: '0.12.5'
+          python-version: '3.13'
+          enable-cache: false
+      - name: Install locked verification environment
+        run: uv sync --locked --all-groups
+      - name: Install real language server used by packaged tests
+        run: npm install --global pyright@1.1.414
+      - name: Retrieve exact release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: ${{ runner.temp }}/dist
+      - name: Test exact source distribution
+        run: uv run --frozen python tools/verify_sdist.py "${{ runner.temp }}/dist/latent_compass-${{ needs.build.outputs.version }}.tar.gz"
+      - name: Test exact installed wheel lifecycle
+        working-directory: ${{ runner.temp }}
+        run: uv run --no-project --isolated --python 3.13 --with "${{ runner.temp }}/dist/latent_compass-${{ needs.build.outputs.version }}-py3-none-any.whl" python "${{ github.workspace }}/tools/verify_installed_wheel.py"
+
+  attest:
+    needs: [build, verify-artifacts]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      attestations: write
+    steps:
+      - name: Retrieve verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Attest exact verified artifacts
+        uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd # v3.2.0
+        with:
+          subject-path: dist/*
+
+  github-release:
+    needs: attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Retrieve exact release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Publish exact attested artifacts to GitHub
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
             gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" \
-            dist/latent_compass-0.2.0.tar.gz \
-            dist/latent_compass-0.2.0-py3-none-any.whl --clobber
+          existing="$RUNNER_TEMP/existing-release-assets"
+          mkdir -p "$existing"
+          for artifact in dist/*; do
+            name="$(basename "$artifact")"
+            if gh release download "$GITHUB_REF_NAME" --dir "$existing" --pattern "$name"; then
+              cmp -- "$artifact" "$existing/$name"
+            else
+              gh release upload "$GITHUB_REF_NAME" "$artifact"
+            fi
+          done
+
+  pypi-publish:
+    needs: github-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/latent-compass/
+    permissions:
+      id-token: write
+    steps:
+      - name: Retrieve exact release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-${{ github.ref_name }}
+          path: dist
+      - name: Publish distributions to PyPI with trusted publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

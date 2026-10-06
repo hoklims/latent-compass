@@ -1,8 +1,8 @@
 # Dependency and licence audit
 
-- **Date**: 2026-08-14
+- **Date**: 2026-09-25
 - **Project licence**: Apache-2.0
-- **Lock file**: `uv.lock`, 20 packages including `latent-compass` itself
+- **Lock file**: `uv.lock`, 22 packages including `latent-compass` itself
 - **Build backend**: `hatchling==1.32.0`, pinned exactly and mirrored into the
   dev group so its closure is locked and audited here
 
@@ -59,6 +59,8 @@ statement about the backend that actually runs.
 | `ruff` | 0.16.3 | MIT | |
 | `mypy` | 1.20.2 | MIT | |
 | `mypy-extensions` | 1.1.0 | MIT | via mypy |
+| `PyYAML` | 6.0.3 | MIT | workflow test parser |
+| `types-PyYAML` | 6.0.12.20260906 | Apache-2.0 | type stubs for PyYAML |
 | `hatchling` | 1.32.0 | MIT | the build backend |
 | `tomlkit` | 0.15.1 | MIT | via hatchling |
 | `trove-classifiers` | 2026.6.1.19 | Apache-2.0 | via hatchling |

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
+import shlex
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +23,12 @@ from typing import Final, Literal, TextIO
 from pydantic import Field, model_validator
 
 from latent_compass.canonical import canonical_text, seal
+from latent_compass.confined_io import (
+    lease_confined_file,
+    read_confined_file,
+    validate_portable_component,
+    write_new_file,
+)
 from latent_compass.contracts import Identifier, StrictModel, validate_contract
 from latent_compass.episode import AgentFamily
 from latent_compass.errors import ContractViolation
@@ -37,17 +45,29 @@ __all__ = [
     "DEFAULT_CONFIG_NAME",
     "SHADOW_HARNESS_CONTRACT_VERSION",
     "ShadowHarnessConfig",
+    "decode_host_json",
     "default_store_root",
+    "host_command_home_is_eligible",
     "load_shadow_config",
     "main",
+    "parse_host_hook_command",
     "process_hook_event",
+    "validate_host_json_depth",
+    "validate_host_settings",
 ]
 
 SHADOW_HARNESS_CONTRACT_VERSION: Final = "1.0.0"
 DEFAULT_CONFIG_NAME: Final = "config.json"
 MAX_HOOK_BYTES: Final = 1_048_576
+MAX_HOST_JSON_DEPTH: Final = 64
 _SAFE_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SEAL = re.compile(r"^sha256:[0-9a-f]{64}$")
+_PLATFORM: Final = os.name
+
+
+def _path_identity(path: Path, *, platform: str = _PLATFORM) -> str:
+    resolved = str(path.resolve(strict=False))
+    return resolved.casefold() if platform == "nt" else resolved
 
 
 class ShadowHarnessViolation(ContractViolation):
@@ -73,6 +93,10 @@ class ShadowProject(StrictModel):
         root = Path(self.root)
         if not root.is_absolute():
             raise ValueError("project root must be absolute")
+        try:
+            validate_portable_component(str(self.alias), what="project alias")
+        except ContractViolation as exc:
+            raise ValueError(str(exc)) from exc
         keys = [(item.capability_id, item.kind) for item in self.capabilities]
         if len(keys) != len(set(keys)):
             raise ValueError("project capabilities must be unique by id and kind")
@@ -88,8 +112,10 @@ class ShadowHarnessConfig(StrictModel):
 
     @model_validator(mode="after")
     def _coherent(self) -> ShadowHarnessConfig:
-        aliases = [project.alias for project in self.projects]
-        roots = [str(Path(project.root).resolve()).casefold() for project in self.projects]
+        aliases = [str(project.alias).casefold() for project in self.projects]
+        roots = [
+            _path_identity(Path(project.root), platform=_PLATFORM) for project in self.projects
+        ]
         if len(aliases) != len(set(aliases)):
             raise ValueError("project aliases must be unique")
         if len(roots) != len(set(roots)):
@@ -102,11 +128,110 @@ class ShadowHarnessConfig(StrictModel):
 
 def load_shadow_config(payload: object) -> ShadowHarnessConfig:
     """Validate one host-local shadow configuration."""
+    validate_host_json_depth(payload)
     return validate_contract(
         ShadowHarnessConfig,
         payload,
         error=ShadowHarnessViolation,
         context="shadow harness config",
+    )
+
+
+def validate_host_json_depth(payload: object) -> None:
+    """Refuse host JSON whose nesting is unsafe to transform or serialize."""
+    pending: list[tuple[object, int]] = [(payload, 0)]
+    while pending:
+        value, depth = pending.pop()
+        if depth > MAX_HOST_JSON_DEPTH:
+            raise ValueError(f"host JSON nesting exceeds the supported depth {MAX_HOST_JSON_DEPTH}")
+        if isinstance(value, dict):
+            pending.extend((item, depth + 1) for item in value.values())
+        elif isinstance(value, list):
+            pending.extend((item, depth + 1) for item in value)
+        elif isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("host JSON numbers must be finite")
+
+
+def decode_host_json(raw: str) -> object:
+    """Decode host JSON without accepting hidden constants or duplicate keys."""
+
+    def reject_constant(token: str) -> object:
+        raise ValueError(f"host JSON constant {token} is not permitted")
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"host JSON contains duplicate key {key!r}")
+            result[key] = value
+        return result
+
+    payload = json.loads(
+        raw,
+        parse_constant=reject_constant,
+        object_pairs_hook=unique_object,
+    )
+    validate_host_json_depth(payload)
+    return payload
+
+
+def validate_host_settings(payload: object) -> dict[str, object]:
+    """Admit host settings only when every hook event maps to an array."""
+    if not isinstance(payload, dict):
+        raise ValueError("host settings must contain a JSON object")
+    hooks = payload.get("hooks")
+    if not isinstance(hooks, dict):
+        raise ValueError("host settings must contain a hooks object")
+    for event, groups in hooks.items():
+        if not isinstance(event, str) or not isinstance(groups, list):
+            raise ValueError("hook event entries must be arrays")
+    return payload
+
+
+def parse_host_hook_command(
+    command: str, host: Literal["codex", "claude"]
+) -> tuple[Path, Path, Path | None] | None:
+    """Parse the exact hook command forms emitted for each supported host."""
+    if host == "codex":
+        match = re.fullmatch(
+            r"^& '((?:[^']|'')+)' '((?:[^']|'')+)' --host codex"
+            r"(?: --home '((?:[^']|'')+)')?$",
+            command,
+        )
+        if match is not None:
+            selected_home = (
+                Path(match.group(3).replace("''", "'")) if match.group(3) is not None else None
+            )
+            return (
+                Path(match.group(1).replace("''", "'")),
+                Path(match.group(2).replace("''", "'")),
+                selected_home,
+            )
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        return None
+    if len(arguments) not in {4, 6} or arguments[2:4] != ["--host", host]:
+        return None
+    if len(arguments) == 6 and arguments[4] != "--home":
+        return None
+    return (
+        Path(arguments[0]),
+        Path(arguments[1]),
+        Path(arguments[5]) if len(arguments) == 6 else None,
+    )
+
+
+def host_command_home_is_eligible(selected_home: Path | None, configured_home: Path) -> bool:
+    """Accept implicit home only for the process default; bind explicit homes exactly."""
+    expected = Path(os.path.abspath(configured_home))  # noqa: PTH100 - do not follow links
+    if selected_home is None:
+        default = Path(os.path.abspath(Path.home()))  # noqa: PTH100 - do not follow links
+        return expected == default
+    return (
+        selected_home.is_absolute()
+        and Path(os.path.abspath(selected_home))  # noqa: PTH100 - do not follow links
+        == expected
     )
 
 
@@ -135,11 +260,14 @@ def _project_for_cwd(config: ShadowHarnessConfig, cwd: object) -> ShadowProject 
     if not isinstance(cwd, str) or not cwd:
         return None
     candidate = _resolved(cwd)
+    matches: list[tuple[Path, ShadowProject]] = []
     for project in config.projects:
         root = _resolved(project.root)
         if candidate == root or candidate.is_relative_to(root):
-            return project
-    return None
+            matches.append((root, project))
+    if not matches:
+        return None
+    return max(matches, key=lambda item: len(item[0].parts))[1]
 
 
 def _source_cache_path(store_root: Path, project: ShadowProject) -> Path:
@@ -164,23 +292,60 @@ def _refresh_source_cache(
             detail={"reason": "source_observed_at_absent"},
         )
     cache = {
+        "owner": "latent-compass-shadow",
         "source_declaration_digest": source_digest,
         "source_observed_at": observed_at,
     }
     destination = _source_cache_path(store_root, project)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
-    temporary.write_text(canonical_text(cache) + "\n", encoding="utf-8", newline="\n")
-    temporary.replace(destination)
-    return cache
+    content = (canonical_text(cache) + "\n").encode("utf-8")
+    if not os.path.lexists(destination.parent):
+        try:
+            write_new_file(store_root, destination, content, what="shadow source cache")
+        except ContractViolation as exc:
+            raise ShadowHarnessViolation(
+                "source cache changed during refresh",
+                detail={"reason": "source_cache_changed", "detail": str(exc)},
+            ) from exc
+        return {key: value for key, value in cache.items() if key != "owner"}
+    lease = lease_confined_file(
+        store_root,
+        destination,
+        max_bytes=MAX_HOOK_BYTES,
+        what="shadow source cache",
+        allow_absent=True,
+    )
+    try:
+        if lease.content is not None:
+            previous = decode_host_json(lease.content.decode("utf-8"))
+            if not isinstance(previous, dict) or previous.get("owner") != "latent-compass-shadow":
+                raise ShadowHarnessViolation(
+                    "source cache ownership is not established",
+                    detail={"reason": "source_cache_unowned"},
+                )
+        lease.replace(content)
+    except ContractViolation as exc:
+        raise ShadowHarnessViolation(
+            "source cache changed during refresh",
+            detail={"reason": "source_cache_changed", "detail": str(exc)},
+        ) from exc
+    finally:
+        lease.close()
+    return {key: value for key, value in cache.items() if key != "owner"}
 
 
 def _read_source_cache(store_root: Path, project: ShadowProject) -> dict[str, str] | None:
     path = _source_cache_path(store_root, project)
-    if not path.is_file():
+    try:
+        raw = read_confined_file(
+            store_root,
+            path,
+            max_bytes=MAX_HOOK_BYTES,
+            what="shadow source cache",
+        )
+    except FileNotFoundError:
         return None
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
+    payload = decode_host_json(raw.decode("utf-8"))
+    if not isinstance(payload, dict) or payload.get("owner") != "latent-compass-shadow":
         return None
     digest = payload.get("source_declaration_digest")
     observed_at = payload.get("source_observed_at")
@@ -287,11 +452,13 @@ def _persist(store_root: Path, project: ShadowProject, record: dict[str, object]
     session_seal = str(record["session_seal"]).removeprefix("sha256:")
     record_seal = str(record["record_seal"]).removeprefix("sha256:")
     directory = store_root / "events" / project.alias / session_seal[:32]
-    directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{record_seal}.json"
-    temporary = directory / f".{record_seal}.{os.getpid()}.tmp"
-    temporary.write_text(canonical_text(record) + "\n", encoding="utf-8", newline="\n")
-    temporary.replace(destination)
+    write_new_file(
+        store_root,
+        destination,
+        (canonical_text(record) + "\n").encode("utf-8"),
+        what="shadow event record",
+    )
 
 
 def process_hook_event(
@@ -393,13 +560,22 @@ def main(
                 "hook payload exceeded the shadow bound",
                 detail={"reason": "hook_payload_too_large", "max_bytes": MAX_HOOK_BYTES},
             )
-        payload = json.loads(raw)
+        payload = decode_host_json(raw)
         if not isinstance(payload, dict):
             raise ShadowHarnessViolation(
                 "hook payload must be a JSON object", detail={"reason": "not_an_object"}
             )
         config_path = store_root / DEFAULT_CONFIG_NAME
-        config = load_shadow_config(json.loads(config_path.read_text(encoding="utf-8")))
+        config = load_shadow_config(
+            decode_host_json(
+                read_confined_file(
+                    store_root,
+                    config_path,
+                    max_bytes=MAX_HOOK_BYTES,
+                    what="shadow host configuration",
+                ).decode("utf-8")
+            )
+        )
         process_hook_event(
             payload,
             host=args.host,

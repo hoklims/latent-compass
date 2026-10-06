@@ -106,6 +106,7 @@ from latent_compass.protocol import (
     load_preregistration,
     load_verdict,
 )
+from latent_compass.shadow_install import configure_host_parser, run_host_namespace
 
 __all__ = ["build_parser", "main"]
 
@@ -567,6 +568,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconcile_parser(sub)
     _add_shadow_parser(sub)
 
+    host = sub.add_parser("host", help="install, inspect or remove passive host integration")
+    configure_host_parser(host)
+
     benchmark = sub.add_parser("benchmark", help="the HOK-188 offline baseline benchmark")
     benchmark_sub = benchmark.add_subparsers(dest="benchmark_command", required=True)
 
@@ -808,6 +812,9 @@ def _dispatch(args: argparse.Namespace, stdout: TextIO) -> int:
 
     if command == "shadow":
         return _dispatch_shadow(args, stdout)
+
+    if command == "host":
+        return run_host_namespace(args, stdout=stdout)
 
     if command == "benchmark":
         return _dispatch_benchmark(args, stdout)
