@@ -1,0 +1,9 @@
+{
+  "same_base_and_head": true,
+  "epoch_digest_differs": true,
+  "clean_policy_digest": "sha256:22575e6533a7ea2b4d9b2b5c92ee58489b6f8145c8dc387d04763af100a35061",
+  "dirty_policy_digest": "sha256:9931a65751d2744de7f75e22987cef8e7ccd3f54eac0b7cbef230a00c9b54341",
+  "inventory_digest_for_that_same_file": [
+    "sha256:2d3f09e6631ebde5a1e5307092e1adc1fd517f6032de43b64ff959701daa3e53"
+  ]
+}

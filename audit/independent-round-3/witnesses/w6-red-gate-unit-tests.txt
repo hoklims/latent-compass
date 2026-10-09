@@ -1,0 +1,10 @@
+$ <SCRATCH>/.venv/bin/python3 -m pytest -o addopts= -q tests/test_independent_audit.py
+exit=1
+full_output_sha256=sha256:69e3b5d0d91e826077b6c09ed54230e46bd770f94dea154959ddfae8ac1ad00f
+--- trimmed ---
+            (("claims", 0, "witness", "red_exit"), 0),
+            (("claims", 0, "witness", "green_exit"), 1),
+>       with pytest.raises(AuditError):
+E       Failed: DID NOT RAISE <class '<run_path>.AuditError'>
+FAILED tests/test_independent_audit.py::test_gate_fails_closed[path2-value2]
+1 failed, 8 passed in 0.04s

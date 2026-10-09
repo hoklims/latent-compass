@@ -1,0 +1,5 @@
+$ <SCRATCH>/.venv/bin/python3 tools/independent_audit.py gate --epoch <SCRATCH>/scratch/w5-tampered-epoch.json --receipt <SCRATCH>/scratch/w5-tampered-receipt.json
+exit=1
+full_output_sha256=sha256:6674aac858ee733a8cb9ba6c6cd7cf542012c6b4d4a07c207218b43d120c0315
+--- trimmed ---
+{"decision": "BLOCK", "error": "epoch_digest does not match the canonical epoch contents"}

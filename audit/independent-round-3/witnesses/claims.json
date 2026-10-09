@@ -1,0 +1,105 @@
+{
+  "base_sha": "f652690f29420b5d4ae4f37b22caa5e98df102a2",
+  "head_sha": "45078dcc10d228326f410df76f7af15ff2133e0b",
+  "epoch_digest": "sha256:8d53dfe9e297ea4b57bc5dd528050d21d8b1f86490a996936d5dd1d86605994e",
+  "claims": [
+    {
+      "claim": "the gate rejects an epoch whose epoch_digest no longer matches its own contents",
+      "invocation_paths": [
+        "python tools/independent_audit.py gate"
+      ],
+      "witness": {
+        "mutation": "set epoch.head_sha to ffff... without recomputing epoch_digest",
+        "command": "python tools/independent_audit.py gate --epoch <epoch> --receipt <receipt>",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:6674aac858ee733a8cb9ba6c6cd7cf542012c6b4d4a07c207218b43d120c0315",
+        "green_output_digest": "sha256:92ba719188b0815ee3cda3cf8afd3104bb916d5c7b6d7dcbb65a7ad3296692bf"
+      }
+    },
+    {
+      "claim": "tests/test_independent_audit.py is load-bearing: removing the unresolved_blockers check from the gate fails the suite",
+      "invocation_paths": [
+        "uv run --frozen pytest (Verify workflow, both matrix OSes)"
+      ],
+      "witness": {
+        "mutation": "delete the unresolved_blockers check from tools/independent_audit.py::gate",
+        "command": "python -m pytest -o addopts= -q tests/test_independent_audit.py",
+        "red_exit": 1,
+        "green_exit": 0,
+        "red_output_digest": "sha256:69e3b5d0d91e826077b6c09ed54230e46bd770f94dea154959ddfae8ac1ad00f",
+        "green_output_digest": "sha256:d69b6f69e04bc0a56bc320b823fe9ffa437ecb7e0a2d05a2ace978766d34d550"
+      }
+    },
+    {
+      "claim": "the source distribution really is self-testing: dropping /tools from the sdist include list makes the extracted-sdist test suite fail",
+      "invocation_paths": [
+        "Verify workflow step 'Test extracted source distribution'",
+        "Build attested release workflow step 'Test extracted source distribution'"
+      ],
+      "witness": {
+        "mutation": "remove \"/tools\" from [tool.hatch.build.targets.sdist].include",
+        "command": "uv build --no-sources && python tools/verify_sdist.py dist/latent_compass-*.tar.gz",
+        "red_exit": 2,
+        "green_exit": 0,
+        "red_output_digest": "sha256:2fec4dd4b5267296f30a65d5d71ecf67742c3759d7d055ffc6f32e02cab6de36",
+        "green_output_digest": "sha256:5d5e4afdb4c912d10320a403e7039caecbd0a518965cfe1a5b51cecf1703a742"
+      }
+    }
+  ],
+  "unresolved_blockers": [
+    {
+      "id": "B1",
+      "blocker": "gate ALLOWs an epoch that names no real Git object; ALLOW is not bound to the candidate",
+      "witness": {
+        "command": "python tools/independent_audit.py gate --epoch w1-forged-epoch.json --receipt w1-forged-receipt.json",
+        "expected_exit": "non-zero (BLOCK)",
+        "observed_exit": 0,
+        "output_digest": "sha256:d14363506ded1597ab5b64f2f9cd6bd074aa5adacd57e7a3be8362c3936c6346"
+      }
+    },
+    {
+      "id": "B2",
+      "blocker": "gate accepts `\"red_exit\": true` / `\"green_exit\": false`; bool is a subclass of int in Python, so a receipt with no numeric exit codes passes",
+      "witness": {
+        "command": "python tools/independent_audit.py gate --epoch epoch.json --receipt w2-boolean-receipt.json",
+        "expected_exit": "non-zero (BLOCK)",
+        "observed_exit": 0,
+        "output_digest": "sha256:92ba719188b0815ee3cda3cf8afd3104bb916d5c7b6d7dcbb65a7ad3296692bf"
+      }
+    },
+    {
+      "id": "B3",
+      "blocker": "gate ALLOWs an epoch whose changed-file inventory silently omits tools/independent_audit.py; the documented 'complete changed file inventory' check does not exist",
+      "witness": {
+        "command": "python tools/independent_audit.py gate --epoch w3-truncated-epoch.json --receipt w3-truncated-receipt.json",
+        "expected_exit": "non-zero (BLOCK)",
+        "observed_exit": 0,
+        "output_digest": "sha256:8d8976e7736cb15377d53f3d012406d704fb094af2237296b6006a5e70a60842"
+      }
+    },
+    {
+      "id": "B4",
+      "blocker": "epoch is not a pure function of (base, head): _policy_digest reads the three policy files from the working tree while files[] digests come from head_sha, so an uncommitted edit yields a different epoch_digest and an internally inconsistent epoch",
+      "witness": {
+        "command": "python tools/independent_audit.py epoch --repository . --base <base> --head <head>, run with and without an uncommitted edit to docs/independent-audit.md",
+        "expected": "identical epoch_digest for identical (base, head)",
+        "observed": {
+          "epoch_digest_differs": true,
+          "same_base_and_head": true
+        },
+        "output_digest": "sha256:66422655b4df1bf9bc535acd3520d59e7a9f2a80f83555835df8831b65cee8fc"
+      }
+    },
+    {
+      "id": "B5",
+      "blocker": "no workflow invokes tools/independent_audit.py; neither Verify nor the release workflow requires an audit receipt, so the gate constrains nothing automatically",
+      "witness": {
+        "command": "grep -rn independent_audit .github",
+        "expected_exit": "0 if any workflow referenced the gate",
+        "observed_exit": 1,
+        "output_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ]
+}

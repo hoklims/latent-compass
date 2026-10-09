@@ -1,0 +1,10 @@
+$ uv build --no-sources python tools/verify_sdist.py dist/latent_compass-*.tar.gz
+exit=2
+full_output_sha256=sha256:2fec4dd4b5267296f30a65d5d71ecf67742c3759d7d055ffc6f32e02cab6de36
+--- trimmed ---
+==================================== ERRORS ====================================
+_______________ ERROR collecting tests/test_independent_audit.py _______________
+E   FileNotFoundError: [Errno 2] No such file or directory: '<TMP>'
+ERROR tests/test_independent_audit.py - FileNotFoundError: [Errno 2] No such ...
+!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+1 error in 1.75s

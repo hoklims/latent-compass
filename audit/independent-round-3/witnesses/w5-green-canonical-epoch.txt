@@ -1,0 +1,5 @@
+$ <SCRATCH>/.venv/bin/python3 tools/independent_audit.py gate --epoch <SCRATCH>/epoch.json --receipt <SCRATCH>/scratch/w5-good-receipt.json
+exit=0
+full_output_sha256=sha256:92ba719188b0815ee3cda3cf8afd3104bb916d5c7b6d7dcbb65a7ad3296692bf
+--- trimmed ---
+  "decision": "ALLOW",
